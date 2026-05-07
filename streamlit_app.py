@@ -389,19 +389,25 @@ LEAGUE_RP_IP_SHARE = 0.43
 def _regressed_win_pct(rs_per_g: float, ra_per_g: float, games_played: int) -> tuple[float, float, float]:
     """
     Regress team RS/RA toward league average based on sample size.
-    This is the core projection when external data is unavailable.
     
-    At 0 GP:   100% league average (no info)
-    At 81 GP:  50% actual / 50% league average
-    At 162 GP: 100% actual (full season)
-    
+    Uses a strong prior — early season performance (especially with injuries)
+    is heavily noisy. Prior strength = 300 games means:
+      At  36 GP: ~11% actual data, ~89% league average
+      At  81 GP: ~21% actual data, ~79% league average  
+      At 162 GP: ~35% actual data, ~65% league average
+
+    This is intentionally conservative — we trust the mean heavily until
+    a full season of data accumulates. FanGraphs DC (when available) provides
+    the roster-quality signal; this fallback just limits overreaction to
+    small samples.
+
     Returns (regressed_rs_per_g, regressed_ra_per_g, projected_win_pct)
     """
     exp          = PYTHAG_EXPONENT
-    prior_games  = max(162 - games_played, 0)
-    total        = games_played + prior_games
-    reg_rs       = (rs_per_g * games_played + LEAGUE_AVG_RPG * prior_games) / total
-    reg_ra       = (ra_per_g * games_played + LEAGUE_AVG_RPG * prior_games) / total
+    PRIOR        = 200   # balanced prior — resist noise but allow differentiation
+    total        = games_played + PRIOR
+    reg_rs       = (rs_per_g * games_played + LEAGUE_AVG_RPG * PRIOR) / total
+    reg_ra       = (ra_per_g * games_played + LEAGUE_AVG_RPG * PRIOR) / total
     reg_rs       = float(np.clip(reg_rs, 2.5, 7.5))
     reg_ra       = float(np.clip(reg_ra, 2.5, 7.5))
     wp           = reg_rs ** exp / (reg_rs ** exp + reg_ra ** exp)
@@ -624,15 +630,18 @@ def fetch_team_projections(standings_df: pd.DataFrame | None = None) -> tuple[pd
             try:
                 bat_df = _bat_fut.result(timeout=25)
                 pit_df = _pit_fut.result(timeout=25)
+                print(f"FG DC: bat={len(bat_df) if bat_df is not None else 'None'}, pit={len(pit_df) if pit_df is not None else 'None'}")
                 if bat_df is not None and pit_df is not None and len(bat_df) > 100:
                     proj_df, player_detail = _build_fg_dc_projections(bat_df, pit_df)
-                    if not proj_df.empty and proj_df["proj_win_pct"].std() > 0.01:
+                    std = proj_df["proj_win_pct"].std() if not proj_df.empty else 0
+                    print(f"FG DC build: rows={len(proj_df)}, std={std:.4f}")
+                    if not proj_df.empty and std > 0.01:
                         proj_df["proj_source"] = "FanGraphs DC"
                         return proj_df, player_detail
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as _fge:
+                print(f"FG DC exception: {_fge}")
+    except Exception as _fge2:
+        print(f"FG DC outer exception: {_fge2}")
 
     # ── Tier 2: Regression-to-mean from standings ────────────────────────────
     # This always works — uses data already fetched from MLB Stats API
@@ -875,23 +884,36 @@ def build_master(standings_df, statcast_df, player_detail=None) -> pd.DataFrame:
     df["proj_win_pct"]   = df["proj_win_pct"].fillna(df["win_pct"]).fillna(0.500)
     df["pythag_win_pct"] = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
 
-    # Player-quality projection (FanGraphs DC or Marcel) gets high early-season weight.
-    # Current season performance (Pythagorean) gets more weight as season progresses.
-    # This ensures roster quality — not early record noise — drives projections in May.
+    # Blending strategy depends on projection source:
     #
-    # Games played:  0-40   41-80   81-120  121-162
-    # Proj weight:   70%    60%     50%     40%
-    # Pythag weight: 30%    40%     50%     60%
-    gp = df["games_played"].clip(0, 162)
-    proj_weight   = (0.70 - (gp / 162.0) * 0.30).clip(0.40, 0.70)
-    pythag_weight = 1.0 - proj_weight
+    # FanGraphs DC: player-level projections already account for roster quality
+    #   and injuries. Blend 70% FG DC + 30% Pythagorean early, shifting to
+    #   50/50 by late season.
+    #
+    # Regression-to-mean: already incorporates current RS/RA regressed toward
+    #   league average. DO NOT blend with Pythagorean again — that double-counts
+    #   current performance. Use regression output directly.
+    #
+    gp            = df["games_played"].clip(0, 162)
+    proj_source   = df["proj_source"].iloc[0] if "proj_source" in df.columns else "Unknown"
 
-    df["blended_win_pct"] = (
-        df["proj_win_pct"]   * proj_weight +
-        df["pythag_win_pct"] * pythag_weight
-    ).clip(0.20, 0.80)
-    df["proj_weight_used"]   = proj_weight.round(2)
-    df["pythag_weight_used"] = pythag_weight.round(2)
+    if proj_source == "FanGraphs DC":
+        # FG DC is roster-quality based — blend with current performance
+        proj_weight   = (0.70 - (gp / 162.0) * 0.30).clip(0.40, 0.70)
+        pythag_weight = 1.0 - proj_weight
+        df["blended_win_pct"] = (
+            df["proj_win_pct"]   * proj_weight +
+            df["pythag_win_pct"] * pythag_weight
+        ).clip(0.20, 0.80)
+    else:
+        # Regression-to-mean already blends current performance with league avg
+        # Use it directly — no further blending needed
+        proj_weight   = pd.Series(1.0, index=df.index)
+        pythag_weight = pd.Series(0.0, index=df.index)
+        df["blended_win_pct"] = df["proj_win_pct"].clip(0.20, 0.80)
+
+    df["proj_weight_used"]   = proj_weight.round(2) if hasattr(proj_weight, 'round') else proj_weight
+    df["pythag_weight_used"] = pythag_weight.round(2) if hasattr(pythag_weight, 'round') else pythag_weight
     df["games_remaining"]    = (162 - df["games_played"]).clip(0, 162)
     # Attach player detail as JSON string for team detail tab
     if player_detail:
