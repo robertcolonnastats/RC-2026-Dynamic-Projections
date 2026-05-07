@@ -16,7 +16,6 @@ from datetime import date, timedelta
 from zoneinfo import ZoneInfo
 warnings.filterwarnings("ignore")
 
-# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="MLB 2026 Projections",
     page_icon="⚾",
@@ -31,9 +30,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CONSTANTS
-# ═══════════════════════════════════════════════════════════════════════════════
 SEASON_YEAR              = 2026
 OPENING_DAY              = "2026-03-27"
 WORLD_SERIES_END_APPROX  = "2026-11-01"
@@ -61,7 +57,6 @@ CACHE_DIR                = "data/cache"
 CACHE_FILE               = "data/cache/latest.json"
 MLB_API_BASE             = "https://statsapi.mlb.com/api/v1"
 
-# Cloudscraper session for bypassing FanGraphs Cloudflare
 try:
     import cloudscraper
     _SCRAPER = cloudscraper.create_scraper()
@@ -72,1273 +67,596 @@ except ImportError:
         return requests.Session()
 
 TEAM_INFO = {
-    108: ("Los Angeles Angels",     "LAA",  "AL West",     "AL"),
-    109: ("Arizona Diamondbacks",   "ARI",  "NL West",     "NL"),
-    110: ("Baltimore Orioles",      "BAL",  "AL East",     "AL"),
-    111: ("Boston Red Sox",         "BOS",  "AL East",     "AL"),
-    112: ("Chicago Cubs",           "CHC",  "NL Central",  "NL"),
-    113: ("Cincinnati Reds",        "CIN",  "NL Central",  "NL"),
-    114: ("Cleveland Guardians",    "CLE",  "AL Central",  "AL"),
-    115: ("Colorado Rockies",       "COL",  "NL West",     "NL"),
-    116: ("Detroit Tigers",         "DET",  "AL Central",  "AL"),
-    117: ("Houston Astros",         "HOU",  "AL West",     "AL"),
-    118: ("Kansas City Royals",     "KC",   "AL Central",  "AL"),
-    119: ("Los Angeles Dodgers",    "LAD",  "NL West",     "NL"),
-    120: ("Washington Nationals",   "WSH",  "NL East",     "NL"),
-    121: ("New York Mets",          "NYM",  "NL East",     "NL"),
-    133: ("Oakland Athletics",      "OAK",  "AL West",     "AL"),
-    134: ("Pittsburgh Pirates",     "PIT",  "NL Central",  "NL"),
-    135: ("San Diego Padres",       "SD",   "NL West",     "NL"),
-    136: ("Seattle Mariners",       "SEA",  "AL West",     "AL"),
-    137: ("San Francisco Giants",   "SF",   "NL West",     "NL"),
-    138: ("St. Louis Cardinals",    "STL",  "NL Central",  "NL"),
-    139: ("Tampa Bay Rays",         "TB",   "AL East",     "AL"),
-    140: ("Texas Rangers",          "TEX",  "AL West",     "AL"),
-    141: ("Toronto Blue Jays",      "TOR",  "AL East",     "AL"),
-    142: ("Minnesota Twins",        "MIN",  "AL Central",  "AL"),
-    143: ("Philadelphia Phillies",  "PHI",  "NL East",     "NL"),
-    144: ("Atlanta Braves",         "ATL",  "NL East",     "NL"),
-    145: ("Chicago White Sox",      "CWS",  "AL Central",  "AL"),
-    146: ("Miami Marlins",          "MIA",  "NL East",     "NL"),
-    147: ("New York Yankees",       "NYY",  "AL East",     "AL"),
-    158: ("Milwaukee Brewers",      "MIL",  "NL Central",  "NL"),
+    108: ("Los Angeles Angels", "LAA", "AL West", "AL"),
+    109: ("Arizona Diamondbacks", "ARI", "NL West", "NL"),
+    110: ("Baltimore Orioles", "BAL", "AL East", "AL"),
+    111: ("Boston Red Sox", "BOS", "AL East", "AL"),
+    112: ("Chicago Cubs", "CHC", "NL Central", "NL"),
+    113: ("Cincinnati Reds", "CIN", "NL Central", "NL"),
+    114: ("Cleveland Guardians", "CLE", "AL Central", "AL"),
+    115: ("Colorado Rockies", "COL", "NL West", "NL"),
+    116: ("Detroit Tigers", "DET", "AL Central", "AL"),
+    117: ("Houston Astros", "HOU", "AL West", "AL"),
+    118: ("Kansas City Royals", "KC", "AL Central", "AL"),
+    119: ("Los Angeles Dodgers", "LAD", "NL West", "NL"),
+    120: ("Washington Nationals", "WSH", "NL East", "NL"),
+    121: ("New York Mets", "NYM", "NL East", "NL"),
+    133: ("Oakland Athletics", "OAK", "AL West", "AL"),
+    134: ("Pittsburgh Pirates", "PIT", "NL Central", "NL"),
+    135: ("San Diego Padres", "SD", "NL West", "NL"),
+    136: ("Seattle Mariners", "SEA", "AL West", "AL"),
+    137: ("San Francisco Giants", "SF", "NL West", "NL"),
+    138: ("St. Louis Cardinals", "STL", "NL Central", "NL"),
+    139: ("Tampa Bay Rays", "TB", "AL East", "AL"),
+    140: ("Texas Rangers", "TEX", "AL West", "AL"),
+    141: ("Toronto Blue Jays", "TOR", "AL East", "AL"),
+    142: ("Minnesota Twins", "MIN", "AL Central", "AL"),
+    143: ("Philadelphia Phillies", "PHI", "NL East", "NL"),
+    144: ("Atlanta Braves", "ATL", "NL East", "NL"),
+    145: ("Chicago White Sox", "CWS", "AL Central", "AL"),
+    146: ("Miami Marlins", "MIA", "NL East", "NL"),
+    147: ("New York Yankees", "NYY", "AL East", "AL"),
+    158: ("Milwaukee Brewers", "MIL", "NL Central", "NL"),
 }
 
-TIER_LABELS = {
-    "hard_seller": "Hard Seller", "soft_seller": "Soft Seller",
-    "neutral": "Neutral", "soft_buyer": "Soft Buyer", "hard_buyer": "Hard Buyer",
-}
-TIER_COLORS = {
-    "hard_seller": "#d62728", "soft_seller": "#ff7f0e",
-    "neutral": "#7f7f7f", "soft_buyer": "#2ca02c", "hard_buyer": "#1f77b4",
-}
-TIER_EMOJI = {
-    "hard_seller": "🔴", "soft_seller": "🟠",
-    "neutral": "⚪", "soft_buyer": "🟢", "hard_buyer": "🔵",
-}
+TIER_LABELS = {"hard_seller": "Hard Seller", "soft_seller": "Soft Seller", "neutral": "Neutral", "soft_buyer": "Soft Buyer", "hard_buyer": "Hard Buyer"}
+TIER_COLORS = {"hard_seller": "#d62728", "soft_seller": "#ff7f0e", "neutral": "#7f7f7f", "soft_buyer": "#2ca02c", "hard_buyer": "#1f77b4"}
+TIER_EMOJI = {"hard_seller": "🔴", "soft_seller": "🟠", "neutral": "⚪", "soft_buyer": "🟢", "hard_buyer": "🔵"}
 EST = ZoneInfo("America/New_York")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CACHE MANAGER
-# ═══════════════════════════════════════════════════════════════════════════════
-def _ensure_cache_dir():
-    os.makedirs(CACHE_DIR, exist_ok=True)
-
+def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
 def get_season_state() -> str:
-    today     = date.today()
-    opening   = date.fromisoformat(OPENING_DAY)
-    ws_end    = date.fromisoformat(WORLD_SERIES_END_APPROX)
-    deadline  = date.fromisoformat(TRADE_DEADLINE)
-    ramp_start = date.fromisoformat(DEADLINE_RAMP_START)
-    if today < opening or today > ws_end:
-        return "offseason"
-    elif today > deadline:
-        return "post_deadline"
-    elif today >= ramp_start:
-        return "deadline_ramp"
-    else:
-        return "pre_deadline"
+    today = date.today()
+    if today < date.fromisoformat(OPENING_DAY) or today > date.fromisoformat(WORLD_SERIES_END_APPROX): return "offseason"
+    if today > date.fromisoformat(TRADE_DEADLINE): return "post_deadline"
+    if today >= date.fromisoformat(DEADLINE_RAMP_START): return "deadline_ramp"
+    return "pre_deadline"
 
 def get_deadline_ramp_factor() -> float:
-    state      = get_season_state()
-    today      = date.today()
-    ramp_start = date.fromisoformat(DEADLINE_RAMP_START)
-    deadline   = date.fromisoformat(TRADE_DEADLINE)
-    if state in ("offseason", "pre_deadline"):
-        return 0.0
-    if state == "post_deadline":
-        return 1.0
-    total   = (deadline - ramp_start).days
-    elapsed = (today - ramp_start).days
-    return round(min(max(elapsed / max(total, 1), 0.0), 1.0), 4)
+    state = get_season_state()
+    today = date.today()
+    if state in ("offseason", "pre_deadline"): return 0.0
+    if state == "post_deadline": return 1.0
+    total = (date.fromisoformat(TRADE_DEADLINE) - date.fromisoformat(DEADLINE_RAMP_START)).days
+    return round(min(max((today - date.fromisoformat(DEADLINE_RAMP_START)).days / max(total, 1), 0.0), 1.0), 4)
 
 def get_last_updated() -> str:
     _ensure_cache_dir()
-    if not os.path.exists(CACHE_FILE):
-        return "Never"
+    if not os.path.exists(CACHE_FILE): return "Never"
     from datetime import datetime
-    mtime = os.path.getmtime(CACHE_FILE)
-    dt = datetime.fromtimestamp(mtime, tz=EST)
-    return dt.strftime("%B %d, %Y at %I:%M %p EST")
+    return datetime.fromtimestamp(os.path.getmtime(CACHE_FILE), tz=EST).strftime("%B %d, %Y at %I:%M %p EST")
 
 def is_cache_valid() -> bool:
     _ensure_cache_dir()
-    if not os.path.exists(CACHE_FILE):
-        return False
+    if not os.path.exists(CACHE_FILE): return False
     from datetime import datetime
-    mtime      = os.path.getmtime(CACHE_FILE)
-    now_est    = datetime.now(EST)
-    midnight   = now_est.replace(hour=0, minute=0, second=0, microsecond=0)
-    return mtime >= midnight.timestamp()
+    now = datetime.now(EST).replace(hour=0, minute=0, second=0, microsecond=0)
+    return os.path.getmtime(CACHE_FILE) >= now.timestamp()
 
 def load_cache() -> dict | None:
-    if not is_cache_valid():
-        return None
+    if not is_cache_valid(): return None
     try:
-        with open(CACHE_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return None
+        with open(CACHE_FILE, "r") as f: return json.load(f)
+    except Exception: return None
 
 def save_cache(payload: dict):
     _ensure_cache_dir()
     try:
-        with open(CACHE_FILE, "w") as f:
-            json.dump(payload, f, default=str)
-    except Exception as e:
-        print(f"Cache write failed: {e}")
+        with open(CACHE_FILE, "w") as f: json.dump(payload, f, default=str)
+    except Exception as e: print(f"Cache write failed: {e}")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# DATA FETCHING
-# ═══════════════════════════════════════════════════════════════════════════════
 def fetch_standings() -> pd.DataFrame:
-    url = f"{MLB_API_BASE}/standings"
-    params = {
-        "leagueId": "103,104",
-        "season": SEASON_YEAR,
-        "standingsTypes": "regularSeason",
-        "hydrate": "team,record",
-    }
-    resp = requests.get(url, params=params, timeout=15)
+    resp = requests.get(f"{MLB_API_BASE}/standings", params={"leagueId": "103,104", "season": SEASON_YEAR, "standingsTypes": "regularSeason", "hydrate": "team,record"}, timeout=15)
     resp.raise_for_status()
-    data = resp.json()
     rows = []
-    for record in data.get("records", []):
-        for tr in record.get("teamRecords", []):
-            team_id = tr["team"]["id"]
-            if team_id not in TEAM_INFO:
-                continue
-            name, abbr, div, league = TEAM_INFO[team_id]
-            wins   = tr.get("wins", 0)
-            losses = tr.get("losses", 0)
-            gp     = wins + losses
-            wp     = wins / gp if gp > 0 else 0.0
-            gb_raw = tr.get("gamesBack", "0")
-            try:    gb = float(gb_raw)
-            except: gb = 0.0
-            rs = tr.get("runsScored", 0) or 0
-            ra = tr.get("runsAllowed", 0) or 0
-            rows.append({
-                "team_id": team_id, "name": name, "abbr": abbr,
-                "division": div, "league": league,
-                "wins": wins, "losses": losses, "games_played": gp,
-                "win_pct": round(wp, 4), "div_games_back": gb,
-                "wc_games_back": 0.0,
-                "runs_scored": rs, "runs_allowed": ra, "run_differential": rs - ra,
-            })
-
+    for tr in [t for rec in resp.json().get("records", []) for t in rec.get("teamRecords", [])]:
+        tid = tr["team"]["id"]
+        if tid not in TEAM_INFO: continue
+        name, abbr, div, league = TEAM_INFO[tid]
+        w, l = tr.get("wins", 0), tr.get("losses", 0)
+        gp = w + l
+        try: gb = float(tr.get("gamesBack", "0"))
+        except: gb = 0.0
+        rows.append({"team_id": tid, "name": name, "abbr": abbr, "division": div, "league": league, "wins": w, "losses": l, "games_played": gp, "win_pct": round(w/gp if gp>0 else 0.0, 4), "div_games_back": gb, "wc_games_back": 0.0, "runs_scored": tr.get("runsScored", 0) or 0, "runs_allowed": tr.get("runsAllowed", 0) or 0, "run_differential": (tr.get("runsScored", 0) or 0) - (tr.get("runsAllowed", 0) or 0)})
     df = pd.DataFrame(rows)
-    if df.empty:
-        raise RuntimeError("Standings empty — API may have changed.")
-    df = _compute_wc_games_back(df)
+    if df.empty: raise RuntimeError("Standings empty")
+    for lg in ["AL", "NL"]:
+        lgdf = df[df["league"]==lg].copy()
+        lgdf["div_leader"] = lgdf.groupby("division")["win_pct"].transform("idxmax") == lgdf.index
+        wc_pool = lgdf[~lgdf["div_leader"]].sort_values("win_pct", ascending=False)
+        cutoff = wc_pool.iloc[2]["win_pct"] if len(wc_pool)>=3 else (wc_pool.iloc[-1]["win_pct"] if len(wc_pool)>0 else 0.5)
+        def wc_gb(r): return -5.0 if r["div_leader"] else round((cutoff - r["win_pct"]) * max(r["games_played"], 1), 1)
+        df.loc[df["league"]==lg, "wc_games_back"] = lgdf.apply(wc_gb, axis=1)
     return df.sort_values(["league", "division", "wins"], ascending=[True, True, False])
-
-def _compute_wc_games_back(df: pd.DataFrame) -> pd.DataFrame:
-    result_frames = []
-    for league in ["AL", "NL"]:
-        lg = df[df["league"] == league].copy()
-        div_leaders = lg.groupby("division")["win_pct"].idxmax()
-        lg["div_leader"] = False
-        lg.loc[div_leaders, "div_leader"] = True
-        wc_pool = lg[~lg["div_leader"]].sort_values("win_pct", ascending=False)
-        wc_cutoff = wc_pool.iloc[2]["win_pct"] if len(wc_pool) >= 3 else (wc_pool.iloc[-1]["win_pct"] if len(wc_pool) > 0 else 0.5)
-        
-        def calc_wc_gb(row):
-            if row["div_leader"]:
-                return -5.0
-            gp  = max(row["games_played"], 1)
-            gap = (wc_cutoff - row["win_pct"]) * gp
-            return round(gap, 1)
-
-        lg["wc_games_back"] = lg.apply(calc_wc_gb, axis=1)
-        result_frames.append(lg)
-    return pd.concat(result_frames, ignore_index=True)
 
 def fetch_schedule() -> pd.DataFrame:
     today = date.today()
-    reg_season_end = date(SEASON_YEAR, 9, 30)
-    end_date = min(date.fromisoformat(WORLD_SERIES_END_APPROX), reg_season_end)
-    if today > end_date:
-        return pd.DataFrame(columns=["game_id", "game_date", "home_team_id", "away_team_id", "status"])
-    
-    all_games = []
-    chunk_start = today
-    while chunk_start <= end_date:
-        chunk_end = date(chunk_start.year, chunk_start.month + 1, 1) - timedelta(days=1)
-        chunk_end = min(chunk_end, end_date)
-
+    end = min(date.fromisoformat(WORLD_SERIES_END_APPROX), date(SEASON_YEAR, 9, 30))
+    if today > end: return pd.DataFrame(columns=["game_id", "game_date", "home_team_id", "away_team_id", "status"])
+    games, chunk = [], today
+    while chunk <= end:
+        chunk_end = min(date(chunk.year, chunk.month + 1, 1) - timedelta(days=1), end)
         try:
-            resp = requests.get(f"{MLB_API_BASE}/schedule", params={
-                "sportId": 1, "startDate": chunk_start.isoformat(),
-                "endDate": chunk_end.isoformat(), "gameType": "R",
-                "hydrate": "team", "season": SEASON_YEAR,
-            }, timeout=8)
-            resp.raise_for_status()
-            for date_entry in resp.json().get("dates", []):
-                for game in date_entry.get("games", []):
-                    status = ""
-                    status_obj = game.get("status")
-                    if isinstance(status_obj, dict):
-                        status = status_obj.get("abstractGameState", "") or ""
-                    home_id = game.get("teams", {}).get("home", {}).get("team", {}).get("id")
-                    away_id = game.get("teams", {}).get("away", {}).get("team", {}).get("id")
-                    if home_id and away_id:
-                        all_games.append({
-                            "game_id": game.get("gamePk"),
-                            "game_date": date_entry.get("date"),
-                            "home_team_id": int(home_id),
-                            "away_team_id": int(away_id),
-                            "status": status,
-                        })
-        except Exception as e:
-            print(f"Schedule chunk failed {chunk_start}: {e}")
-
-        chunk_start = chunk_end + timedelta(days=1)
-        if not all_games and (date.today() - chunk_start).days > 30:
-            break
-
-    if not all_games:
-        return pd.DataFrame(columns=["game_id", "game_date", "home_team_id", "away_team_id", "status"])
-    df = pd.DataFrame(all_games)
+            r = requests.get(f"{MLB_API_BASE}/schedule", params={"sportId": 1, "startDate": chunk.isoformat(), "endDate": chunk_end.isoformat(), "gameType": "R", "hydrate": "team", "season": SEASON_YEAR}, timeout=8)
+            r.raise_for_status()
+            for d in r.json().get("dates", []):
+                for g in d.get("games", []):
+                    h, a = g.get("teams",{}).get("home",{}).get("team",{}).get("id"), g.get("teams",{}).get("away",{}).get("team",{}).get("id")
+                    if h and a: games.append({"game_id": g.get("gamePk"), "game_date": d.get("date"), "home_team_id": int(h), "away_team_id": int(a), "status": g.get("status",{}).get("abstractGameState","") or ""})
+        except Exception as e: print(f"Schedule chunk failed {chunk}: {e}")
+        chunk = chunk_end + timedelta(days=1)
+        if not games and (date.today() - chunk).days > 30: break
+    if not games: return pd.DataFrame(columns=["game_id", "game_date", "home_team_id", "away_team_id", "status"])
+    df = pd.DataFrame(games)
     df["game_date"] = pd.to_datetime(df["game_date"])
-    if "status" not in df.columns:
-        df["status"] = ""
     return df.drop_duplicates(subset="game_id").sort_values("game_date").reset_index(drop=True)
 
-def get_remaining_games(schedule_df: pd.DataFrame) -> pd.DataFrame:
-    if schedule_df is None or schedule_df.empty:
-        return pd.DataFrame(columns=["game_id", "game_date", "home_team_id", "away_team_id", "status"])
-    if "status" not in schedule_df.columns:
-        schedule_df = schedule_df.copy()
-        schedule_df["status"] = ""
-    today  = pd.Timestamp(date.today())
-    future = schedule_df[schedule_df["game_date"] >= today].copy()
-    completed = {"Final", "Game Over", "Completed Early", "Postponed"}
-    future = future[~future["status"].isin(completed)]
-    return future.reset_index(drop=True)
+def get_remaining_games(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty: return df
+    future = df[pd.to_datetime(df["game_date"]) >= pd.Timestamp(date.today())].copy()
+    return future[~future["status"].isin({"Final", "Game Over", "Completed Early", "Postponed"})].reset_index(drop=True)
 
-def compute_remaining_opponents(schedule_df: pd.DataFrame) -> dict[int, list[int]]:
-    remaining = get_remaining_games(schedule_df)
-    if remaining.empty:
-        return {}
-    home = remaining["home_team_id"].astype(int).values
-    away = remaining["away_team_id"].astype(int).values
-    opponents: dict[int, list[int]] = {}
-    for h, a in zip(home, away):
-        opponents.setdefault(h, []).append(a)
-        opponents.setdefault(a, []).append(h)
-    return opponents
+def compute_remaining_opponents(df: pd.DataFrame) -> dict[int, list[int]]:
+    rem = get_remaining_games(df)
+    if rem.empty: return {}
+    opps = {}
+    for h, a in zip(rem["home_team_id"].astype(int).values, rem["away_team_id"].astype(int).values):
+        opps.setdefault(h, []).append(a); opps.setdefault(a, []).append(h)
+    return opps
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PROJECTION ENGINE
-# ═══════════════════════════════════════════════════════════════════════════════
-FG_TEAM_MAP = {
-    "Angels": 108, "Diamondbacks": 109, "Orioles": 110, "Red Sox": 111,
-    "Cubs": 112, "Reds": 113, "Guardians": 114, "Rockies": 115,
-    "Tigers": 116, "Astros": 117, "Royals": 118, "Dodgers": 119,
-    "Nationals": 120, "Mets": 121, "Athletics": 133, "Pirates": 134,
-    "Padres": 135, "Mariners": 136, "Giants": 137, "Cardinals": 138,
-    "Rays": 139, "Rangers": 140, "Blue Jays": 141, "Twins": 142,
-    "Phillies": 143, "Braves": 144, "White Sox": 145, "Marlins": 146,
-    "Yankees": 147, "Brewers": 158,
-}
-FG_ABBR_MAP = {
-    "LAA": 108, "ARI": 109, "BAL": 110, "BOS": 111, "CHC": 112,
-    "CIN": 113, "CLE": 114, "COL": 115, "DET": 116, "HOU": 117,
-    "KCR": 118, "LAD": 119, "WSN": 120, "NYM": 121, "OAK": 133,
-    "PIT": 134, "SDP": 135, "SEA": 136, "SFG": 137, "STL": 138,
-    "TBR": 139, "TEX": 140, "TOR": 141, "MIN": 142, "PHI": 143,
-    "ATL": 144, "CHW": 145, "MIA": 146, "NYY": 147, "MIL": 158,
-    "KC": 118, "SD": 135, "SF": 137, "TB": 139, "WSH": 120, "CWS": 145,
-}
+LEAGUE_AVG_RPG, LEAGUE_AVG_FIP, LEAGUE_AVG_WRC = 4.50, 4.10, 100.0
+LEAGUE_SP_IP_SHARE, LEAGUE_RP_IP_SHARE = 0.57, 0.43
+FG_TEAM_MAP = {"Angels": 108, "Diamondbacks": 109, "Orioles": 110, "Red Sox": 111, "Cubs": 112, "Reds": 113, "Guardians": 114, "Rockies": 115, "Tigers": 116, "Astros": 117, "Royals": 118, "Dodgers": 119, "Nationals": 120, "Mets": 121, "Athletics": 133, "Pirates": 134, "Padres": 135, "Mariners": 136, "Giants": 137, "Cardinals": 138, "Rays": 139, "Rangers": 140, "Blue Jays": 141, "Twins": 142, "Phillies": 143, "Braves": 144, "White Sox": 145, "Marlins": 146, "Yankees": 147, "Brewers": 158}
+FG_ABBR_MAP = {"LAA": 108, "ARI": 109, "BAL": 110, "BOS": 111, "CHC": 112, "CIN": 113, "CLE": 114, "COL": 115, "DET": 116, "HOU": 117, "KCR": 118, "LAD": 119, "WSN": 120, "NYM": 121, "OAK": 133, "PIT": 134, "SDP": 135, "SEA": 136, "SFG": 137, "STL": 138, "TBR": 139, "TEX": 140, "TOR": 141, "MIN": 142, "PHI": 143, "ATL": 144, "CHW": 145, "MIA": 146, "NYY": 147, "MIL": 158, "KC": 118, "SD": 135, "SF": 137, "TB": 139, "WSH": 120, "CWS": 145}
 
-LEAGUE_AVG_RPG     = 4.50
-LEAGUE_AVG_FIP     = 4.10
-LEAGUE_AVG_WRC     = 100.0
-LEAGUE_SP_IP_SHARE = 0.57
-LEAGUE_RP_IP_SHARE = 0.43
-
-def _regressed_win_pct(rs_per_g: float, ra_per_g: float, games_played: int) -> tuple[float, float, float]:
-    exp          = PYTHAG_EXPONENT
-    PRIOR        = 200
-    total        = games_played + PRIOR
-    reg_rs       = (rs_per_g * games_played + LEAGUE_AVG_RPG * PRIOR) / total
-    reg_ra       = (ra_per_g * games_played + LEAGUE_AVG_RPG * PRIOR) / total
-    reg_rs       = float(np.clip(reg_rs, 2.5, 7.5))
-    reg_ra       = float(np.clip(reg_ra, 2.5, 7.5))
-    wp           = reg_rs ** exp / (reg_rs ** exp + reg_ra ** exp)
-    return reg_rs, reg_ra, float(wp)
+def _regressed_win_pct(rs_g, ra_g, gp):
+    prior = 200
+    rs = np.clip((rs_g*gp + LEAGUE_AVG_RPG*prior)/(gp+prior), 2.5, 7.5)
+    ra = np.clip((ra_g*gp + LEAGUE_AVG_RPG*prior)/(gp+prior), 2.5, 7.5)
+    wp = rs**PYTHAG_EXPONENT / (rs**PYTHAG_EXPONENT + ra**PYTHAG_EXPONENT)
+    return float(rs), float(ra), float(wp)
 
 def _fetch_fg_dc_batting() -> pd.DataFrame | None:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Referer": "https://www.fangraphs.com/projections",
-        "Accept-Language": "en-US,en;q=0.9"
-    }
     try:
-        session = _get_session()
-        r = session.get(
-            "https://www.fangraphs.com/api/projections",
-            params={"type": "fangraphsdc", "stats": "bat", "pos": "all", "team": 0, "players": 0, "lg": "all"},
-            headers=headers, timeout=20
-        )
+        r = _get_session().get("https://www.fangraphs.com/api/projections", params={"type": "fangraphsdc", "stats": "bat", "pos": "all", "team": 0, "players": 0, "lg": "all"}, timeout=20)
         if r.status_code != 200: return None
         raw = r.json()
         data = raw.get("data", raw) if isinstance(raw, dict) else raw
         if not isinstance(data, list) or len(data) < 50: return None
-        df = pd.DataFrame(data)
-        df.columns = [c.strip() for c in df.columns]
+        df = pd.DataFrame(data); df.columns = [c.strip() for c in df.columns]
         return df
-    except Exception:
-        return None
+    except Exception: return None
 
 def _fetch_fg_dc_pitching() -> pd.DataFrame | None:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Referer": "https://www.fangraphs.com/projections",
-        "Accept-Language": "en-US,en;q=0.9"
-    }
     try:
-        session = _get_session()
-        r = session.get(
-            "https://www.fangraphs.com/api/projections",
-            params={"type": "fangraphsdc", "stats": "pit", "pos": "all", "team": 0, "players": 0, "lg": "all"},
-            headers=headers, timeout=20
-        )
+        r = _get_session().get("https://www.fangraphs.com/api/projections", params={"type": "fangraphsdc", "stats": "pit", "pos": "all", "team": 0, "players": 0, "lg": "all"}, timeout=20)
         if r.status_code != 200: return None
         raw = r.json()
         data = raw.get("data", raw) if isinstance(raw, dict) else raw
         if not isinstance(data, list) or len(data) < 50: return None
-        df = pd.DataFrame(data)
-        df.columns = [c.strip() for c in df.columns]
+        df = pd.DataFrame(data); df.columns = [c.strip() for c in df.columns]
         return df
-    except Exception:
-        return None
+    except Exception: return None
 
 def _team_id_from_fg_row(row: pd.Series) -> int | None:
-    for col in ["teamid", "TeamId", "team_id", "Team ID"]:
-        if col in row.index and pd.notna(row.get(col)):
-            try: return int(float(str(row[col]).strip()))
+    for c in ["teamid", "TeamId", "team_id"]:
+        if c in row.index and pd.notna(row.get(c)):
+            try: return int(float(str(row[c]).strip()))
             except: pass
-    for col in ["Team", "team", "Tm", "Abbr"]:
-        if col in row.index:
-            abbr = str(row[col]).strip().upper().replace(".", "")
+    for c in ["Team", "team", "Tm", "Abbr"]:
+        if c in row.index:
+            abbr = str(row[c]).strip().upper().replace(".", "")
             if abbr in FG_ABBR_MAP: return FG_ABBR_MAP[abbr]
-    for col in ["TeamName", "Team Name", "Tm Name"]:
-        if col in row.index:
-            name = str(row[col]).strip()
-            for k, v in FG_TEAM_MAP.items():
-                if k.lower() in name.lower(): return v
+    for c in ["TeamName", "Team Name"]:
+        if c in row.index:
+            for k,v in FG_TEAM_MAP.items():
+                if k.lower() in str(row[c]).lower(): return v
     return None
 
-def _build_fg_dc_projections(bat_df: pd.DataFrame, pit_df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    all_ids       = list(TEAM_INFO.keys())
-    player_detail = {tid: {"batters": [], "sp": [], "rp": []} for tid in all_ids}
-    team_wrc, team_sp_fip, team_rp_fip = {}, {}, {}
-
-    wrc_col = next((c for c in bat_df.columns if c in ["wRC+", "wrc+", "WRC+", "w_rc_plus"]), None)
-    pa_col  = next((c for c in bat_df.columns if c in ["PA", "pa", "PAs"]), None)
-    name_col= next((c for c in bat_df.columns if c in ["PlayerName", "Name", "name", "Player"]), None)
-    war_col = next((c for c in bat_df.columns if c in ["WAR", "war", "bWAR"]), None)
-
-    if wrc_col and pa_col:
-        bat_df = bat_df.copy()
-        bat_df["_tid"] = bat_df.apply(_team_id_from_fg_row, axis=1)
-        bat_df = bat_df.dropna(subset=["_tid"])
-        bat_df["_tid"] = bat_df["_tid"].astype(int)
-        bat_df[wrc_col] = pd.to_numeric(bat_df[wrc_col], errors="coerce").fillna(100)
-        bat_df[pa_col]  = pd.to_numeric(bat_df[pa_col], errors="coerce").fillna(0)
-        
-        for tid in all_ids:
-            tdf = bat_df[bat_df["_tid"] == tid]
-            if tdf.empty or tdf[pa_col].sum() == 0: continue
-            team_wrc[tid] = float(np.average(tdf[wrc_col], weights=tdf[pa_col].clip(1)))
-            for _, p in tdf.nlargest(9, pa_col).iterrows():
-                player_detail[tid]["batters"].append({
-                    "name": str(p.get(name_col, "?")) if name_col else "?",
-                    "pa": int(p[pa_col]),
-                    "wrc_plus": round(float(p[wrc_col]), 1),
-                    "war": round(float(p[war_col]), 1) if war_col and pd.notna(p.get(war_col)) else None,
-                })
-
-    ip_col  = next((c for c in pit_df.columns if c in ["IP", "ip", "IPs"]), None)
-    gs_col  = next((c for c in pit_df.columns if c in ["GS", "gs", "Starts"]), None)
-    fip_col = next((c for c in pit_df.columns if c in ["FIP", "fip"]), None)
-    era_col = next((c for c in pit_df.columns if c in ["ERA", "era"]), None)
-    pname   = next((c for c in pit_df.columns if c in ["PlayerName", "Name", "name", "Player"]), None)
-    pwar    = next((c for c in pit_df.columns if c in ["WAR", "war"]), None)
-
-    if ip_col and fip_col:
-        pit_df = pit_df.copy()
-        pit_df["_tid"] = pit_df.apply(_team_id_from_fg_row, axis=1)
-        pit_df = pit_df.dropna(subset=["_tid"])
-        pit_df["_tid"] = pit_df["_tid"].astype(int)
-        pit_df[ip_col]  = pd.to_numeric(pit_df[ip_col], errors="coerce").fillna(0)
-        pit_df[fip_col] = pd.to_numeric(pit_df[fip_col], errors="coerce").fillna(LEAGUE_AVG_FIP).clip(2.0, 7.5)
-        if era_col:
-            pit_df[era_col] = pd.to_numeric(pit_df[era_col], errors="coerce").fillna(LEAGUE_AVG_FIP).clip(1.5, 8.0)
-            
-        if gs_col:
-            pit_df[gs_col] = pd.to_numeric(pit_df[gs_col], errors="coerce").fillna(0)
-            pit_df["_is_sp"] = pit_df[gs_col] >= 8
-        else:
-            pit_df["_is_sp"] = pit_df[ip_col] >= 80
-
-        for tid in all_ids:
-            tdf = pit_df[pit_df["_tid"] == tid]
-            if tdf.empty: continue
-            sp_df = tdf[tdf["_is_sp"]]
-            rp_df = tdf[~tdf["_is_sp"]]
-
-            def _blended_fip(df_):
-                if df_.empty or df_[ip_col].sum() == 0: return LEAGUE_AVG_FIP
-                blended = df_[fip_col].clip(2.0, 7.5)
-                if era_col: blended = blended * 0.70 + df_[era_col].clip(1.5, 8.0) * 0.30
-                return float(np.average(blended, weights=df_[ip_col].clip(1)))
-
-            if not sp_df.empty:
-                team_sp_fip[tid] = _blended_fip(sp_df)
-                for _, p in sp_df.nlargest(5, ip_col).iterrows():
-                    player_detail[tid]["sp"].append({
-                        "name": str(p.get(pname, "?")) if pname else "?",
-                        "ip": round(float(p[ip_col]), 1),
-                        "fip": round(float(p[fip_col]), 2),
-                        "era": round(float(p[era_col]), 2) if era_col else None,
-                        "war": round(float(p[pwar]), 1) if pwar and pd.notna(p.get(pwar)) else None,
-                    })
-            if not rp_df.empty:
-                team_rp_fip[tid] = _blended_fip(rp_df)
-                for _, p in rp_df.nlargest(7, ip_col).iterrows():
-                    player_detail[tid]["rp"].append({
-                        "name": str(p.get(pname, "?")) if pname else "?",
-                        "ip": round(float(p[ip_col]), 1),
-                        "fip": round(float(p[fip_col]), 2),
-                        "era": round(float(p[era_col]), 2) if era_col else None,
-                        "war": round(float(p[pwar]), 1) if pwar and pd.notna(p.get(pwar)) else None,
-                    })
-
-    exp = PYTHAG_EXPONENT
+def _build_fg_dc_projections(bat_df, pit_df):
+    all_ids = list(TEAM_INFO.keys())
+    detail = {t: {"batters":[], "sp":[], "rp":[]} for t in all_ids}
+    tw, ts, tr = {}, {}, {}
+    wrc_c, pa_c, nm_c, war_c = next((c for c in bat_df.columns if c in ["wRC+", "wrc+", "WRC+"]), None), next((c for c in bat_df.columns if c in ["PA", "pa"]), None), next((c for c in bat_df.columns if c in ["PlayerName", "Name"]), None), next((c for c in bat_df.columns if c in ["WAR", "war"]), None)
+    if wrc_c and pa_c:
+        bat_df["_tid"] = bat_df.apply(_team_id_from_fg_row, axis=1).dropna().astype(int)
+        bat_df[wrc_c] = pd.to_numeric(bat_df[wrc_c], errors="coerce").fillna(100)
+        bat_df[pa_c] = pd.to_numeric(bat_df[pa_c], errors="coerce").fillna(0)
+        for t in all_ids:
+            sub = bat_df[bat_df["_tid"]==t]
+            if sub.empty or sub[pa_c].sum()==0: continue
+            tw[t] = float(np.average(sub[wrc_c], weights=sub[pa_c].clip(1)))
+            for _,p in sub.nlargest(9, pa_c).iterrows():
+                detail[t]["batters"].append({"name": str(p.get(nm_c,"?")), "pa": int(p[pa_c]), "wrc_plus": round(float(p[wrc_c]),1), "war": round(float(p[war_c]),1) if war_c and pd.notna(p.get(war_c)) else None})
+    ip_c, gs_c, fip_c, era_c, pn_c, pw_c = next((c for c in pit_df.columns if c in ["IP", "ip"]), None), next((c for c in pit_df.columns if c in ["GS", "gs"]), None), next((c for c in pit_df.columns if c in ["FIP", "fip"]), None), next((c for c in pit_df.columns if c in ["ERA", "era"]), None), next((c for c in pit_df.columns if c in ["PlayerName", "Name"]), None), next((c for c in pit_df.columns if c in ["WAR", "war"]), None)
+    if ip_c and fip_c:
+        pit_df["_tid"] = pit_df.apply(_team_id_from_fg_row, axis=1).dropna().astype(int)
+        pit_df[ip_c] = pd.to_numeric(pit_df[ip_c], errors="coerce").fillna(0)
+        pit_df[fip_c] = pd.to_numeric(pit_df[fip_c], errors="coerce").fillna(LEAGUE_AVG_FIP).clip(2.0, 7.5)
+        if era_c: pit_df[era_c] = pd.to_numeric(pit_df[era_c], errors="coerce").fillna(LEAGUE_AVG_FIP).clip(1.5, 8.0)
+        pit_df["_is_sp"] = pit_df[gs_c] >= 8 if gs_c else pit_df[ip_c] >= 80
+        for t in all_ids:
+            sub = pit_df[pit_df["_tid"]==t]
+            if sub.empty: continue
+            for is_sp, tag in [(True, "sp"), (False, "rp")]:
+                grp = sub[sub["_is_sp"]==is_sp]
+                if grp.empty: continue
+                def bf(d):
+                    if d.empty or d[ip_c].sum()==0: return LEAGUE_AVG_FIP
+                    b = d[fip_c].clip(2.0, 7.5)
+                    if era_c: b = b*0.7 + d[era_c].clip(1.5,8.0)*0.3
+                    return float(np.average(b, weights=d[ip_c].clip(1)))
+                if tag=="sp": ts[t] = bf(grp)
+                else: tr[t] = bf(grp)
+                n = 5 if tag=="sp" else 7
+                for _,p in grp.nlargest(n, ip_c).iterrows():
+                    detail[t][tag].append({"name": str(p.get(pn_c,"?")), "ip": round(float(p[ip_c]),1), "fip": round(float(p[fip_c]),2), "era": round(float(p[era_c]),2) if era_c else None, "war": round(float(p[pw_c]),1) if pw_c and pd.notna(p.get(pw_c)) else None})
     rows = []
-    for tid in all_ids:
-        wrc  = team_wrc.get(tid, LEAGUE_AVG_WRC)
-        sp_f = team_sp_fip.get(tid, LEAGUE_AVG_FIP)
-        rp_f = team_rp_fip.get(tid, LEAGUE_AVG_FIP)
-        rpg  = float(np.clip((wrc / 100.0) * LEAGUE_AVG_RPG, 2.5, 7.5))
-        rapg = float(np.clip(
-            (sp_f / LEAGUE_AVG_FIP) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE +
-            (rp_f / LEAGUE_AVG_FIP) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE, 2.5, 7.5))
-        wp   = rpg ** exp / (rpg ** exp + rapg ** exp)
-        rows.append({
-            "team_id": tid, "proj_runs_per_game": round(rpg, 3),
-            "proj_ra_per_game": round(rapg, 3), "proj_win_pct": round(float(wp), 4),
-            "proj_sp_fip": round(sp_f, 2), "proj_rp_fip": round(rp_f, 2),
-            "proj_wrc_plus": round(wrc, 1),
-        })
-    return pd.DataFrame(rows), player_detail
+    for t in all_ids:
+        w = tw.get(t, LEAGUE_AVG_WRC)
+        sf = ts.get(t, LEAGUE_AVG_FIP)
+        rf = tr.get(t, LEAGUE_AVG_FIP)
+        rpg = np.clip((w/100)*LEAGUE_AVG_RPG, 2.5, 7.5)
+        rapg = np.clip((sf/LEAGUE_AVG_FIP)*LEAGUE_AVG_RPG*LEAGUE_SP_IP_SHARE + (rf/LEAGUE_AVG_FIP)*LEAGUE_AVG_RPG*LEAGUE_RP_IP_SHARE, 2.5, 7.5)
+        wp = rpg**PYTHAG_EXPONENT / (rpg**PYTHAG_EXPONENT + rapg**PYTHAG_EXPONENT)
+        rows.append({"team_id": t, "proj_runs_per_game": round(rpg,3), "proj_ra_per_game": round(rapg,3), "proj_win_pct": round(float(wp),4), "proj_sp_fip": round(sf,2), "proj_rp_fip": round(rf,2), "proj_wrc_plus": round(w,1)})
+    return pd.DataFrame(rows), detail
 
-def fetch_team_projections(standings_df: pd.DataFrame | None = None) -> tuple[pd.DataFrame, dict]:
-    all_ids       = list(TEAM_INFO.keys())
-    player_detail = {tid: {"batters": [], "sp": [], "rp": []} for tid in all_ids}
-
+def fetch_team_projections(standings_df=None):
+    all_ids = list(TEAM_INFO.keys())
+    detail = {t: {"batters":[], "sp":[], "rp":[]} for t in all_ids}
     try:
-        import concurrent.futures as _fgf
-        with _fgf.ThreadPoolExecutor(max_workers=2) as _fgx:
-            _bat_fut = _fgx.submit(_fetch_fg_dc_batting)
-            _pit_fut = _fgx.submit(_fetch_fg_dc_pitching)
-            try:
-                bat_df = _bat_fut.result(timeout=25)
-                pit_df = _pit_fut.result(timeout=25)
-                print(f"FG DC: bat={len(bat_df) if bat_df is not None else 'None'}, pit={len(pit_df) if pit_df is not None else 'None'}")
-                if bat_df is not None and pit_df is not None and len(bat_df) > 50:
-                    proj_df, player_detail = _build_fg_dc_projections(bat_df, pit_df)
-                    std = proj_df["proj_win_pct"].std() if not proj_df.empty else 0
-                    print(f"FG DC build: rows={len(proj_df)}, std={std:.4f}")
-                    if not proj_df.empty and std > 0.01:
-                        proj_df["proj_source"] = "FanGraphs DC"
-                        return proj_df, player_detail
-            except Exception as _fge:
-                print(f"FG DC exception: {_fge}")
-    except Exception as _fge2:
-        print(f"FG DC outer exception: {_fge2}")
-
+        import concurrent.futures as cf
+        with cf.ThreadPoolExecutor(max_workers=2) as ex:
+            bf, pf = ex.submit(_fetch_fg_dc_batting), ex.submit(_fetch_fg_dc_pitching)
+            bat, pit = bf.result(timeout=25), pf.result(timeout=25)
+            if bat is not None and pit is not None and len(bat)>50:
+                df, detail = _build_fg_dc_projections(bat, pit)
+                if not df.empty and df["proj_win_pct"].std()>0.01:
+                    df["proj_source"] = "FanGraphs DC"
+                    return df, detail
+    except Exception as e: print(f"FG fetch failed: {e}")
     if standings_df is not None and not standings_df.empty:
         rows = []
-        for _, row in standings_df.iterrows():
-            tid   = row["team_id"]
-            gp    = max(int(row.get("games_played", 0)), 1)
-            rs_g  = row.get("runs_scored",  0) / gp
-            ra_g  = row.get("runs_allowed", 0) / gp
-            reg_rs, reg_ra, wp = _regressed_win_pct(rs_g, ra_g, gp)
-            rows.append({
-                "team_id":            tid,
-                "proj_runs_per_game": round(reg_rs, 3),
-                "proj_ra_per_game":   round(reg_ra, 3),
-                "proj_win_pct":       round(wp, 4),
-                "proj_sp_fip":        LEAGUE_AVG_FIP,
-                "proj_rp_fip":        LEAGUE_AVG_FIP,
-                "proj_wrc_plus":      LEAGUE_AVG_WRC,
-            })
-        proj_df = pd.DataFrame(rows)
-        proj_df["proj_source"] = "Regression-to-Mean"
-        return proj_df, player_detail
+        for _,r in standings_df.iterrows():
+            tid, gp = r["team_id"], max(int(r.get("games_played",0)),1)
+            rs, ra, wp = _regressed_win_pct(r["runs_scored"]/gp, r["runs_allowed"]/gp, gp)
+            rows.append({"team_id": tid, "proj_runs_per_game": round(rs,3), "proj_ra_per_game": round(ra,3), "proj_win_pct": round(wp,4), "proj_sp_fip": LEAGUE_AVG_FIP, "proj_rp_fip": LEAGUE_AVG_FIP, "proj_wrc_plus": LEAGUE_AVG_WRC})
+        df = pd.DataFrame(rows); df["proj_source"] = "Regression-to-Mean"
+        return df, detail
+    df = pd.DataFrame([{"team_id": t, "proj_runs_per_game": LEAGUE_AVG_RPG, "proj_ra_per_game": LEAGUE_AVG_RPG, "proj_win_pct": 0.5, "proj_sp_fip": LEAGUE_AVG_FIP, "proj_rp_fip": LEAGUE_AVG_FIP, "proj_wrc_plus": LEAGUE_AVG_WRC} for t in all_ids])
+    df["proj_source"] = "League Average"
+    return df, detail
 
-    rows = [{"team_id": tid, "proj_runs_per_game": LEAGUE_AVG_RPG,
-             "proj_ra_per_game": LEAGUE_AVG_RPG, "proj_win_pct": 0.500,
-             "proj_sp_fip": LEAGUE_AVG_FIP, "proj_rp_fip": LEAGUE_AVG_FIP,
-             "proj_wrc_plus": LEAGUE_AVG_WRC} for tid in all_ids]
-    proj_df = pd.DataFrame(rows)
-    proj_df["proj_source"] = "League Average"
-    return proj_df, player_detail
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# INJURY DATA
-# ═══════════════════════════════════════════════════════════════════════════════
-POSITION_WAR_PROXY = {
-    "C": 2.5, "1B": 1.8, "2B": 2.5, "3B": 2.8, "SS": 3.2,
-    "LF": 2.0, "CF": 2.8, "RF": 2.2, "DH": 1.5,
-    "SP": 3.0, "RP": 0.8, "P": 2.0,
-}
+POSITION_WAR_PROXY = {"C": 2.5, "1B": 1.8, "2B": 2.5, "3B": 2.8, "SS": 3.2, "LF": 2.0, "CF": 2.8, "RF": 2.2, "DH": 1.5, "SP": 3.0, "RP": 0.8, "P": 2.0}
 DEADLINE = date.fromisoformat(TRADE_DEADLINE)
-GAMES_PER_DAY_IMPACT = 1 / 162
 
-def fetch_team_il(team_id: int) -> list[dict]:
+def compute_injury_adjustment(team_id):
     try:
-        url = f"{MLB_API_BASE}/teams/{team_id}/roster"
-        params = {"rosterType": "40Man", "season": SEASON_YEAR, "hydrate": "person"}
-        resp = requests.get(url, params=params, timeout=5)
-        if resp.status_code != 200: return []
-        data = resp.json()
-        il_players = []
-        for entry in data.get("roster", []):
-            status = entry.get("status", {})
-            code   = status.get("code", "")
-            if code in ("IL10", "IL60", "DL10", "DL15", "DL60"):
-                person   = entry.get("person", {})
-                pos_code = entry.get("position", {}).get("abbreviation", "P")
-                il_type  = "60day" if "60" in code else "10day"
-                il_players.append({
-                    "player_name": person.get("fullName", "Unknown"),
-                    "player_id":   person.get("id", 0),
-                    "il_type":     il_type,
-                    "position":    pos_code,
-                    "placed_date": None,
-                })
-        return il_players
-    except Exception:
-        return []
+        r = requests.get(f"{MLB_API_BASE}/teams/{team_id}/roster", params={"rosterType": "40Man", "season": SEASON_YEAR, "hydrate": "person"}, timeout=5)
+        if r.status_code!=200: return 0.0
+        il = [e for e in r.json().get("roster",[]) if e.get("status",{}).get("code","") in ("IL10","IL60","DL10","DL15","DL60")]
+        if not il: return 0.0
+        tr = requests.get(f"{MLB_API_BASE}/transactions", params={"sportId":1, "teamId":team_id, "startDate":f"{SEASON_YEAR}-03-01", "endDate":date.today().isoformat(), "limit":200}, timeout=5)
+        placed = {}
+        if tr.status_code==200:
+            for t in tr.json().get("transactions",[]):
+                if "Injured List" in t.get("typeDesc","") or "IL" in t.get("typeDesc",""):
+                    pid = t.get("person",{}).get("id")
+                    if pid and pid not in placed: placed[pid] = t.get("date","")[:10]
+        today, adj = date.today(), 0.0
+        for p in il:
+            pos = p.get("position",{}).get("abbreviation","P")
+            il_type = "60day" if "60" in p.get("status",{}).get("code","") else "10day"
+            war = POSITION_WAR_PROXY.get(pos, 2.0)
+            pid = p.get("person",{}).get("id")
+            days_on = 0
+            if pid in placed:
+                try: days_on = (today - date.fromisoformat(placed[pid])).days
+                except: pass
+            rem = 75 if il_type=="60day" and days_on<30 else (45 if il_type=="60day" and days_on<60 else 20 if il_type=="60day" else (20 if days_on<15 else 25 if days_on<30 else 10))
+            pre = min(rem, max((DEADLINE-today).days, 0))
+            post = max(rem - max((DEADLINE-today).days, 0), 0)
+            wpg = war/162
+            adj -= wpg*pre*(1/162)*15
+            adj += wpg*post*(1/162)*5
+        return round(adj, 3)
+    except: return 0.0
 
-def fetch_il_placed_dates(team_id: int) -> dict[int, str]:
+def fetch_all_team_injuries(team_ids):
     try:
-        url = f"{MLB_API_BASE}/transactions"
-        params = {"sportId": 1, "teamId": team_id, "startDate": f"{SEASON_YEAR}-03-01", "endDate": date.today().isoformat(), "limit": 200}
-        resp = requests.get(url, params=params, timeout=5)
-        if resp.status_code != 200: return {}
-        data    = resp.json()
-        placed  = {}
-        for txn in data.get("transactions", []):
-            desc = txn.get("typeDesc", "")
-            if "Injured List" in desc or "IL" in desc or "Disabled List" in desc:
-                pid  = txn.get("person", {}).get("id", 0)
-                dstr = txn.get("date", txn.get("effectiveDate", ""))
-                if pid and dstr and pid not in placed:
-                    placed[pid] = dstr[:10]
-        return placed
-    except Exception:
-        return {}
+        import concurrent.futures as cf
+        with cf.ThreadPoolExecutor(max_workers=10) as ex:
+            futs = {ex.submit(compute_injury_adjustment, t): t for t in team_ids}
+            return {futs[f]: f.result() for f in cf.as_completed(futs, timeout=15)}
+    except: return {t: 0.0 for t in team_ids}
 
-def compute_injury_adjustment(team_id: int) -> float:
-    today = date.today()
-    il_players  = fetch_team_il(team_id)
-    if not il_players: return 0.0
-    placed_dates = fetch_il_placed_dates(team_id)
-    for p in il_players:
-        pid = p["player_id"]
-        if pid in placed_dates:
-            p["placed_date"] = placed_dates[pid]
-    score_adj = 0.0
-    for p in il_players:
-        pos     = p.get("position", "P")
-        il_type = p.get("il_type", "10day")
-        war_162 = POSITION_WAR_PROXY.get(pos, 2.0)
-        placed_str = p.get("placed_date")
-        if placed_str:
-            try:
-                placed_dt = date.fromisoformat(placed_str)
-                days_on_il = (today - placed_dt).days
-            except Exception:
-                days_on_il = 0
-        else:
-            days_on_il = 0
-        if il_type == "60day":
-            if days_on_il < 30: days_remaining = 75
-            elif days_on_il < 60: days_remaining = 45
-            else: days_remaining = 20
-        else:
-            if days_on_il < 15: days_remaining = 20
-            elif days_on_il < 30: days_remaining = 25
-            else: days_remaining = 10
-        expected_return = today + timedelta(days=days_remaining)
-        days_to_deadline = max((DEADLINE - today).days,  0)
-        days_out_pre_dl  = min(days_remaining, days_to_deadline)
-        days_out_post_dl = max(days_remaining - days_to_deadline, 0)
-        war_per_game      = war_162 / 162
-        pre_dl_win_impact  = war_per_game * days_out_pre_dl  * GAMES_PER_DAY_IMPACT
-        post_dl_win_impact = war_per_game * days_out_post_dl * GAMES_PER_DAY_IMPACT
-        score_adj -= pre_dl_win_impact * 15
-        score_adj += post_dl_win_impact * 5
-    return round(score_adj, 3)
-
-def fetch_all_team_injuries(team_ids: list[int]) -> dict[int, float]:
-    adjustments = {}
-    try:
-        import concurrent.futures as _ilf
-        def _get_adj(tid):
-            try: return tid, compute_injury_adjustment(tid)
-            except: return tid, 0.0
-        with _ilf.ThreadPoolExecutor(max_workers=10) as ex:
-            futures = {ex.submit(_get_adj, tid): tid for tid in team_ids}
-            for f in _ilf.as_completed(futures, timeout=15):
-                tid, adj = f.result()
-                adjustments[tid] = adj
-    except Exception as _ile:
-        print(f"Injury fetch timed out or failed ({_ile}). Using 0.0 defaults.")
-        adjustments = {tid: 0.0 for tid in team_ids}
-    return adjustments
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# ENGINE
-# ═══════════════════════════════════════════════════════════════════════════════
 def pythag(rs, ra):
-    if rs <= 0 or ra <= 0: return 0.500
-    exp = PYTHAG_EXPONENT
-    return rs ** exp / (rs ** exp + ra ** exp)
+    if rs<=0 or ra<=0: return 0.5
+    return rs**PYTHAG_EXPONENT / (rs**PYTHAG_EXPONENT + ra**PYTHAG_EXPONENT)
 
-def build_master(standings_df, statcast_df, player_detail=None) -> pd.DataFrame:
-    df = standings_df.copy()
-    merge_cols = ["team_id", "proj_win_pct", "proj_runs_per_game", "proj_ra_per_game"]
-    if "proj_source" in statcast_df.columns: merge_cols.append("proj_source")
-    if "proj_sp_fip" in statcast_df.columns: merge_cols += ["proj_sp_fip", "proj_rp_fip", "proj_wrc_plus"]
-    df = df.merge(statcast_df[merge_cols], on="team_id", how="left")
-    df["proj_win_pct"]   = df["proj_win_pct"].fillna(df["win_pct"]).fillna(0.500)
+def build_master(stand, proj, detail=None):
+    df = stand.copy()
+    mcols = ["team_id", "proj_win_pct", "proj_runs_per_game", "proj_ra_per_game"]
+    if "proj_source" in proj.columns: mcols.append("proj_source")
+    if "proj_sp_fip" in proj.columns: mcols += ["proj_sp_fip", "proj_rp_fip", "proj_wrc_plus"]
+    df = df.merge(proj[mcols], on="team_id", how="left")
+    df["proj_win_pct"] = df["proj_win_pct"].fillna(df["win_pct"]).fillna(0.5)
     df["pythag_win_pct"] = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
-    
-    gp            = df["games_played"].clip(0, 162)
-    proj_source   = df["proj_source"].iloc[0] if "proj_source" in df.columns else "Unknown"
-    
-    if proj_source == "FanGraphs DC":
-        proj_weight   = (0.70 - (gp / 162.0) * 0.30).clip(0.40, 0.70)
-        pythag_weight = 1.0 - proj_weight
-        df["blended_win_pct"] = (df["proj_win_pct"] * proj_weight + df["pythag_win_pct"] * pythag_weight).clip(0.20, 0.80)
+    gp = df["games_played"].clip(0, 162)
+    src = df["proj_source"].iloc[0] if "proj_source" in df.columns else "Unknown"
+    if src == "FanGraphs DC":
+        pw = (0.7 - (gp/162)*0.3).clip(0.4, 0.7)
+        df["blended_win_pct"] = (df["proj_win_pct"]*pw + df["pythag_win_pct"]*(1-pw)).clip(0.2, 0.8)
     else:
-        proj_weight   = pd.Series(1.0, index=df.index)
-        pythag_weight = pd.Series(0.0, index=df.index)
-        df["blended_win_pct"] = df["proj_win_pct"].clip(0.20, 0.80)
-        
-    df["proj_weight_used"]   = proj_weight.round(2) if hasattr(proj_weight, 'round') else proj_weight
-    df["pythag_weight_used"] = pythag_weight.round(2) if hasattr(pythag_weight, 'round') else pythag_weight
-    df["games_remaining"]    = (162 - df["games_played"]).clip(0, 162)
-    
-    if player_detail:
-        df["player_detail"] = df["team_id"].apply(lambda tid: json.dumps(player_detail.get(int(tid), {"batters":[], "sp":[], "rp":[]})))
-    else:
-        df["player_detail"] = df["team_id"].apply(lambda _: json.dumps({"batters":[], "sp":[], "rp":[]}))
+        pw = pd.Series(1.0, index=df.index)
+        df["blended_win_pct"] = df["proj_win_pct"].clip(0.2, 0.8)
+    df["proj_weight_used"] = pw.round(2) if hasattr(pw, 'round') else pw
+    df["pythag_weight_used"] = (1-pw).round(2) if hasattr(pw, 'round') else (1-pw)
+    df["games_remaining"] = (162 - gp).clip(0, 162)
+    df["player_detail"] = df["team_id"].apply(lambda t: json.dumps(detail.get(int(t), {"batters":[],"sp":[],"rp":[]})) if detail else "{}")
     return df
 
-def _games_played_dampener(games_played: float) -> float:
-    if games_played <= 30:  return 0.50
-    if games_played <= 55:  return 0.75
-    if games_played <= 81:  return 0.90
-    return 1.00
-
-def compute_buyer_seller(df: pd.DataFrame, injury_adjustments: dict | None = None) -> pd.DataFrame:
+def compute_buyer_seller(df, inj=None):
     df = df.copy()
-    df["pythag_win_pct"]       = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
+    df["pythag_win_pct"] = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
     df["pythag_expected_wins"] = df["pythag_win_pct"] * df["games_played"]
-    df["luck_wins"]            = df["wins"] - df["pythag_expected_wins"]
-    df["rd_per_162"]           = (df["run_differential"] / df["games_played"].clip(1)) * RD_SCALE_GAMES
-    df["raw_score"]            = df["wc_games_back"]
-    
-    rd_gp_scale = ((df["games_played"] - 50) / 50.0).clip(0.0, 1.0)
-    rd_mod = (-df["rd_per_162"] * RD_SENSITIVITY * rd_gp_scale).clip(-RD_MODIFIER_CAP, RD_MODIFIER_CAP)
-    
-    luck_scale = ((df["games_played"] - 40) / 60.0).clip(0.0, 1.0)
-    luck_mod = df["luck_wins"] * PYTHAG_GAP_SENSITIVITY * luck_scale
-    
-    if injury_adjustments:
-        df["injury_score_adj"] = df["team_id"].map(injury_adjustments).fillna(0.0)
-    else:
-        df["injury_score_adj"] = 0.0
-        
-    df["pre_dampened_score"] = df["raw_score"] + rd_mod + luck_mod + df["injury_score_adj"]
-    df["dampener"] = df["games_played"].apply(_games_played_dampener)
-    
-    today = date.today()
-    early_cutoff = date(SEASON_YEAR, 4, 1)
-    full_cutoff  = date(SEASON_YEAR, 6, 15)
-    total_days   = (full_cutoff - early_cutoff).days
-    elapsed_days = max((today - early_cutoff).days, 0)
-    deadline_proximity = min(elapsed_days / max(total_days, 1), 1.0)
-    deadline_proximity = max(deadline_proximity, 0.40)
-    
-    df["adjusted_score"] = df["pre_dampened_score"] * df["dampener"] * deadline_proximity
-    
-    def tier(s):
-        if s >= HARD_SELLER_GB:  return "hard_seller"
-        if s >= SOFT_SELLER_GB:  return "soft_seller"
-        if s >= -NEUTRAL_BAND:   return "neutral"
-        if s >= -8.0:            return "soft_buyer"
-        return "hard_buyer"
-        
-    df["tier"]       = df["adjusted_score"].apply(tier)
+    df["luck_wins"] = df["wins"] - df["pythag_expected_wins"]
+    df["rd_per_162"] = (df["run_differential"]/df["games_played"].clip(1))*RD_SCALE_GAMES
+    df["raw_score"] = df["wc_games_back"]
+    rd_s = ((df["games_played"]-50)/50).clip(0,1)
+    df["pre_dampened_score"] = df["raw_score"] + (-df["rd_per_162"]*RD_SENSITIVITY*rd_s).clip(-RD_MODIFIER_CAP, RD_MODIFIER_CAP) + df["luck_wins"]*PYTHAG_GAP_SENSITIVITY*((df["games_played"]-40)/60).clip(0,1) + (df["team_id"].map(inj).fillna(0) if inj else 0)
+    def damp(gp): return 0.5 if gp<=30 else 0.75 if gp<=55 else 0.9 if gp<=81 else 1.0
+    df["dampener"] = df["games_played"].apply(damp)
+    early = date(SEASON_YEAR, 4, 1)
+    full = date(SEASON_YEAR, 6, 15)
+    dp = min(max((date.today()-early).days / max((full-early).days, 1), 0), 1)
+    df["adjusted_score"] = df["pre_dampened_score"] * df["dampener"] * max(dp, 0.4)
+    def tier(s): return "hard_seller" if s>=HARD_SELLER_GB else "soft_seller" if s>=SOFT_SELLER_GB else "neutral" if s>=-NEUTRAL_BAND else "soft_buyer" if s>=-8.0 else "hard_buyer"
+    df["tier"] = df["adjusted_score"].apply(tier)
     df["tier_label"] = df["tier"].map(TIER_LABELS)
-    
-    base_map = {"hard_seller": ADJ_HARD_SELLER, "soft_seller": ADJ_SOFT_SELLER,
-                "neutral": ADJ_NEUTRAL, "soft_buyer": ADJ_SOFT_BUYER, "hard_buyer": ADJ_HARD_BUYER}
-    df["base_adj"] = df["tier"].map(base_map)
-    
-    mods = []
-    for _, row in df.iterrows():
-        base = row["base_adj"]
-        if base == 0.0:
-            mods.append(0.0)
-            continue
-        rd_f   = np.clip(row["rd_per_162"] / 50.0, -1.0, 1.0)
-        luck_f = np.clip(row["luck_wins"] / 5.0, -1.0, 1.0)
-        mods.append(round(base * ((rd_f + luck_f) / 2.0) * 0.20, 4))
-    df["magnitude_modifier"] = mods
-    df["final_adj"] = (df["base_adj"] + df["magnitude_modifier"]).clip(-0.18, 0.10)
+    base = {"hard_seller": ADJ_HARD_SELLER, "soft_seller": ADJ_SOFT_SELLER, "neutral": ADJ_NEUTRAL, "soft_buyer": ADJ_SOFT_BUYER, "hard_buyer": ADJ_HARD_BUYER}
+    df["base_adj"] = df["tier"].map(base)
+    df["magnitude_modifier"] = df.apply(lambda r: round(r["base_adj"]*(((np.clip(r["rd_per_162"]/50, -1, 1) + np.clip(r["luck_wins"]/5, -1, 1))/2)*0.2), 4) if r["base_adj"]!=0 else 0, axis=1)
+    df["final_adj"] = (df["base_adj"] + df["magnitude_modifier"]).clip(-0.18, 0.1)
     return df
 
-def apply_ramp(df: pd.DataFrame, ramp: float) -> pd.DataFrame:
+def apply_ramp(df, ramp):
     df = df.copy()
     df["ramped_adj"] = df["final_adj"] * ramp
-    df["adj_win_pct"] = (df["blended_win_pct"] + df["ramped_adj"]).clip(0.20, 0.80)
+    df["adj_win_pct"] = (df["blended_win_pct"] + df["ramped_adj"]).clip(0.2, 0.8)
     return df
 
-def compute_sos(df: pd.DataFrame, remaining_opponents: dict) -> pd.DataFrame:
-    if not remaining_opponents:
-        df = df.copy()
-        df["sos_raw"]   = 0.500
-        df["sos_rank"]  = 15
-        df["sos_label"] = "Average"
+def compute_sos(df, opps):
+    if not opps:
+        df["sos_raw"], df["sos_rank"], df["sos_label"] = 0.5, 15, "Average"
         return df
     df = df.copy()
-    wp_arr = df.set_index("team_id")["adj_win_pct"]
-    sos = {}
-    for tid in df["team_id"].values:
-        opps = remaining_opponents.get(int(tid), [])
-        if opps:
-            opp_wps = np.array([wp_arr.get(int(o), 0.500) for o in opps])
-            sos[tid] = float(opp_wps.mean())
-        else:
-            sos[tid] = 0.500
-    df["sos_raw"]  = df["team_id"].map(sos).fillna(0.500)
+    wp = df.set_index("team_id")["adj_win_pct"]
+    def mean_wp(tid):
+        o = opps.get(int(tid), [])
+        return float(np.mean([wp.get(int(x), 0.5) for x in o])) if o else 0.5
+    df["sos_raw"] = df["team_id"].apply(mean_wp)
     df["sos_rank"] = df["sos_raw"].rank(ascending=False, method="min").astype(int)
     p33, p67 = df["sos_raw"].quantile(0.33), df["sos_raw"].quantile(0.67)
-    df["sos_label"] = df["sos_raw"].apply(lambda v: "Easy" if v <= p33 else ("Hard" if v > p67 else "Average"))
+    df["sos_label"] = df["sos_raw"].apply(lambda v: "Easy" if v<=p33 else "Hard" if v>p67 else "Average")
     return df
 
-def log5(a, b):
-    return (a - a * b) / (a + b - 2 * a * b + 1e-9)
+def log5(a, b): return (a - a*b) / (a + b - 2*a*b + 1e-9)
 
-def run_simulation(master_df: pd.DataFrame, schedule_df: pd.DataFrame) -> dict:
-    rng      = np.random.default_rng(RANDOM_SEED)
-    team_ids = master_df["team_id"].tolist()
-    n_teams  = len(team_ids)
-    tid_idx  = {tid: i for i, tid in enumerate(team_ids)}
-    info     = master_df[["team_id", "division", "league"]].set_index("team_id")
-    init_wins  = np.array([master_df.set_index("team_id")["wins"].get(tid, 0) for tid in team_ids], dtype=float)
-    adj_wp     = master_df.set_index("team_id")["adj_win_pct"].to_dict()
-    base_wp    = master_df.set_index("team_id")["blended_win_pct"].to_dict()
-    
-    remaining = get_remaining_games(schedule_df)
-    if remaining.empty: return _empty_sim(master_df)
-    
-    home_ids = remaining["home_team_id"].values.astype(int)
-    away_ids = remaining["away_team_id"].values.astype(int)
-    valid    = np.array([(h in tid_idx and a in tid_idx) for h, a in zip(home_ids, away_ids)])
-    home_ids = home_ids[valid]; away_ids = away_ids[valid]
-    
-    adj_probs   = np.array([log5(adj_wp.get(h, 0.5), adj_wp.get(a, 0.5)) for h, a in zip(home_ids, away_ids)])
-    base_probs  = np.array([log5(base_wp.get(h, 0.5), base_wp.get(a, 0.5)) for h, a in zip(home_ids, away_ids)])
-    home_idx    = np.array([tid_idx[h] for h in home_ids])
-    away_idx    = np.array([tid_idx[a] for a in away_ids])
-    n_games     = len(home_ids)
-    
-    def sim_batch(probs):
-        finals = np.tile(init_wins, (N_SIMULATIONS, 1)).astype(float)
-        if n_games == 0: return finals
-        rand    = rng.random((N_SIMULATIONS, n_games))
-        hw      = rand < probs[np.newaxis, :]
-        for g in range(n_games):
-            finals[:, home_idx[g]] += hw[:, g].astype(float)
-            finals[:, away_idx[g]] += (~hw[:, g]).astype(float)
-        return finals
-    
-    adj_res  = sim_batch(adj_probs)
-    base_res = sim_batch(base_probs)
-    
-    def get_odds(results):
-        div_count = np.zeros(n_teams)
-        po_count  = np.zeros(n_teams)
-        for sim in range(N_SIMULATIONS):
-            wins = results[sim]
-            div_wins = set()
-            for league in ["AL", "NL"]:
-                lg_idx = [i for i, t in enumerate(team_ids) if info.loc[int(t), "league"] == league]
-                for div in info[info["league"] == league]["division"].unique():
-                    d_idx = [i for i in lg_idx if info.loc[int(team_ids[i]), "division"] == div]
-                    if d_idx:
-                        best = d_idx[int(np.argmax(wins[d_idx]))]
-                        div_wins.add(best); div_count[best] += 1; po_count[best] += 1 
-                non_div = [i for i in lg_idx if i not in div_wins]
-                if non_div:
-                    top3 = np.argsort(wins[non_div])[-3:]
-                    for r in top3: po_count[non_div[r]] += 1
-        return div_count / N_SIMULATIONS, po_count / N_SIMULATIONS
-    
-    def sim_ws(results, wp_map):
-        ws_count = np.zeros(n_teams)
-        wp_arr   = np.array([wp_map.get(tid, 0.5) for tid in team_ids])
-        for sim in range(N_SIMULATIONS):
-            wins = results[sim]
-            playoff = []
-            for league in ["AL", "NL"]:
-                lg_idx = [i for i, t in enumerate(team_ids) if info.loc[int(t), "league"] == league]
-                div_w  = set()
-                for div in info[info["league"] == league]["division"].unique():
-                    d_idx = [i for i in lg_idx if info.loc[int(team_ids[i]), "division"] == div]
-                    if d_idx:
-                        best = d_idx[int(np.argmax(wins[d_idx]))]
-                        div_w.add(best); playoff.append(best)
-                non_div = [i for i in lg_idx if i not in div_w]
-                if non_div:
-                    for r in np.argsort(wins[non_div])[-3:]: playoff.append(non_div[r])
-            rem = list(playoff)
-            while len(rem) > 1:
-                rng.shuffle(rem)
-                nxt = []
-                for i in range(0, len(rem) - 1, 2):
-                    p = log5(wp_arr[rem[i]], wp_arr[rem[i+1]])
-                    nxt.append(rem[i] if rng.random() < p else rem[i+1])
-                if len(rem) % 2 == 1: nxt.append(rem[-1])
+def run_simulation(df, sched):
+    rng = np.random.default_rng(RANDOM_SEED)
+    tids = df["team_id"].tolist()
+    idx = {t: i for i, t in enumerate(tids)}
+    info = df[["team_id","division","league"]].set_index("team_id")
+    init = np.array([df.set_index("team_id")["wins"].get(t,0) for t in tids], dtype=float)
+    adj = df.set_index("team_id")["adj_win_pct"].to_dict()
+    base = df.set_index("team_id")["blended_win_pct"].to_dict()
+    rem = get_remaining_games(sched)
+    if rem.empty:
+        return {"division_odds": {t:0 for t in tids}, "playoff_odds": {t:0 for t in tids}, "ws_odds": {t:0 for t in tids}, "proj_wins": {t: float(init[i]+adj.get(t,0.5)*df.set_index("team_id")["games_remaining"].get(t,0)) for i,t in enumerate(tids)}, "proj_wins_std": {t:0 for t in tids}, "pre_deadline_division_odds": {t:0 for t in tids}, "pre_deadline_playoff_odds": {t:0 for t in tids}, "pre_deadline_ws_odds": {t:0 for t in tids}}
+    h, a = rem["home_team_id"].astype(int).values, rem["away_team_id"].astype(int).values
+    v = np.array([x in idx and y in idx for x,y in zip(h,a)])
+    h, a = h[v], a[v]
+    adj_p = np.array([log5(adj.get(x,0.5), adj.get(y,0.5)) for x,y in zip(h,a)])
+    base_p = np.array([log5(base.get(x,0.5), base.get(y,0.5)) for x,y in zip(h,a)])
+    hi, ai = np.array([idx[x] for x in h]), np.array([idx[y] for y in a])
+    ng = len(h)
+    def sim(probs):
+        res = np.tile(init, (N_SIMULATIONS,1)).astype(float)
+        if ng==0: return res
+        rand = rng.random((N_SIMULATIONS, ng))
+        hw = rand < probs[np.newaxis,:]
+        for g in range(ng): res[:, hi[g]] += hw[:,g].astype(float); res[:, ai[g]] += (~hw[:,g]).astype(float)
+        return res
+    ar, br = sim(adj_p), sim(base_p)
+    def odds(res):
+        dc, pc = np.zeros(len(tids)), np.zeros(len(tids))
+        for s in range(N_SIMULATIONS):
+            w = res[s]
+            dw = set()
+            for lg in ["AL","NL"]:
+                li = [i for i,t in enumerate(tids) if info.loc[int(t),"league"]==lg]
+                for div in info[info["league"]==lg]["division"].unique():
+                    di = [i for i in li if info.loc[int(tids[i]),"division"]==div]
+                    if di:
+                        b = di[int(np.argmax(w[di]))]
+                        dw.add(b); dc[b]+=1; pc[b]+=1
+                nd = [i for i in li if i not in dw]
+                if nd:
+                    for r in np.argsort(w[nd])[-3:]: pc[nd[r]]+=1
+        return dc/N_SIMULATIONS, pc/N_SIMULATIONS
+    def ws(res, wm):
+        wc = np.zeros(len(tids))
+        wa = np.array([wm.get(t,0.5) for t in tids])
+        for s in range(N_SIMULATIONS):
+            w = res[s]
+            po = []
+            for lg in ["AL","NL"]:
+                li = [i for i,t in enumerate(tids) if info.loc[int(t),"league"]==lg]
+                dw = set()
+                for div in info[info["league"]==lg]["division"].unique():
+                    di = [i for i in li if info.loc[int(tids[i]),"division"]==div]
+                    if di: b=di[int(np.argmax(w[di]))]; dw.add(b); po.append(b)
+                nd = [i for i in li if i not in dw]
+                if nd:
+                    for r in np.argsort(w[nd])[-3:]: po.append(nd[r])
+            rem = list(po)
+            while len(rem)>1:
+                rng.shuffle(rem); nxt=[]
+                for i in range(0, len(rem)-1, 2): p=log5(wa[rem[i]], wa[rem[i+1]]); nxt.append(rem[i] if rng.random()<p else rem[i+1])
+                if len(rem)%2==1: nxt.append(rem[-1])
                 rem = nxt
-            if rem: ws_count[rem[0]] += 1
-        return ws_count / N_SIMULATIONS
-    
-    adj_div, adj_po  = get_odds(adj_res)
-    base_div, base_po = get_odds(base_res)
-    adj_ws   = sim_ws(adj_res, adj_wp)
-    base_ws  = sim_ws(base_res, base_wp)
-    
-    return {
-        "division_odds":              {tid: float(adj_div[i])  for i, tid in enumerate(team_ids)},
-        "playoff_odds":               {tid: float(adj_po[i])   for i, tid in enumerate(team_ids)},
-        "ws_odds":                    {tid: float(adj_ws[i])   for i, tid in enumerate(team_ids)},
-        "proj_wins":                  {tid: float(adj_res.mean(0)[i]) for i, tid in enumerate(team_ids)},
-        "proj_wins_std":              {tid: float(adj_res.std(0)[i])  for i, tid in enumerate(team_ids)},
-        "pre_deadline_division_odds": {tid: float(base_div[i]) for i, tid in enumerate(team_ids)},
-        "pre_deadline_playoff_odds":  {tid: float(base_po[i])  for i, tid in enumerate(team_ids)},
-        "pre_deadline_ws_odds":       {tid: float(base_ws[i])  for i, tid in enumerate(team_ids)},
-    }
+            if rem: wc[rem[0]]+=1
+        return wc/N_SIMULATIONS
+    ad, ap = odds(ar); bd, bp = odds(br)
+    aw = ws(ar, adj); bw = ws(br, base)
+    return {"division_odds": {t: float(ad[i]) for i,t in enumerate(tids)}, "playoff_odds": {t: float(ap[i]) for i,t in enumerate(tids)}, "ws_odds": {t: float(aw[i]) for i,t in enumerate(tids)}, "proj_wins": {t: float(ar.mean(0)[i]) for i,t in enumerate(tids)}, "proj_wins_std": {t: float(ar.std(0)[i]) for i,t in enumerate(tids)}, "pre_deadline_division_odds": {t: float(bd[i]) for i,t in enumerate(tids)}, "pre_deadline_playoff_odds": {t: float(bp[i]) for i,t in enumerate(tids)}, "pre_deadline_ws_odds": {t: float(bw[i]) for i,t in enumerate(tids)}}
 
-def _empty_sim(master_df):
-    tids     = master_df["team_id"].tolist()
-    cur_wins = master_df.set_index("team_id")["wins"].to_dict()
-    result   = {k: {tid: 0.0 for tid in tids} for k in ["division_odds", "playoff_odds", "ws_odds", "proj_wins_std", "pre_deadline_division_odds", "pre_deadline_playoff_odds", "pre_deadline_ws_odds"]}
-    adj_wp = master_df.set_index("team_id")["adj_win_pct"].to_dict()
-    gr     = master_df.set_index("team_id")["games_remaining"].to_dict()
-    result["proj_wins"] = {tid: float(cur_wins.get(tid, 0)) + float(adj_wp.get(tid, 0.5)) * float(gr.get(tid, 0)) for tid in tids}
-    return result
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# UI — PROJECTIONS TAB
-# ═══════════════════════════════════════════════════════════════════════════════
-def render_projections_tab(master_df, sim_results):
+def render_projections_tab(df, sim):
     st.markdown("## 2026 MLB Season Projections")
-    proj_source = master_df["proj_source"].iloc[0] if "proj_source" in master_df.columns else "Unknown"
-    source_color = {"FanGraphs DC": "🟢", "Regression-to-Mean": "🟡", "League Average": "🔴"}.get(proj_source, "⚪")
-    st.caption(f"Updated daily at midnight EST · 10,000-simulation Monte Carlo · Projection source: {source_color} {proj_source}")
-    
+    src = df["proj_source"].iloc[0] if "proj_source" in df.columns else "Unknown"
+    st.caption(f"Updated daily at midnight EST · 10,000-sim Monte Carlo · Source: {src}")
     rows = []
-    for _, row in master_df.iterrows():
-        tid = row["team_id"]
-        rows.append({
-            "Team":      row["abbr"], "Full Name": row["name"],
-            "League":    row["league"], "Division": row["division"],
-            "W":         int(row["wins"]), "L": int(row["losses"]),
-            "Win%":      f"{row['win_pct']:.3f}",
-            "Pythag%":   f"{row.get('pythag_win_pct', row['win_pct']):.3f}",
-            "GB (WC)":   f"{row['wc_games_back']:.1f}" if row["wc_games_back"] > 0 else "—",
-            "Proj W":    round(sim_results["proj_wins"].get(tid, row["wins"]), 1),
-            "Proj L":    round(162 - sim_results["proj_wins"].get(tid, row["wins"]), 1),
-            "Proj Rec":  f"{int(round(sim_results['proj_wins'].get(tid, row['wins'])))}-{int(round(162 - sim_results['proj_wins'].get(tid, row['wins'])))}",
-            "Div%":      f"{sim_results['division_odds'].get(tid, 0):.1%}",
-            "Playoff%":  f"{sim_results['playoff_odds'].get(tid, 0):.1%}",
-            "WS%":       f"{sim_results['ws_odds'].get(tid, 0):.2%}",
-            "Status":    row.get("tier_label", "Neutral"),
-            "tier":      row.get("tier", "neutral"),
-            "SoS":       row.get("sos_label", "—"),
-        })
-    display_df = pd.DataFrame(rows)
-    col1, col2 = st.columns(2)
-    league_filter = col1.radio("League", ["All", "AL", "NL"], horizontal=True)
-    if league_filter != "All":
-        display_df = display_df[display_df["League"] == league_filter]
-    all_divs   = sorted(display_df["Division"].unique())
-    div_filter = col2.selectbox("Division", ["All Divisions"] + all_divs)
-    if div_filter != "All Divisions":
-        display_df = display_df[display_df["Division"] == div_filter]
-        
+    for _,r in df.iterrows():
+        rows.append({"Team": r["abbr"], "W": r["wins"], "L": r["losses"], "Win%": f"{r['win_pct']:.3f}", "Pythag%": f"{r['pythag_win_pct']:.3f}", "GB(WC)": f"{r['wc_games_back']:.1f}" if r["wc_games_back"]>0 else "—", "Proj W": round(sim["proj_wins"].get(r["team_id"], r["wins"]), 1), "Proj L": round(162-sim["proj_wins"].get(r["team_id"], r["wins"]), 1), "Proj Rec": f"{int(round(sim['proj_wins'].get(r['team_id'], r['wins'])))}-{int(round(162-sim['proj_wins'].get(r['team_id'], r['wins'])))}", "Div%": f"{sim['division_odds'].get(r['team_id'],0):.1%}", "Playoff%": f"{sim['playoff_odds'].get(r['team_id'],0):.1%}", "WS%": f"{sim['ws_odds'].get(r['team_id'],0):.2%}", "Status": r.get("tier_label","Neutral"), "tier": r.get("tier","neutral"), "SoS": r.get("sos_label","—")})
+    disp = pd.DataFrame(rows)
+    c1, c2 = st.columns(2)
+    lf = c1.radio("League", ["All","AL","NL"], horizontal=True)
+    if lf!="All": disp = disp[disp["Team"].isin([r["abbr"] for _,r in df[df["league"]==lf].iterrows()])]
+    alld = sorted(disp["Status"].unique())
+    dfilt = c2.selectbox("Division", ["All Divisions"] + alld)
+    if dfilt!="All Divisions": disp = disp[disp["Status"]==dfilt]
     st.markdown("---")
-    for div in sorted(display_df["Division"].unique()):
-        div_df = display_df[display_df["Division"] == div].sort_values("Proj W", ascending=False)
+    for div in sorted(df["division"].unique()):
+        sub = disp[disp["Team"].isin([r["abbr"] for _,r in df[df["division"]==div].iterrows()])].sort_values("Proj W", ascending=False)
         st.markdown(f"### {div}")
-        render_df = div_df[["Team", "W", "L", "Win%", "Pythag%", "GB (WC)", "Proj Rec", "Div%", "Playoff%", "WS%", "Status", "SoS"]].copy()
-        render_df["Status"] = render_df.apply(lambda r: f"{TIER_EMOJI.get(div_df.loc[r.name,'tier'],'⚪')} {r['Status']}", axis=1)
-        st.dataframe(render_df, width="stretch", hide_index=True)
-        
+        sub["Status"] = sub.apply(lambda r: f"{TIER_EMOJI.get(r['tier'],'⚪')} {r['Status']}", axis=1)
+        st.dataframe(sub[["Team","W","L","Win%","Pythag%","GB(WC)","Proj Rec","Div%","Playoff%","WS%","Status","SoS"]], width="stretch", hide_index=True)
     st.markdown("---")
-    c = st.columns(5)
-    for col, (emoji, label, desc) in zip(c, [
-        ("🔴", "Hard Seller", "−12% win rate"), ("🟠", "Soft Seller", "−6% win rate"),
-        ("⚪", "Neutral", "No adjustment"), ("🟢", "Soft Buyer", "+4% win rate"), ("🔵", "Hard Buyer", "+7% win rate"),
-    ]):
-        col.markdown(f"**{emoji} {label}**  \n{desc}")
+    cols = st.columns(5)
+    for c, (e,l,d) in zip(cols, [("🔴","Hard Seller","−12%"), ("🟠","Soft Seller","−6%"), ("⚪","Neutral","0%"), ("🟢","Soft Buyer","+4%"), ("🔵","Hard Buyer","+7%")]): c.markdown(f"**{e} {l}**\n{d} win adj")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# UI — DEADLINE IMPACT TAB
-# ═══════════════════════════════════════════════════════════════════════════════
-def render_deadline_tab(master_df, sim_results):
+def render_deadline_tab(df, sim):
     st.markdown("## Trade Deadline Impact")
     state = get_season_state()
-    ramp  = get_deadline_ramp_factor()
-    if state == "pre_deadline":
-        st.info("⏳ Deadline adjustments begin July 1.")
-    elif state == "deadline_ramp":
-        st.warning(f"📅 July ramp is **{int(ramp*100)}% active**. Full effect July 31.")
-    elif state == "post_deadline":
-        st.success("✅ Trade deadline passed. Full adjustments locked in.")
-        
+    ramp = get_deadline_ramp_factor()
+    if state=="pre_deadline": st.info("⏳ Adjustments begin July 1.")
+    elif state=="deadline_ramp": st.warning(f"📅 Ramp is **{int(ramp*100)}% active**.")
+    else: st.success("✅ Deadline passed. Locked.")
     rows = []
-    for _, row in master_df.iterrows():
-        tid = row["team_id"]
-        pre_po  = sim_results.get("pre_deadline_playoff_odds", {}).get(tid, 0)
-        post_po = sim_results.get("playoff_odds", {}).get(tid, 0)
-        pre_ws  = sim_results.get("pre_deadline_ws_odds", {}).get(tid, 0)
-        post_ws = sim_results.get("ws_odds", {}).get(tid, 0)
-        pre_div = sim_results.get("pre_deadline_division_odds", {}).get(tid, 0)
-        post_div= sim_results.get("division_odds", {}).get(tid, 0)
-        rows.append({
-            "team_id": tid, "Team": row["abbr"], "tier": row.get("tier", "neutral"),
-            "Status": row.get("tier_label", "Neutral"),
-            "Win Adj": f"{row.get('ramped_adj', 0):+.1%}",
-            "Pre Playoff%": pre_po, "Post Playoff%": post_po,
-            "playoff_delta": post_po - pre_po,
-            "Pre WS%": pre_ws, "Post WS%": post_ws, "ws_delta": post_ws - pre_ws,
-            "pre_div": pre_div, "post_div": post_div, "div_delta": post_div - pre_div,
-        })
-    comp = pd.DataFrame(rows).sort_values("playoff_delta")
-    
+    for _,r in df.iterrows():
+        tid = r["team_id"]
+        rows.append({"team_id": tid, "Team": r["abbr"], "tier": r.get("tier","neutral"), "Status": r.get("tier_label","Neutral"), "Win Adj": f"{r.get('ramped_adj',0):+.1%}", "Pre PO": sim.get("pre_deadline_playoff_odds",{}).get(tid,0), "Post PO": sim.get("playoff_odds",{}).get(tid,0), "Pre WS": sim.get("pre_deadline_ws_odds",{}).get(tid,0), "Post WS": sim.get("ws_odds",{}).get(tid,0), "Pre Div": sim.get("pre_deadline_division_odds",{}).get(tid,0), "Post Div": sim.get("division_odds",{}).get(tid,0)})
+    comp = pd.DataFrame(rows)
+    comp["PO Delta"] = comp["Post PO"] - comp["Pre PO"]
+    comp["WS Delta"] = comp["Post WS"] - comp["Pre WS"]
+    comp["Div Delta"] = comp["Post Div"] - comp["Pre Div"]
     st.markdown("---")
-    st.markdown("### Playoff Odds: Before vs. After Deadline Adjustments")
-    colors = [TIER_COLORS.get(t, "#7f7f7f") for t in comp["tier"]]
-    fig = go.Figure(go.Bar(
-        x=comp["Team"], y=(comp["playoff_delta"]*100).round(1),
-        marker_color=colors,
-        text=(comp["playoff_delta"]*100).round(1).apply(lambda v: f"{v:+.1f}%"),
-        textposition="outside",
-    ))
-    fig.update_layout(title="Playoff Odds Change", xaxis_title="Team", yaxis_title="Percentage Point Change", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", height=400)
-    fig.add_hline(y=0, line_dash="dash", line_color="rgba(128,128,128,0.5)")
+    fig = go.Figure(go.Bar(x=comp["Team"], y=(comp["PO Delta"]*100).round(1), marker_color=[TIER_COLORS.get(t,"#7f7f7f") for t in comp["tier"]], text=(comp["PO Delta"]*100).round(1).apply(lambda v:f"{v:+.1f}%"), textposition="outside"))
+    fig.update_layout(title="Playoff Odds Change", xaxis_title="Team", yaxis_title="Percentage Point Change", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", height=400); fig.add_hline(y=0, line_dash="dash", line_color="gray")
     st.plotly_chart(fig, width="stretch")
-    
-    st.markdown("### Full Breakdown")
-    disp = comp[["Team", "Status", "Win Adj"]].copy()
+    disp = comp[["Team","Status","Win Adj"]].copy()
     disp["Status"] = comp.apply(lambda r: f"{TIER_EMOJI.get(r['tier'],'⚪')} {r['Status']}", axis=1)
-    disp["Pre PO%"]      = (comp["Pre Playoff%"]*100).round(1).apply(lambda v: f"{v:.1f}%")
-    disp["Post PO%"]     = (comp["Post Playoff%"]*100).round(1).apply(lambda v: f"{v:.1f}%")
-    disp["PO Delta"]     = (comp["playoff_delta"]*100).round(1).apply(lambda v: f"{v:+.1f}pp")
-    disp["Pre WS%"]      = (comp["Pre WS%"]*100).round(2).apply(lambda v: f"{v:.2f}%")
-    disp["Post WS%"]     = (comp["Post WS%"]*100).round(2).apply(lambda v: f"{v:.2f}%")
-    disp["WS Delta"]     = (comp["ws_delta"]*100).round(2).apply(lambda v: f"{v:+.2f}pp")
+    disp["Pre PO%"] = (comp["Pre PO"]*100).round(1).apply(lambda v:f"{v:.1f}%")
+    disp["Post PO%"] = (comp["Post PO"]*100).round(1).apply(lambda v:f"{v:.1f}%")
+    disp["PO Δ"] = (comp["PO Delta"]*100).round(1).apply(lambda v:f"{v:+.1f}pp")
     st.dataframe(disp, width="stretch", hide_index=True)
-    
-    st.markdown("### Classification Drivers")
-    fig2 = go.Figure()
-    for tier, grp in master_df.groupby("tier"):
-        fig2.add_trace(go.Scatter(x=grp["wc_games_back"], y=grp["rd_per_162"], mode="markers+text", name=TIER_LABELS.get(tier, tier), text=grp["abbr"], textposition="top center", marker=dict(color=TIER_COLORS.get(tier, "#7f7f7f"), size=12)))
-    fig2.update_layout(title="WC Games Back vs Run Differential", xaxis_title="Wild Card Games Back", yaxis_title="Run Diff per 162", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", height=500)
-    fig2.add_vline(x=4.0, line_dash="dash", line_color="rgba(255,127,14,0.4)")
-    fig2.add_vline(x=8.0, line_dash="dash", line_color="rgba(214,39,39,0.4)")
-    fig2.add_hline(y=0,   line_dash="dot",  line_color="rgba(128,128,128,0.3)")
-    st.plotly_chart(fig2, width="stretch")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# UI — TEAM DETAIL TAB
-# ═══════════════════════════════════════════════════════════════════════════════
-def render_team_tab(master_df, sim_results):
+def render_team_tab(df, sim):
     st.markdown("## Team Detail")
-    options = sorted([(row["name"], row["team_id"]) for _, row in master_df.iterrows()], key=lambda x: x[0])
-    selected = st.selectbox("Select a team", [o[0] for o in options], key="team_select_box")
-    tid = next(o[1] for o in options if o[0] == selected)
-    row = master_df[master_df["team_id"] == tid].iloc[0]
-    tier  = row.get("tier", "neutral")
-    emoji = TIER_EMOJI.get(tier, "⚪")
-    label = row.get("tier_label", "Neutral")
-    
-    st.markdown("---")
+    opts = sorted([(r["name"], r["team_id"]) for _,r in df.iterrows()])
+    sel = st.selectbox("Select a team", [o[0] for o in opts], index=0, key="team_sel")
+    tid = next(o[1] for o in opts if o[0]==sel)
+    row = df[df["team_id"]==tid].iloc[0]
     c1, c2, c3 = st.columns([2,1,1])
-    c1.markdown(f"## {row['name']} ({row['abbr']})")
-    c1.markdown(f"{row['division']} · {emoji} **{label}**")
-    c2.metric("Record", f"{int(row['wins'])}–{int(row['losses'])}")
+    c1.markdown(f"## {row['name']} ({row['abbr']})\n{row['division']} · {TIER_EMOJI.get(row.get('tier','neutral'),'⚪')} **{row.get('tier_label','Neutral')}**")
+    c2.metric("Record", f"{row['wins']}–{row['losses']}")
     c3.metric("Win%", f"{row['win_pct']:.3f}")
-    
     st.markdown("---")
-    st.markdown("### Season Projections")
     m1, m2, m3, m4, m5 = st.columns(5)
-    proj_w   = sim_results["proj_wins"].get(tid, row["wins"])
-    proj_std = sim_results["proj_wins_std"].get(tid, 0)
-    m1.metric("Proj Wins", f"{proj_w:.1f}", f"±{proj_std:.1f}")
-    m2.metric("Div%", f"{sim_results['division_odds'].get(tid,0):.1%}")
-    m3.metric("Playoff%", f"{sim_results['playoff_odds'].get(tid,0):.1%}")
-    m4.metric("WS%", f"{sim_results['ws_odds'].get(tid,0):.2%}")
-    m5.metric("SoS", row.get("sos_label", "—"))
-    
+    pw = sim["proj_wins"].get(tid, row["wins"])
+    m1.metric("Proj Wins", f"{pw:.1f}", f"±{sim['proj_wins_std'].get(tid,0):.1f}")
+    m2.metric("Div%", f"{sim['division_odds'].get(tid,0):.1%}")
+    m3.metric("Playoff%", f"{sim['playoff_odds'].get(tid,0):.1%}")
+    m4.metric("WS%", f"{sim['ws_odds'].get(tid,0):.2%}")
+    m5.metric("SoS", row.get("sos_label","—"))
     st.markdown("---")
-    st.markdown("### Deadline Impact")
-    i1, i2, i3 = st.columns(3)
-    pre_div  = sim_results.get("pre_deadline_division_odds", {}).get(tid, 0)
-    post_div = sim_results.get("division_odds", {}).get(tid, 0)
-    pre_po   = sim_results.get("pre_deadline_playoff_odds", {}).get(tid, 0)
-    post_po  = sim_results.get("playoff_odds", {}).get(tid, 0)
-    pre_ws   = sim_results.get("pre_deadline_ws_odds", {}).get(tid, 0)
-    post_ws  = sim_results.get("ws_odds", {}).get(tid, 0)
-    i1.metric("Division Odds", f"{post_div:.1%}", f"{post_div-pre_div:+.1%} vs pre-DL")
-    i2.metric("Playoff Odds", f"{post_po:.1%}", f"{post_po-pre_po:+.1%} vs pre-DL")
-    i3.metric("WS Odds", f"{post_ws:.2%}", f"{post_ws-pre_ws:+.2%} vs pre-DL")
-    
-    st.markdown("---")
-    st.markdown("### Classification Drivers")
     d1, d2 = st.columns(2)
     with d1:
         st.markdown("**Inputs**")
-        proj_w_used   = row.get('proj_weight_used', 0.65)
-        pythag_w_used = row.get('pythag_weight_used', 0.35)
-        for k, v in [
-            ("WC Games Back", f"{row.get('wc_games_back',0):.1f}"),
-            ("Run Diff/162", f"{row.get('rd_per_162',0):+.0f}"),
-            ("Actual Win%", f"{row.get('win_pct',0):.3f}"),
-            ("Pythagorean Win%", f"{row.get('pythag_win_pct',0):.3f}"),
-            ("Player Proj Win%", f"{row.get('proj_win_pct',0):.3f}"),
-            ("Blended Win%", f"{row.get('blended_win_pct',0):.3f}"),
-            ("Luck (wins +/-)", f"{row.get('luck_wins',0):+.1f}"),
-            ("Proj weight (roster)", f"{proj_w_used:.0%}"),
-            ("Pythag weight (record)", f"{pythag_w_used:.0%}"),
-        ]:
-            st.markdown(f"- **{k}:** {v}")
+        for k,v in [("WC GB", f"{row.get('wc_games_back',0):.1f}"), ("RD/162", f"{row.get('rd_per_162',0):+.0f}"), ("Actual%", f"{row['win_pct']:.3f}"), ("Pythag%", f"{row['pythag_win_pct']:.3f}"), ("Proj%", f"{row['proj_win_pct']:.3f}"), ("Blended%", f"{row['blended_win_pct']:.3f}"), ("Luck", f"{row.get('luck_wins',0):+.1f}")]: st.markdown(f"- **{k}:** {v}")
     with d2:
         st.markdown("**Score**")
-        dampener_pct = int(row.get("dampener", 1.0) * 100)
-        for k, v in [
-            ("Pre-Dampened Score", f"{row.get('pre_dampened_score',0):.2f}"),
-            ("Games Played Dampener", f"{dampener_pct}% of full score applied"),
-            ("Adjusted Score", f"{row.get('adjusted_score',0):.2f}"),
-            ("Injury Adj (GB units)", f"{row.get('injury_score_adj',0):+.2f}"),
-            ("Base Win Adj", f"{row.get('base_adj',0):+.1%}"),
-            ("Full Adj (post-DL)", f"{row.get('final_adj',0):+.1%}"),
-            ("Ramped Adj (today)", f"{row.get('ramped_adj',0):+.1%}"),
-        ]:
-            st.markdown(f"- **{k}:** {v}")
-            
-    proj_source = row.get("proj_source", "Unknown")
-    st.caption(f"Projection source: **{proj_source}**")
-    
+        for k,v in [("Pre-Dampen", f"{row.get('pre_dampened_score',0):.2f}"), ("Dampener", f"{int(row.get('dampener',1)*100)}%"), ("Adj Score", f"{row.get('adjusted_score',0):.2f}"), ("Injury Adj", f"{row.get('injury_score_adj',0):+.2f}"), ("Final Adj", f"{row.get('final_adj',0):+.1%}"), ("Ramped Adj", f"{row.get('ramped_adj',0):+.1%}")]: st.markdown(f"- **{k}:** {v}")
+    st.caption(f"Source: {row.get('proj_source','Unknown')}")
     st.markdown("---")
-    st.markdown("### Projected Roster")
-    try:
-        pd_raw = row.get("player_detail", "{}")
-        if isinstance(pd_raw, str): detail = json.loads(pd_raw)
-        else: detail = {"batters": [], "sp": [], "rp": []}
-    except Exception:
-        detail = {"batters": [], "sp": [], "rp": []}
-        
     rc1, rc2, rc3 = st.columns(3)
+    try: det = json.loads(row.get("player_detail","{}"))
+    except: det = {"batters":[], "sp":[], "rp":[]}
     with rc1:
-        st.markdown("**Lineup (Proj PA)**")
-        batters = detail.get("batters", [])
-        if batters:
-            bdf = pd.DataFrame(batters)[["name", "pa", "wrc_plus"]].rename(columns={"name": "Player", "pa": "Proj PA", "wrc_plus": "wRC+"})
-            st.dataframe(bdf, width="stretch", hide_index=True)
-        else:
-            st.caption("No data available")
+        st.markdown("**Lineup**")
+        if det.get("batters"): st.dataframe(pd.DataFrame(det["batters"])[["name","pa","wrc_plus"]].rename(columns={"name":"Player","pa":"PA","wrc_plus":"wRC+"}), width="stretch", hide_index=True)
+        else: st.caption("No data")
     with rc2:
-        st.markdown("**Rotation (Proj IP)**")
-        sp = detail.get("sp", [])
-        if sp:
-            sdf = pd.DataFrame(sp)[["name", "ip", "fip"]].rename(columns={"name": "Pitcher", "ip": "Proj IP", "fip": "FIP"})
-            st.dataframe(sdf, width="stretch", hide_index=True)
-        else:
-            st.caption("No data available")
+        st.markdown("**Rotation**")
+        if det.get("sp"): st.dataframe(pd.DataFrame(det["sp"])[["name","ip","fip"]].rename(columns={"name":"Pitcher","ip":"IP","fip":"FIP"}), width="stretch", hide_index=True)
+        else: st.caption("No data")
     with rc3:
-        st.markdown("**Bullpen (Proj IP)**")
-        rp = detail.get("rp", [])
-        if rp:
-            rdf = pd.DataFrame(rp)[["name", "ip", "fip"]].rename(columns={"name": "Pitcher", "ip": "Proj IP", "fip": "FIP"})
-            st.dataframe(rdf, width="stretch", hide_index=True)
-        else:
-            st.caption("No data available")
-            
-    st.markdown("---")
-    st.markdown("### Projected Win Distribution")
-    std = max(proj_std, 3.0)
-    x   = np.linspace(proj_w - 4*std, proj_w + 4*std, 200)
-    y   = np.exp(-0.5*((x - proj_w)/std)**2) / (std * np.sqrt(2*np.pi))
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=y, fill="tozeroy", mode="lines", line=dict(color="#636efa", width=2), fillcolor="rgba(99,110,250,0.2)"))
-    fig.add_vline(x=proj_w, line_dash="dash", line_color="#ef553b", annotation_text=f"Proj: {proj_w:.1f}W", annotation_position="top right")
-    fig.update_layout(xaxis_title="Final Wins", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", height=300, showlegend=False, yaxis=dict(showticklabels=False))
-    st.plotly_chart(fig, width="stretch")
+        st.markdown("**Bullpen**")
+        if det.get("rp"): st.dataframe(pd.DataFrame(det["rp"])[["name","ip","fip"]].rename(columns={"name":"Pitcher","ip":"IP","fip":"FIP"}), width="stretch", hide_index=True)
+        else: st.caption("No data")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# UI — METHODOLOGY TAB
-# ═══════════════════════════════════════════════════════════════════════════════
-def render_methodology_tab():
-    st.markdown("## Methodology")
-    st.caption(f"Data last updated: {get_last_updated()}")
-    st.markdown("This model was built around a core insight missing from most public projection systems: teams that sell at the trade deadline get meaningfully worse after July 31.")
-    with st.expander("📊 Overview & Philosophy", expanded=True):
-        st.markdown("Most projection systems generate a rest-of-season win% and simulate from there, assuming today's roster is August's roster. For sellers that's wrong. This model builds true-talent estimates, identifies likely buyers and sellers algorithmically, adjusts win rates post-deadline, ramps those adjustments gradually across July, and runs 10,000 game-level simulations where every win has a corresponding loss — zero-sum guaranteed.")
-    with st.expander("📡 Data Sources"):
-        st.markdown(f"MLB Stats API — standings, schedule, runs scored/allowed (free, real-time, official)\nFanGraphs Depth Charts — individual player projections (bypassed via cloudscraper)\nRefreshes automatically at midnight EST.")
-    with st.expander("🔮 Team Projections"):
-        st.markdown(f"Three years of stats blended at {int(WEIGHT_CURRENT_SEASON*100)}% current / {int(WEIGHT_LAST_YEAR*100)}% last year / {int(WEIGHT_TWO_YEARS_AGO*100)}% two years ago.\nCurrent year weight grows toward 70% by September as sample size increases.\nPitching uses 70% FIP + 30% ERA.\nPythagorean win% formula: RS^(exp) / (RS^(exp) + RA^(exp)) where exp = {PYTHAG_EXPONENT}")
-    with st.expander("📈 Buyer / Seller Classification"):
-        st.markdown("Each team gets a continuous score from three inputs: Wild Card games back, Run differential modifier, Pythagorean luck modifier.")
-    with st.expander("📅 July Deadline Ramp"):
-        ramp = get_deadline_ramp_factor()
-        st.markdown(f"Linear ramp from July 1 (0%) to July 31 (100%).\nCurrent ramp factor: {int(ramp*100)}%")
-    with st.expander("🎲 Monte Carlo Simulation"):
-        st.markdown(f"{N_SIMULATIONS:,} simulations of the remaining schedule. Each game uses the Log5 formula. Strength of schedule is recalculated after deadline adjustments.")
-    with st.expander("⚠️ Limitations"):
-        st.markdown("No real-time trade parser — classification updates via standings, not transaction wire\nInjuries not modeled dynamically in FG fallback\nPlayoff bracket is simplified\nHome field advantage not modeled\nProspects received in trades are treated as replacement level")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# MAIN
-# ═══════════════════════════════════════════════════════════════════════════════
 def load_all_data():
     cached = load_cache()
-    if cached:
-        master_df   = pd.DataFrame(cached["master"])
-        sim_results = cached.get("sim_results", {})
-        schedule_df = pd.DataFrame(cached.get("schedule", []))
-        if not master_df.empty and sim_results:
-            if "game_date" in schedule_df.columns:
-                schedule_df["game_date"] = pd.to_datetime(schedule_df["game_date"])
-            return master_df, sim_results, schedule_df
-            
+    if cached and cached.get("master") and cached.get("sim_results"):
+        return pd.DataFrame(cached["master"]), cached["sim_results"], pd.DataFrame(cached.get("schedule",[]))
     st.markdown("### ⚾ Loading fresh data...")
-    progress_bar  = st.progress(0)
-    status_text   = st.empty()
-    steps = [(10, "📡 Fetching current standings..."), (22, "📅 Loading remaining schedule..."), (38, "⚾ Pulling projection data..."), (52, "🧮 Building team projections..."), (60, "🏥 Fetching injury data for all 30 teams..."), (68, "📈 Classifying buyers and sellers..."), (74, "📋 Computing strength of schedule..."), (80, "🎲 Running simulations (this takes ~30 seconds)..."), (100, "✅ Done!")]
-    
-    def update(pct, msg):
-        progress_bar.progress(pct)
-        status_text.markdown(f"**{msg}**")
-        
-    update(5, "🚀 Starting up...")
-    update(*steps[0])
-    standings_df = fetch_standings()
-    
-    update(*steps[1])
-    try:
-        schedule_df = fetch_schedule()
-    except Exception as e:
-        print(f"Schedule failed: {e}")
-        schedule_df = pd.DataFrame(columns=["game_id", "game_date", "home_team_id", "away_team_id", "status"])
-        
-    update(*steps[2])
-    statcast_df, player_detail = fetch_team_projections(standings_df)
-    
-    update(*steps[3])
-    master_df = build_master(standings_df, statcast_df, player_detail)
-    
-    update(*steps[4])
-    try:
-        injury_adjs = fetch_all_team_injuries(list(TEAM_INFO.keys()))
-    except Exception:
-        injury_adjs = {tid: 0.0 for tid in TEAM_INFO.keys()}
-        
-    master_df = compute_buyer_seller(master_df, injury_adjustments=injury_adjs)
-    master_df = apply_ramp(master_df, get_deadline_ramp_factor())
-    
-    update(*steps[5])
-    try:
-        opps = compute_remaining_opponents(schedule_df)
-        master_df = compute_sos(master_df, opps)
-    except Exception as e:
-        print(f"SoS skipped: {e}")
-        master_df = master_df.copy()
-        master_df["sos_raw"]   = 0.500
-        master_df["sos_rank"]  = 15
-        master_df["sos_label"] = "Average"
-        
-    update(*steps[6])
-    sim_results = run_simulation(master_df, schedule_df)
-    update(*steps[7])
-    
-    save_cache({"master": master_df.to_dict(orient="records"), "sim_results": sim_results, "schedule": schedule_df.to_dict(orient="records")})
-    progress_bar.empty()
-    status_text.empty()
-    return master_df, sim_results, schedule_df
+    pbar = st.progress(0)
+    txt = st.empty()
+    def up(p,m): pbar.progress(p); txt.markdown(f"**{m}**")
+    up(10, "📡 Fetching standings...")
+    stand = fetch_standings()
+    up(30, "📅 Fetching schedule...")
+    try: sched = fetch_schedule()
+    except: sched = pd.DataFrame(columns=["game_id","game_date","home_team_id","away_team_id","status"])
+    up(50, "⚾ Fetching projections...")
+    proj, det = fetch_team_projections(stand)
+    up(70, "🧮 Building master...")
+    master = build_master(stand, proj, det)
+    up(80, "🏥 Checking injuries...")
+    try: inj = fetch_all_team_injuries(list(TEAM_INFO.keys()))
+    except: inj = {t: 0.0 for t in TEAM_INFO.keys()}
+    master = compute_buyer_seller(master, inj)
+    master = apply_ramp(master, get_deadline_ramp_factor())
+    up(90, "📋 Computing SoS & Simulating...")
+    try: master = compute_sos(master, compute_remaining_opponents(sched))
+    except: master["sos_raw"], master["sos_rank"], master["sos_label"] = 0.5, 15, "Average"
+    sim = run_simulation(master, sched)
+    up(100, "✅ Done!")
+    pbar.empty(); txt.empty()
+    save_cache({"master": master.to_dict(orient="records"), "sim_results": sim, "schedule": sched.to_dict(orient="records")})
+    return master, sim, sched
 
 def main():
-    state        = get_season_state()
-    last_updated = get_last_updated()
-    col1, col2 = st.columns([3, 1])
-    col1.markdown(f"# ⚾ MLB {SEASON_YEAR} Season Projections")
-    col1.markdown("Deadline-aware Monte Carlo projections for all 30 teams.")
-    state_labels = {"pre_deadline": "🟡 Pre-Deadline Season", "deadline_ramp": "🟠 July Deadline Ramp", "post_deadline": "🟢 Post-Deadline Season", "offseason": "❄️ Offseason"}
-    col2.markdown(f"**Status:** {state_labels.get(state, '⚾ In Season')}")
-    col2.markdown(f"**Ramp:** {get_deadline_ramp_factor():.0%} active")
-    col2.caption(f"Last updated: {last_updated}")
-    
-    if state == "offseason":
-        st.info(f"🏁 The {SEASON_YEAR} season is complete. Showing frozen final standings. Live projections return on Opening Day.")
-        
-    st.markdown("---")
-    
-    # Robust session state handling to prevent tab jumping on widget interaction
-    if ("master_df" not in st.session_state or "sim_results" not in st.session_state or not st.session_state.get("data_loaded", False)):
+    if "master_df" not in st.session_state or not st.session_state.get("data_loaded"):
         try:
-            master_df, sim_results, schedule_df = load_all_data()
-            st.session_state["master_df"]    = master_df
-            st.session_state["sim_results"]  = sim_results
-            st.session_state["schedule_df"]  = schedule_df
-            st.session_state["data_loaded"]  = True
+            m, s, sch = load_all_data()
+            st.session_state["master_df"] = m
+            st.session_state["sim_results"] = s
+            st.session_state["schedule_df"] = sch
+            st.session_state["data_loaded"] = True
         except Exception as e:
-            st.error(f"⚠️ Data loading failed: {e}")
-            st.code(traceback.format_exc())
-            st.stop()
+            st.error(f"Load failed: {e}"); st.stop()
     else:
-        master_df   = st.session_state["master_df"]
-        sim_results = st.session_state["sim_results"]
-        schedule_df = st.session_state["schedule_df"]
-        
-    if master_df.empty:
-        st.warning("No standings data available. Please try again shortly.")
-        st.stop()
-        
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Projections", "🔄 Deadline Impact", "🔍 Team Detail", "📖 Methodology"])
-    with tab1: render_projections_tab(master_df, sim_results)
-    with tab2: render_deadline_tab(master_df, sim_results)
-    with tab3: render_team_tab(master_df, sim_results)
-    with tab4: render_methodology_tab()
-    
-    st.markdown("---")
-    st.caption(f"MLB Stats API · FanGraphs DC · Log5 Monte Carlo · 10,000 sims · Updated: {last_updated}")
+        m, s, sch = st.session_state["master_df"], st.session_state["sim_results"], st.session_state["schedule_df"]
+    if m.empty: st.warning("No data"); st.stop()
+    st.title(f"⚾ MLB {SEASON_YEAR} Projections")
+    st.caption(f"Source: {m['proj_source'].iloc[0]} · Updated: {get_last_updated()}")
+    tab1, tab2, tab3 = st.tabs(["📊 Projections", "🔄 Deadline Impact", "🔍 Team Detail"])
+    with tab1: render_projections_tab(m, s)
+    with tab2: render_deadline_tab(m, s)
+    with tab3: render_team_tab(m, s)
 
 if __name__ == "__main__":
     main()
