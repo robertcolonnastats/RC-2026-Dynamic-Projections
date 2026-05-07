@@ -38,7 +38,7 @@ st.markdown("""
 # CONSTANTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-SEASON_YEAR              = 2026
+SEASON_YEAR              = date.today().year
 OPENING_DAY              = "2026-03-27"
 WORLD_SERIES_END_APPROX  = "2026-11-01"
 TRADE_DEADLINE           = "2026-07-31"
@@ -377,7 +377,7 @@ FG_ABBR_MAP = {
     "PIT": 134, "SDP": 135, "SEA": 136, "SFG": 137, "STL": 138,
     "TBR": 139, "TEX": 140, "TOR": 141, "MIN": 142, "PHI": 143,
     "ATL": 144, "CHW": 145, "MIA": 146, "NYY": 147, "MIL": 158,
-    "KC": 118, "SD": 135, "SF": 137, "TB": 139, "WSH": 120, "CWS": 145,
+    "KC": 118, "SD": 135, "SF": 137, "TB": 139, "WSH": 120, "CWS": 145, "NYN": 121, "SDN": 135, "CHA": 145, "TAM": 139,
 }
 LEAGUE_AVG_RPG    = 4.50
 LEAGUE_AVG_FIP    = 4.10
@@ -414,75 +414,147 @@ def _regressed_win_pct(rs_per_g: float, ra_per_g: float, games_played: int) -> t
     return reg_rs, reg_ra, float(wp)
 
 
+
 def _fetch_fg_dc_batting() -> pd.DataFrame | None:
     """Fetch FanGraphs Depth Charts batting projections."""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
         "Referer": "https://www.fangraphs.com/projections",
     }
-    try:
-        r = requests.get(
+
+    urls_to_try = [
+        (
             "https://www.fangraphs.com/api/projections",
-            params={"type": "fangraphsdc", "stats": "bat", "pos": "all",
-                    "team": 0, "players": 0, "lg": "all"},
-            headers=headers, timeout=20,
-        )
-        if r.status_code != 200 or not r.content:
-            return None
-        data = r.json()
-        if not isinstance(data, list) or len(data) < 100:
-            return None
-        df = pd.DataFrame(data)
-        df.columns = [c.strip() for c in df.columns]
-        return df
-    except Exception:
-        return None
+            {"type": "fangraphsdc", "stats": "bat", "pos": "all",
+             "team": 0, "players": 0, "lg": "all"}
+        ),
+    ]
+
+    for url, params in urls_to_try:
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=30)
+
+            print(f"[FG BAT] status={r.status_code} len={len(r.text)}")
+
+            if r.status_code != 200 or not r.text.strip():
+                continue
+
+            data = r.json()
+
+            # Fangraphs sometimes wraps payloads
+            if isinstance(data, dict):
+                if "data" in data:
+                    data = data["data"]
+                elif "rows" in data:
+                    data = data["rows"]
+
+            if not isinstance(data, list):
+                continue
+
+            df = pd.DataFrame(data)
+
+            if len(df) < 50:
+                continue
+
+            df.columns = [str(c).strip() for c in df.columns]
+
+            print(f"[FG BAT] columns={list(df.columns)[:15]}")
+            print(f"[FG BAT] rows={len(df)}")
+
+            return df
+
+        except Exception as e:
+            print(f"[FG BAT ERROR] {e}")
+
+    return None
 
 
 def _fetch_fg_dc_pitching() -> pd.DataFrame | None:
     """Fetch FanGraphs Depth Charts pitching projections."""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
         "Referer": "https://www.fangraphs.com/projections",
     }
-    try:
-        r = requests.get(
+
+    urls_to_try = [
+        (
             "https://www.fangraphs.com/api/projections",
-            params={"type": "fangraphsdc", "stats": "pit", "pos": "all",
-                    "team": 0, "players": 0, "lg": "all"},
-            headers=headers, timeout=20,
-        )
-        if r.status_code != 200 or not r.content:
-            return None
-        data = r.json()
-        if not isinstance(data, list) or len(data) < 100:
-            return None
-        df = pd.DataFrame(data)
-        df.columns = [c.strip() for c in df.columns]
-        return df
-    except Exception:
-        return None
+            {"type": "fangraphsdc", "stats": "pit", "pos": "all",
+             "team": 0, "players": 0, "lg": "all"}
+        ),
+    ]
+
+    for url, params in urls_to_try:
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=30)
+
+            print(f"[FG PIT] status={r.status_code} len={len(r.text)}")
+
+            if r.status_code != 200 or not r.text.strip():
+                continue
+
+            data = r.json()
+
+            if isinstance(data, dict):
+                if "data" in data:
+                    data = data["data"]
+                elif "rows" in data:
+                    data = data["rows"]
+
+            if not isinstance(data, list):
+                continue
+
+            df = pd.DataFrame(data)
+
+            if len(df) < 50:
+                continue
+
+            df.columns = [str(c).strip() for c in df.columns]
+
+            print(f"[FG PIT] columns={list(df.columns)[:15]}")
+            print(f"[FG PIT] rows={len(df)}")
+
+            return df
+
+        except Exception as e:
+            print(f"[FG PIT ERROR] {e}")
+
+    return None
 
 
 def _team_id_from_fg_row(row: pd.Series) -> int | None:
-    for col in ["teamid", "TeamId", "team_id"]:
-        if col in row.index and pd.notna(row.get(col)):
-            try:
-                return int(row[col])
-            except Exception:
-                pass
-    for col in ["Team", "team"]:
-        if col in row.index:
-            abbr = str(row[col]).strip().upper()
-            if abbr in FG_ABBR_MAP:
-                return FG_ABBR_MAP[abbr]
-    for col in ["TeamName", "Tm"]:
-        if col in row.index:
-            name = str(row[col]).strip()
-            if name in FG_TEAM_MAP:
-                return FG_TEAM_MAP[name]
+    possible_cols = [
+        "teamid", "TeamId", "team_id",
+        "Team", "team", "Tm", "TeamName"
+    ]
+
+    for col in possible_cols:
+        if col not in row.index:
+            continue
+
+        val = str(row[col]).strip()
+
+        if not val or val.lower() == "nan":
+            continue
+
+        # Numeric direct mapping
+        try:
+            iv = int(float(val))
+            if iv in TEAM_INFO:
+                return iv
+        except Exception:
+            pass
+
+        upper = val.upper()
+
+        if upper in FG_ABBR_MAP:
+            return FG_ABBR_MAP[upper]
+
+        if val in FG_TEAM_MAP:
+            return FG_TEAM_MAP[val]
+
     return None
 
 
@@ -503,7 +575,17 @@ def _build_fg_dc_projections(bat_df: pd.DataFrame, pit_df: pd.DataFrame) -> tupl
     if wrc_col and pa_col:
         bat_df = bat_df.copy()
         bat_df["_tid"] = bat_df.apply(_team_id_from_fg_row, axis=1)
-        bat_df = bat_df.dropna(subset=["_tid"])
+        
+missing_bat = bat_df[bat_df["_tid"].isna()]
+if len(missing_bat) > 0:
+    print(f"[FG BAT] unmapped rows: {len(missing_bat)}")
+    try:
+        print(missing_bat.head(10).to_dict("records"))
+    except Exception:
+        pass
+
+bat_df = bat_df.dropna(subset=["_tid"])
+
         bat_df["_tid"]  = bat_df["_tid"].astype(int)
         bat_df[wrc_col] = pd.to_numeric(bat_df[wrc_col], errors="coerce").fillna(100)
         bat_df[pa_col]  = pd.to_numeric(bat_df[pa_col],  errors="coerce").fillna(0)
@@ -531,7 +613,17 @@ def _build_fg_dc_projections(bat_df: pd.DataFrame, pit_df: pd.DataFrame) -> tupl
     if ip_col and fip_col:
         pit_df = pit_df.copy()
         pit_df["_tid"] = pit_df.apply(_team_id_from_fg_row, axis=1)
-        pit_df = pit_df.dropna(subset=["_tid"])
+        
+missing_pit = pit_df[pit_df["_tid"].isna()]
+if len(missing_pit) > 0:
+    print(f"[FG PIT] unmapped rows: {len(missing_pit)}")
+    try:
+        print(missing_pit.head(10).to_dict("records"))
+    except Exception:
+        pass
+
+pit_df = pit_df.dropna(subset=["_tid"])
+
         pit_df["_tid"]  = pit_df["_tid"].astype(int)
         pit_df[ip_col]  = pd.to_numeric(pit_df[ip_col],  errors="coerce").fillna(0)
         pit_df[fip_col] = pd.to_numeric(pit_df[fip_col], errors="coerce").fillna(LEAGUE_AVG_FIP).clip(2.0, 7.5)
