@@ -181,4 +181,20 @@ def render_team_detail(df, sim):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    st.title("⚾
+    st.title("⚾ MLB 2026 Dynamic Projections (Restored)")
+    
+    try:
+        df = fetch_standings()
+        sim_results = run_monte_carlo(df)
+            
+        t1, t2 = st.tabs(["📊 Projections", "🔍 Team Detail"])
+        
+        with t1: render_projections_tab(df, sim_results)
+        with t2: render_team_detail(df, sim_results)
+            
+    except Exception as e:
+        st.error(f"Error: {e}")
+        st.code(traceback.format_exc())
+
+if __name__ == "__main__":
+    main()
