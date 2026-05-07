@@ -1053,13 +1053,27 @@ def build_master(standings_df, statcast_df, player_detail=None) -> pd.DataFrame:
     df = standings_df.copy()
     df = df.merge(statcast_df[["team_id", "proj_win_pct", "proj_runs_per_game", "proj_ra_per_game"]],
                   on="team_id", how="left")
-    df["proj_win_pct"] = df["proj_win_pct"].fillna(df["win_pct"]).fillna(0.500)
+    df["proj_win_pct"]   = df["proj_win_pct"].fillna(df["win_pct"]).fillna(0.500)
     df["pythag_win_pct"] = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
 
-    gp_weight        = (df["games_played"] / 162.0).clip(0.0, 1.0)
-    sc_weight        = 0.50 + gp_weight * 0.20
-    df["blended_win_pct"] = (df["proj_win_pct"] * sc_weight + df["pythag_win_pct"] * (1 - sc_weight)).clip(0.20, 0.80)
-    df["games_remaining"] = (162 - df["games_played"]).clip(0, 162)
+    # Player-quality projection (FanGraphs DC or Marcel) gets high early-season weight.
+    # Current season performance (Pythagorean) gets more weight as season progresses.
+    # This ensures roster quality — not early record noise — drives projections in May.
+    #
+    # Games played:  0-40   41-80   81-120  121-162
+    # Proj weight:   70%    60%     50%     40%
+    # Pythag weight: 30%    40%     50%     60%
+    gp = df["games_played"].clip(0, 162)
+    proj_weight   = (0.70 - (gp / 162.0) * 0.30).clip(0.40, 0.70)
+    pythag_weight = 1.0 - proj_weight
+
+    df["blended_win_pct"] = (
+        df["proj_win_pct"]   * proj_weight +
+        df["pythag_win_pct"] * pythag_weight
+    ).clip(0.20, 0.80)
+    df["proj_weight_used"]   = proj_weight.round(2)
+    df["pythag_weight_used"] = pythag_weight.round(2)
+    df["games_remaining"]    = (162 - df["games_played"]).clip(0, 162)
     # Attach player detail as JSON string for team detail tab
     if player_detail:
         df["player_detail"] = df["team_id"].apply(
@@ -1484,12 +1498,18 @@ def render_team_tab(master_df, sim_results):
     d1, d2 = st.columns(2)
     with d1:
         st.markdown("**Inputs**")
+        proj_w_used   = row.get('proj_weight_used', 0.65)
+        pythag_w_used = row.get('pythag_weight_used', 0.35)
         for k, v in [
-            ("WC Games Back",    f"{row.get('wc_games_back',0):.1f}"),
-            ("Run Diff/162",     f"{row.get('rd_per_162',0):+.0f}"),
-            ("Actual Win%",      f"{row.get('win_pct',0):.3f}"),
-            ("Pythagorean Win%", f"{row.get('pythag_win_pct',0):.3f}"),
-            ("Luck (wins +/-)",  f"{row.get('luck_wins',0):+.1f}"),
+            ("WC Games Back",         f"{row.get('wc_games_back',0):.1f}"),
+            ("Run Diff/162",          f"{row.get('rd_per_162',0):+.0f}"),
+            ("Actual Win%",           f"{row.get('win_pct',0):.3f}"),
+            ("Pythagorean Win%",      f"{row.get('pythag_win_pct',0):.3f}"),
+            ("Player Proj Win%",      f"{row.get('proj_win_pct',0):.3f}"),
+            ("Blended Win%",          f"{row.get('blended_win_pct',0):.3f}"),
+            ("Luck (wins +/-)",       f"{row.get('luck_wins',0):+.1f}"),
+            ("Proj weight (roster)",  f"{proj_w_used:.0%}"),
+            ("Pythag weight (record)",f"{pythag_w_used:.0%}"),
         ]:
             st.markdown(f"- **{k}:** {v}")
     with d2:
