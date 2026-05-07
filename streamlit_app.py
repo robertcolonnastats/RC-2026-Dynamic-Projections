@@ -30,6 +30,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ── Constants ──────────────────────────────────────────────────────────────────
 SEASON_YEAR              = 2026
 OPENING_DAY              = "2026-03-27"
 WORLD_SERIES_END_APPROX  = "2026-11-01"
@@ -57,14 +58,14 @@ CACHE_DIR                = "data/cache"
 CACHE_FILE               = "data/cache/latest.json"
 MLB_API_BASE             = "https://statsapi.mlb.com/api/v1"
 
+# ── Session Setup ─────────────────────────────────────────────────────────────
 try:
     import cloudscraper
-    _SCRAPER = cloudscraper.create_scraper()
-    def _get_session():
-        return _SCRAPER
+    _SESSION = cloudscraper.create_scraper()
+    print("✅ cloudscraper initialized for FanGraphs")
 except ImportError:
-    def _get_session():
-        return requests.Session()
+    _SESSION = requests.Session()
+    print("⚠️ cloudscraper not found. Using standard requests.")
 
 TEAM_INFO = {
     108: ("Los Angeles Angels", "LAA", "AL West", "AL"),
@@ -104,7 +105,9 @@ TIER_COLORS = {"hard_seller": "#d62728", "soft_seller": "#ff7f0e", "neutral": "#
 TIER_EMOJI = {"hard_seller": "🔴", "soft_seller": "🟠", "neutral": "⚪", "soft_buyer": "🟢", "hard_buyer": "🔵"}
 EST = ZoneInfo("America/New_York")
 
+# ── Cache Manager ─────────────────────────────────────────────────────────────
 def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
+
 def get_season_state() -> str:
     today = date.today()
     if today < date.fromisoformat(OPENING_DAY) or today > date.fromisoformat(WORLD_SERIES_END_APPROX): return "offseason"
@@ -145,6 +148,7 @@ def save_cache(payload: dict):
         with open(CACHE_FILE, "w") as f: json.dump(payload, f, default=str)
     except Exception as e: print(f"Cache write failed: {e}")
 
+# ── Data Fetching ─────────────────────────────────────────────────────────────
 def fetch_standings() -> pd.DataFrame:
     resp = requests.get(f"{MLB_API_BASE}/standings", params={"leagueId": "103,104", "season": SEASON_YEAR, "standingsTypes": "regularSeason", "hydrate": "team,record"}, timeout=15)
     resp.raise_for_status()
@@ -204,6 +208,7 @@ def compute_remaining_opponents(df: pd.DataFrame) -> dict[int, list[int]]:
         opps.setdefault(h, []).append(a); opps.setdefault(a, []).append(h)
     return opps
 
+# ── Projection Engine ─────────────────────────────────────────────────────────
 LEAGUE_AVG_RPG, LEAGUE_AVG_FIP, LEAGUE_AVG_WRC = 4.50, 4.10, 100.0
 LEAGUE_SP_IP_SHARE, LEAGUE_RP_IP_SHARE = 0.57, 0.43
 FG_TEAM_MAP = {"Angels": 108, "Diamondbacks": 109, "Orioles": 110, "Red Sox": 111, "Cubs": 112, "Reds": 113, "Guardians": 114, "Rockies": 115, "Tigers": 116, "Astros": 117, "Royals": 118, "Dodgers": 119, "Nationals": 120, "Mets": 121, "Athletics": 133, "Pirates": 134, "Padres": 135, "Mariners": 136, "Giants": 137, "Cardinals": 138, "Rays": 139, "Rangers": 140, "Blue Jays": 141, "Twins": 142, "Phillies": 143, "Braves": 144, "White Sox": 145, "Marlins": 146, "Yankees": 147, "Brewers": 158}
@@ -218,25 +223,31 @@ def _regressed_win_pct(rs_g, ra_g, gp):
 
 def _fetch_fg_dc_batting() -> pd.DataFrame | None:
     try:
-        r = _get_session().get("https://www.fangraphs.com/api/projections", params={"type": "fangraphsdc", "stats": "bat", "pos": "all", "team": 0, "players": 0, "lg": "all"}, timeout=20)
+        r = _SESSION.get("https://www.fangraphs.com/api/projections", params={"type": "fangraphsdc", "stats": "bat", "pos": "all", "team": 0, "players": 0, "lg": "all"}, timeout=20)
+        print(f"FG Batting Status: {r.status_code}")
         if r.status_code != 200: return None
         raw = r.json()
         data = raw.get("data", raw) if isinstance(raw, dict) else raw
         if not isinstance(data, list) or len(data) < 50: return None
         df = pd.DataFrame(data); df.columns = [c.strip() for c in df.columns]
         return df
-    except Exception: return None
+    except Exception as e:
+        print(f"FG Batting Exception: {e}")
+        return None
 
 def _fetch_fg_dc_pitching() -> pd.DataFrame | None:
     try:
-        r = _get_session().get("https://www.fangraphs.com/api/projections", params={"type": "fangraphsdc", "stats": "pit", "pos": "all", "team": 0, "players": 0, "lg": "all"}, timeout=20)
+        r = _SESSION.get("https://www.fangraphs.com/api/projections", params={"type": "fangraphsdc", "stats": "pit", "pos": "all", "team": 0, "players": 0, "lg": "all"}, timeout=20)
+        print(f"FG Pitching Status: {r.status_code}")
         if r.status_code != 200: return None
         raw = r.json()
         data = raw.get("data", raw) if isinstance(raw, dict) else raw
         if not isinstance(data, list) or len(data) < 50: return None
         df = pd.DataFrame(data); df.columns = [c.strip() for c in df.columns]
         return df
-    except Exception: return None
+    except Exception as e:
+        print(f"FG Pitching Exception: {e}")
+        return None
 
 def _team_id_from_fg_row(row: pd.Series) -> int | None:
     for c in ["teamid", "TeamId", "team_id"]:
@@ -310,6 +321,7 @@ def fetch_team_projections(standings_df=None):
         with cf.ThreadPoolExecutor(max_workers=2) as ex:
             bf, pf = ex.submit(_fetch_fg_dc_batting), ex.submit(_fetch_fg_dc_pitching)
             bat, pit = bf.result(timeout=25), pf.result(timeout=25)
+            print(f"FG Fetch: Bat={len(bat) if bat is not None else 'None'}, Pit={len(pit) if pit is not None else 'None'}")
             if bat is not None and pit is not None and len(bat)>50:
                 df, detail = _build_fg_dc_projections(bat, pit)
                 if not df.empty and df["proj_win_pct"].std()>0.01:
@@ -328,6 +340,7 @@ def fetch_team_projections(standings_df=None):
     df["proj_source"] = "League Average"
     return df, detail
 
+# ── Injury Data ───────────────────────────────────────────────────────────────
 POSITION_WAR_PROXY = {"C": 2.5, "1B": 1.8, "2B": 2.5, "3B": 2.8, "SS": 3.2, "LF": 2.0, "CF": 2.8, "RF": 2.2, "DH": 1.5, "SP": 3.0, "RP": 0.8, "P": 2.0}
 DEADLINE = date.fromisoformat(TRADE_DEADLINE)
 
@@ -371,6 +384,7 @@ def fetch_all_team_injuries(team_ids):
             return {futs[f]: f.result() for f in cf.as_completed(futs, timeout=15)}
     except: return {t: 0.0 for t in team_ids}
 
+# ── Engine ────────────────────────────────────────────────────────────────────
 def pythag(rs, ra):
     if rs<=0 or ra<=0: return 0.5
     return rs**PYTHAG_EXPONENT / (rs**PYTHAG_EXPONENT + ra**PYTHAG_EXPONENT)
@@ -473,8 +487,7 @@ def run_simulation(df, sched):
     def odds(res):
         dc, pc = np.zeros(len(tids)), np.zeros(len(tids))
         for s in range(N_SIMULATIONS):
-            w = res[s]
-            dw = set()
+            w = res[s]; dw = set()
             for lg in ["AL","NL"]:
                 li = [i for i,t in enumerate(tids) if info.loc[int(t),"league"]==lg]
                 for div in info[info["league"]==lg]["division"].unique():
@@ -487,14 +500,11 @@ def run_simulation(df, sched):
                     for r in np.argsort(w[nd])[-3:]: pc[nd[r]]+=1
         return dc/N_SIMULATIONS, pc/N_SIMULATIONS
     def ws(res, wm):
-        wc = np.zeros(len(tids))
-        wa = np.array([wm.get(t,0.5) for t in tids])
+        wc = np.zeros(len(tids)); wa = np.array([wm.get(t,0.5) for t in tids])
         for s in range(N_SIMULATIONS):
-            w = res[s]
-            po = []
+            w = res[s]; po = []
             for lg in ["AL","NL"]:
-                li = [i for i,t in enumerate(tids) if info.loc[int(t),"league"]==lg]
-                dw = set()
+                li = [i for i,t in enumerate(tids) if info.loc[int(t),"league"]==lg]; dw = set()
                 for div in info[info["league"]==lg]["division"].unique():
                     di = [i for i in li if info.loc[int(tids[i]),"division"]==div]
                     if di: b=di[int(np.argmax(w[di]))]; dw.add(b); po.append(b)
@@ -513,6 +523,7 @@ def run_simulation(df, sched):
     aw = ws(ar, adj); bw = ws(br, base)
     return {"division_odds": {t: float(ad[i]) for i,t in enumerate(tids)}, "playoff_odds": {t: float(ap[i]) for i,t in enumerate(tids)}, "ws_odds": {t: float(aw[i]) for i,t in enumerate(tids)}, "proj_wins": {t: float(ar.mean(0)[i]) for i,t in enumerate(tids)}, "proj_wins_std": {t: float(ar.std(0)[i]) for i,t in enumerate(tids)}, "pre_deadline_division_odds": {t: float(bd[i]) for i,t in enumerate(tids)}, "pre_deadline_playoff_odds": {t: float(bp[i]) for i,t in enumerate(tids)}, "pre_deadline_ws_odds": {t: float(bw[i]) for i,t in enumerate(tids)}}
 
+# ── UI Tabs ───────────────────────────────────────────────────────────────────
 def render_projections_tab(df, sim):
     st.markdown("## 2026 MLB Season Projections")
     src = df["proj_source"].iloc[0] if "proj_source" in df.columns else "Unknown"
@@ -522,10 +533,10 @@ def render_projections_tab(df, sim):
         rows.append({"Team": r["abbr"], "W": r["wins"], "L": r["losses"], "Win%": f"{r['win_pct']:.3f}", "Pythag%": f"{r['pythag_win_pct']:.3f}", "GB(WC)": f"{r['wc_games_back']:.1f}" if r["wc_games_back"]>0 else "—", "Proj W": round(sim["proj_wins"].get(r["team_id"], r["wins"]), 1), "Proj L": round(162-sim["proj_wins"].get(r["team_id"], r["wins"]), 1), "Proj Rec": f"{int(round(sim['proj_wins'].get(r['team_id'], r['wins'])))}-{int(round(162-sim['proj_wins'].get(r['team_id'], r['wins'])))}", "Div%": f"{sim['division_odds'].get(r['team_id'],0):.1%}", "Playoff%": f"{sim['playoff_odds'].get(r['team_id'],0):.1%}", "WS%": f"{sim['ws_odds'].get(r['team_id'],0):.2%}", "Status": r.get("tier_label","Neutral"), "tier": r.get("tier","neutral"), "SoS": r.get("sos_label","—")})
     disp = pd.DataFrame(rows)
     c1, c2 = st.columns(2)
-    lf = c1.radio("League", ["All","AL","NL"], horizontal=True)
+    lf = c1.radio("League", ["All","AL","NL"], horizontal=True, key="proj_league")
     if lf!="All": disp = disp[disp["Team"].isin([r["abbr"] for _,r in df[df["league"]==lf].iterrows()])]
     alld = sorted(disp["Status"].unique())
-    dfilt = c2.selectbox("Division", ["All Divisions"] + alld)
+    dfilt = c2.selectbox("Division", ["All Divisions"] + alld, key="proj_div")
     if dfilt!="All Divisions": disp = disp[disp["Status"]==dfilt]
     st.markdown("---")
     for div in sorted(df["division"].unique()):
@@ -566,7 +577,10 @@ def render_deadline_tab(df, sim):
 def render_team_tab(df, sim):
     st.markdown("## Team Detail")
     opts = sorted([(r["name"], r["team_id"]) for _,r in df.iterrows()])
-    sel = st.selectbox("Select a team", [o[0] for o in opts], index=0, key="team_sel")
+    # Persistent selection to prevent tab jumping
+    if "selected_team_idx" not in st.session_state: st.session_state.selected_team_idx = 0
+    sel = st.selectbox("Select a team", [o[0] for o in opts], index=st.session_state.selected_team_idx, key="team_sel")
+    st.session_state.selected_team_idx = [o[0] for o in opts].index(sel)
     tid = next(o[1] for o in opts if o[0]==sel)
     row = df[df["team_id"]==tid].iloc[0]
     c1, c2, c3 = st.columns([2,1,1])
@@ -607,13 +621,33 @@ def render_team_tab(df, sim):
         if det.get("rp"): st.dataframe(pd.DataFrame(det["rp"])[["name","ip","fip"]].rename(columns={"name":"Pitcher","ip":"IP","fip":"FIP"}), width="stretch", hide_index=True)
         else: st.caption("No data")
 
+def render_methodology_tab():
+    st.markdown("## Methodology")
+    st.caption(f"Data last updated: {get_last_updated()}")
+    st.markdown("""This model was built around a core insight missing from most public projection systems: teams that sell at the trade deadline get meaningfully worse after July 31.""")
+    with st.expander("📊 Overview & Philosophy", expanded=True):
+        st.markdown("""Most projection systems generate a rest-of-season win% and simulate from there, assuming today's roster is August's roster. For sellers that's wrong. This model builds true-talent estimates, identifies likely buyers and sellers algorithmically, adjusts win rates post-deadline, ramps those adjustments gradually across July, and runs 10,000 game-level simulations where every win has a corresponding loss — zero-sum guaranteed.""")
+    with st.expander("📡 Data Sources"):
+        st.markdown("MLB Stats API — standings, schedule, runs scored/allowed (free, real-time, official)\nFanGraphs Depth Charts — individual player projections (bypassed via cloudscraper)\nRefreshes automatically at midnight EST.")
+    with st.expander("🔮 Team Projections"):
+        st.markdown(f"Three years of stats blended at {int(WEIGHT_CURRENT_SEASON*100)}% current / {int(WEIGHT_LAST_YEAR*100)}% last year / {int(WEIGHT_TWO_YEARS_AGO*100)}% two years ago.\nCurrent year weight grows toward 70% by September as sample size increases.\nPitching uses 70% FIP + 30% ERA.\nPythagorean win% formula: RS^(exp) / (RS^(exp) + RA^(exp)) where exp = {PYTHAG_EXPONENT}")
+    with st.expander("📈 Buyer / Seller Classification"):
+        st.markdown("Each team gets a continuous score from three inputs: Wild Card games back, Run differential modifier, Pythagorean luck modifier.")
+    with st.expander("📅 July Deadline Ramp"):
+        ramp = get_deadline_ramp_factor()
+        st.markdown(f"Linear ramp from July 1 (0%) to July 31 (100%).\nCurrent ramp factor: {int(ramp*100)}%")
+    with st.expander("🎲 Monte Carlo Simulation"):
+        st.markdown(f"{N_SIMULATIONS:,} simulations of the remaining schedule. Each game uses the Log5 formula. Strength of schedule is recalculated after deadline adjustments.")
+    with st.expander("⚠️ Limitations"):
+        st.markdown("No real-time trade parser — classification updates via standings, not transaction wire\nInjuries not modeled dynamically in FG fallback\nPlayoff bracket is simplified\nHome field advantage not modeled\nProspects received in trades are treated as replacement level")
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 def load_all_data():
     cached = load_cache()
     if cached and cached.get("master") and cached.get("sim_results"):
         return pd.DataFrame(cached["master"]), cached["sim_results"], pd.DataFrame(cached.get("schedule",[]))
     st.markdown("### ⚾ Loading fresh data...")
-    pbar = st.progress(0)
-    txt = st.empty()
+    pbar = st.progress(0); txt = st.empty()
     def up(p,m): pbar.progress(p); txt.markdown(f"**{m}**")
     up(10, "📡 Fetching standings...")
     stand = fetch_standings()
@@ -653,10 +687,11 @@ def main():
     if m.empty: st.warning("No data"); st.stop()
     st.title(f"⚾ MLB {SEASON_YEAR} Projections")
     st.caption(f"Source: {m['proj_source'].iloc[0]} · Updated: {get_last_updated()}")
-    tab1, tab2, tab3 = st.tabs(["📊 Projections", "🔄 Deadline Impact", "🔍 Team Detail"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Projections", "🔄 Deadline Impact", "🔍 Team Detail", "📖 Methodology"])
     with tab1: render_projections_tab(m, s)
     with tab2: render_deadline_tab(m, s)
     with tab3: render_team_tab(m, s)
+    with tab4: render_methodology_tab()
 
 if __name__ == "__main__":
     main()
