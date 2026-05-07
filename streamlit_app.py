@@ -7,31 +7,16 @@ import os
 import json
 import warnings
 import traceback
+import requests
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from datetime import date, timedelta
 from zoneinfo import ZoneInfo
-
-try:
-    import requests
-except ImportError:
-    st.error("`requests` package is required. Please run: pip install requests")
-    st.stop()
-
-try:
-    import cloudscraper
-    def _get_session():
-        return cloudscraper.create_scraper()
-except ImportError:
-    import requests
-    def _get_session():
-        return requests.Session()
-
 warnings.filterwarnings("ignore")
 
-# ── Page config ────────────────────────────────────────────────────────────────
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="MLB 2026 Projections",
     page_icon="⚾",
@@ -75,6 +60,16 @@ RANDOM_SEED              = 42
 CACHE_DIR                = "data/cache"
 CACHE_FILE               = "data/cache/latest.json"
 MLB_API_BASE             = "https://statsapi.mlb.com/api/v1"
+
+# Safe session handling (uses cloudscraper if available, else requests)
+try:
+    import cloudscraper
+    _SCRAPER = cloudscraper.create_scraper()
+    def _get_session():
+        return _SCRAPER
+except ImportError:
+    def _get_session():
+        return requests.Session()
 
 TEAM_INFO = {
     108: ("Los Angeles Angels",     "LAA",  "AL West",     "AL"),
@@ -260,7 +255,7 @@ def _compute_wc_games_back(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(result_frames, ignore_index=True)
 
 def fetch_schedule() -> pd.DataFrame:
-    today    = date.today()
+    today = date.today()
     reg_season_end = date(SEASON_YEAR, 9, 30)
     end_date = min(date.fromisoformat(WORLD_SERIES_END_APPROX), reg_season_end)
     if today > end_date:
@@ -268,11 +263,9 @@ def fetch_schedule() -> pd.DataFrame:
     
     all_games = []
     chunk_start = today
+    # Limit to current season end to avoid long loops in offseason
     while chunk_start <= end_date:
-        if chunk_start.month == 12:
-            chunk_end = date(chunk_start.year, 12, 31)
-        else:
-            chunk_end = date(chunk_start.year, chunk_start.month + 1, 1) - timedelta(days=1)
+        chunk_end = date(chunk_start.year, chunk_start.month + 1, 1) - timedelta(days=1)
         chunk_end = min(chunk_end, end_date)
 
         try:
@@ -280,7 +273,7 @@ def fetch_schedule() -> pd.DataFrame:
                 "sportId": 1, "startDate": chunk_start.isoformat(),
                 "endDate": chunk_end.isoformat(), "gameType": "R",
                 "hydrate": "team", "season": SEASON_YEAR,
-            }, timeout=20)
+            }, timeout=8)  # Reduced timeout for speed
             resp.raise_for_status()
             for date_entry in resp.json().get("dates", []):
                 for game in date_entry.get("games", []):
@@ -302,10 +295,12 @@ def fetch_schedule() -> pd.DataFrame:
             print(f"Schedule chunk failed {chunk_start}: {e}")
 
         chunk_start = chunk_end + timedelta(days=1)
+        # Safety break if API is failing
+        if not all_games and (date.today() - chunk_start).days > 30:
+            break
 
     if not all_games:
         return pd.DataFrame(columns=["game_id", "game_date", "home_team_id", "away_team_id", "status"])
-
     df = pd.DataFrame(all_games)
     df["game_date"] = pd.to_datetime(df["game_date"])
     if "status" not in df.columns:
@@ -335,8 +330,6 @@ def compute_remaining_opponents(schedule_df: pd.DataFrame) -> dict[int, list[int
         opponents.setdefault(h, []).append(a)
         opponents.setdefault(a, []).append(h)
     return opponents
-
-# fetch_team_projections defined below in projection engine section
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PROJECTION ENGINE
@@ -701,9 +694,19 @@ def compute_injury_adjustment(team_id: int) -> float:
 
 def fetch_all_team_injuries(team_ids: list[int]) -> dict[int, float]:
     adjustments = {}
-    for tid in team_ids:
-        try: adjustments[tid] = compute_injury_adjustment(tid)
-        except Exception: adjustments[tid] = 0.0
+    try:
+        import concurrent.futures as _ilf
+        def _get_adj(tid):
+            try: return tid, compute_injury_adjustment(tid)
+            except: return tid, 0.0
+        with _ilf.ThreadPoolExecutor(max_workers=6) as ex:
+            futures = {ex.submit(_get_adj, tid): tid for tid in team_ids}
+            for f in _ilf.as_completed(futures, timeout=12):
+                tid, adj = f.result()
+                adjustments[tid] = adj
+    except Exception as _ile:
+        print(f"Injury fetch timed out or failed ({_ile}). Using 0.0 defaults.")
+        adjustments = {tid: 0.0 for tid in team_ids}
     return adjustments
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1252,11 +1255,10 @@ def load_all_data():
     standings_df = fetch_standings()
     
     update(*steps[1])
-    import concurrent.futures as _scf
     try:
-        with _scf.ThreadPoolExecutor(max_workers=1) as _sex:
-            schedule_df = _sex.submit(fetch_schedule).result(timeout=60)
-    except Exception:
+        schedule_df = fetch_schedule()
+    except Exception as e:
+        print(f"Schedule failed: {e}")
         schedule_df = pd.DataFrame(columns=["game_id", "game_date", "home_team_id", "away_team_id", "status"])
         
     update(*steps[2])
@@ -1266,21 +1268,21 @@ def load_all_data():
     master_df = build_master(standings_df, statcast_df, player_detail)
     
     update(*steps[4])
-    injury_adjs = fetch_all_team_injuries(list(TEAM_INFO.keys()))
+    # Injury fetch with hard timeout fallback
+    try:
+        injury_adjs = fetch_all_team_injuries(list(TEAM_INFO.keys()))
+    except Exception:
+        injury_adjs = {tid: 0.0 for tid in TEAM_INFO.keys()}
+        
     master_df = compute_buyer_seller(master_df, injury_adjustments=injury_adjs)
     master_df = apply_ramp(master_df, get_deadline_ramp_factor())
     
     update(*steps[5])
-    def _run_sos():
-        opps = compute_remaining_opponents(schedule_df)
-        return compute_sos(master_df, opps)
-    import concurrent.futures as _sosf
     try:
-        with _sosf.ThreadPoolExecutor(max_workers=1) as _sosx:
-            _sosfut = _sosx.submit(_run_sos)
-            master_df = _sosfut.result(timeout=25)
-    except Exception as _sose:
-        print(f"SoS skipped: {_sose}")
+        opps = compute_remaining_opponents(schedule_df)
+        master_df = compute_sos(master_df, opps)
+    except Exception as e:
+        print(f"SoS skipped: {e}")
         master_df = master_df.copy()
         master_df["sos_raw"]   = 0.500
         master_df["sos_rank"]  = 15
