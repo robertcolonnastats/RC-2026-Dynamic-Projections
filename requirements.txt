@@ -6,3 +6,9 @@ plotly>=5.18.0
 requests>=2.31.0
 pybaseball>=2.2.7
 pytz>=2024.1
+streamlit
+requests
+numpy
+pandas
+plotly
+cloudscraper
