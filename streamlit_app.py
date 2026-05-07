@@ -647,15 +647,32 @@ def _build_from_marcel() -> pd.DataFrame | None:
         bat_data = {}
         pit_data = {}
 
-        for yr in seasons:
-            try:
-                bat_data[yr] = pb.batting_stats(yr, qual=50)
-            except Exception:
-                pass
-            try:
-                pit_data[yr] = pb.pitching_stats(yr, qual=10)
-            except Exception:
-                pass
+        import concurrent.futures
+
+        def _fetch_bat(yr):
+            return yr, pb.batting_stats(yr, qual=50)
+
+        def _fetch_pit(yr):
+            return yr, pb.pitching_stats(yr, qual=10)
+
+        # Fetch all seasons with a hard 45-second timeout per call
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+            bat_futures = {ex.submit(_fetch_bat, yr): yr for yr in seasons}
+            for fut in concurrent.futures.as_completed(bat_futures, timeout=50):
+                try:
+                    yr, df = fut.result(timeout=45)
+                    bat_data[yr] = df
+                except Exception:
+                    pass
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+            pit_futures = {ex.submit(_fetch_pit, yr): yr for yr in seasons}
+            for fut in concurrent.futures.as_completed(pit_futures, timeout=50):
+                try:
+                    yr, df = fut.result(timeout=45)
+                    pit_data[yr] = df
+                except Exception:
+                    pass
 
         if not bat_data and not pit_data:
             return None
@@ -786,26 +803,41 @@ def fetch_team_projections() -> tuple[pd.DataFrame, dict]:
     """
     player_detail = {tid: {"batters": [], "sp": [], "rp": []} for tid in TEAM_INFO.keys()}
 
-    # Tier 1: FanGraphs Depth Charts
+    # Tier 1: FanGraphs Depth Charts (hard 30-second timeout)
     try:
-        bat_df = _fetch_fg_dc_batting()
-        pit_df = _fetch_fg_dc_pitching()
-        if bat_df is not None and pit_df is not None and len(bat_df) > 100:
-            proj_df, player_detail = _build_from_fg_dc(bat_df, pit_df)
-            if not proj_df.empty:
-                proj_df["proj_source"] = "FanGraphs DC"
-                return proj_df, player_detail
+        import concurrent.futures as _cf2
+        with _cf2.ThreadPoolExecutor(max_workers=2) as _ex2:
+            _bat_fut = _ex2.submit(_fetch_fg_dc_batting)
+            _pit_fut = _ex2.submit(_fetch_fg_dc_pitching)
+            try:
+                bat_df = _bat_fut.result(timeout=30)
+                pit_df = _pit_fut.result(timeout=30)
+                if bat_df is not None and pit_df is not None and len(bat_df) > 100:
+                    proj_df, player_detail = _build_from_fg_dc(bat_df, pit_df)
+                    if not proj_df.empty:
+                        proj_df["proj_source"] = "FanGraphs DC"
+                        return proj_df, player_detail
+            except _cf2.TimeoutError:
+                print("FanGraphs DC timed out after 30s")
     except Exception as e:
         print(f"FanGraphs DC failed: {e}")
 
-    # Tier 2: Marcel
+    # Tier 2: Marcel (hard 90-second total timeout)
     try:
-        proj_df = _build_from_marcel()
-        if proj_df is not None and not proj_df.empty:
-            proj_df["proj_source"] = "Marcel"
-            return proj_df, player_detail
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+            _fut = _ex.submit(_build_from_marcel)
+            try:
+                proj_df = _fut.result(timeout=90)
+                if proj_df is not None and not proj_df.empty:
+                    proj_df["proj_source"] = "Marcel"
+                    return proj_df, player_detail
+            except _cf.TimeoutError:
+                print("Marcel timed out after 90s, falling back to league average")
+            except Exception as e:
+                print(f"Marcel failed: {e}")
     except Exception as e:
-        print(f"Marcel failed: {e}")
+        print(f"Marcel wrapper failed: {e}")
 
     # Tier 3: Fallback
     proj_df = _fallback_projections()
@@ -1654,7 +1686,12 @@ def load_all_data():
     standings_df = fetch_standings()
 
     update(*steps[1])
-    schedule_df = fetch_schedule()
+    import concurrent.futures as _scf
+    try:
+        with _scf.ThreadPoolExecutor(max_workers=1) as _sex:
+            schedule_df = _sex.submit(fetch_schedule).result(timeout=60)
+    except Exception:
+        schedule_df = pd.DataFrame(columns=["game_id","game_date","home_team_id","away_team_id","status"])
 
     update(*steps[2])
     statcast_df, player_detail = fetch_team_projections()
