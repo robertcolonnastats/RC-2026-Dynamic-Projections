@@ -640,16 +640,13 @@ def _build_from_fg_dc(bat_df: pd.DataFrame, pit_df: pd.DataFrame) -> tuple[pd.Da
 
 def _build_from_marcel() -> pd.DataFrame | None:
     """
-    Use pybaseball's Marcel projection system as fallback.
-    Marcel = 3-year weighted average + regression to mean + playing time.
+    3-year weighted average projection using pybaseball team stats.
+    Weights: 50% current / 30% last year / 20% two years ago.
     """
     try:
         import pybaseball as pb
-        from pybaseball.analysis.projections import MarcelProjectionsBatting, MarcelProjectionsPitching
-
         pb.cache.enable()
 
-        # Marcel needs historical data — pull last 3 seasons
         seasons = [SEASON_YEAR - 2, SEASON_YEAR - 1, SEASON_YEAR]
         bat_data = {}
         pit_data = {}
@@ -1156,13 +1153,15 @@ def compute_buyer_seller(df: pd.DataFrame, injury_adjustments: dict | None = Non
     df["rd_per_162"]           = (df["run_differential"] / df["games_played"].clip(1)) * RD_SCALE_GAMES
     df["raw_score"]            = df["wc_games_back"]
 
-    # Run differential dampener — early season RD is noisy (injuries, small sample)
-    # Scale from 25% weight at 0 GP to 100% at 100+ GP
-    rd_gp_scale = (df["games_played"] / 100.0).clip(0.25, 1.0)
-    rd_mod   = (-df["rd_per_162"] * RD_SENSITIVITY * rd_gp_scale).clip(-RD_MODIFIER_CAP, RD_MODIFIER_CAP)
+    # Run differential dampener:
+    # Before 50 GP: RD is almost entirely noise (injuries, schedule clumping)
+    # 50-100 GP: phase in gradually
+    # 100+ GP: full weight
+    rd_gp_scale = ((df["games_played"] - 50) / 50.0).clip(0.0, 1.0)
+    rd_mod = (-df["rd_per_162"] * RD_SENSITIVITY * rd_gp_scale).clip(-RD_MODIFIER_CAP, RD_MODIFIER_CAP)
 
-    # Same dampener on luck wins — small sample luck is noise
-    luck_scale = (df["games_played"] / 81.0).clip(0.30, 1.0)
+    # Luck wins: phase in from 40 GP
+    luck_scale = ((df["games_played"] - 40) / 60.0).clip(0.0, 1.0)
     luck_mod = df["luck_wins"] * PYTHAG_GAP_SENSITIVITY * luck_scale
 
     # Injury adjustment: negative = team hurt by injuries (pull toward buyer)
@@ -1174,9 +1173,20 @@ def compute_buyer_seller(df: pd.DataFrame, injury_adjustments: dict | None = Non
     # Raw adjusted score before dampening
     df["pre_dampened_score"] = df["raw_score"] + rd_mod + luck_mod + df["injury_score_adj"]
 
-    # Apply games-played dampener — pulls score toward neutral (0) proportionally
+    # Games-played dampener — pulls score toward neutral proportionally
     df["dampener"] = df["games_played"].apply(_games_played_dampener)
-    df["adjusted_score"] = df["pre_dampened_score"] * df["dampener"]
+
+    # Deadline proximity dampener — before June 15 nobody is truly a seller/buyer yet
+    # Ramp from 40% confidence on Apr 1 to 100% confidence by June 15
+    today = date.today()
+    early_cutoff = date(SEASON_YEAR, 4, 1)
+    full_cutoff  = date(SEASON_YEAR, 6, 15)
+    total_days   = (full_cutoff - early_cutoff).days
+    elapsed_days = max((today - early_cutoff).days, 0)
+    deadline_proximity = min(elapsed_days / max(total_days, 1), 1.0)
+    deadline_proximity = max(deadline_proximity, 0.40)  # floor at 40%
+
+    df["adjusted_score"] = df["pre_dampened_score"] * df["dampener"] * deadline_proximity
 
     def tier(s):
         if s >= HARD_SELLER_GB:  return "hard_seller"
@@ -1370,7 +1380,10 @@ def _empty_sim(master_df):
 
 def render_projections_tab(master_df, sim_results):
     st.markdown("## 2026 MLB Season Projections")
-    st.caption("Updated daily at midnight EST · 10,000-simulation Monte Carlo model")
+    # Show which projection tier is active
+    proj_source = master_df["proj_source"].iloc[0] if "proj_source" in master_df.columns else "Unknown"
+    source_color = {"FanGraphs DC": "🟢", "Marcel": "🟡", "Current Season Stats": "🟠", "League Average": "🔴"}.get(proj_source, "⚪")
+    st.caption(f"Updated daily at midnight EST · 10,000-simulation Monte Carlo · Projection source: {source_color} **{proj_source}**")
 
     rows = []
     for _, row in master_df.iterrows():
