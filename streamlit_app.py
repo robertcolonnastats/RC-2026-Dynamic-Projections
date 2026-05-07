@@ -1212,7 +1212,7 @@ def render_methodology_tab():
     with st.expander("📊 Overview & Philosophy", expanded=True):
         st.markdown("Most projection systems generate a rest-of-season win% and simulate from there, assuming today's roster is August's roster. For sellers that's wrong. This model builds true-talent estimates, identifies likely buyers and sellers algorithmically, adjusts win rates post-deadline, ramps those adjustments gradually across July, and runs 10,000 game-level simulations where every win has a corresponding loss — zero-sum guaranteed.")
     with st.expander("📡 Data Sources"):
-        st.markdown("MLB Stats API — standings, schedule, runs scored/allowed (free, real-time, official)\nFanGraphs Depth Charts — individual player projections (bypassed via cloudscraper)\nRefreshes automatically at midnight EST.")
+        st.markdown(f"MLB Stats API — standings, schedule, runs scored/allowed (free, real-time, official)\nFanGraphs Depth Charts — individual player projections (bypassed via cloudscraper)\nRefreshes automatically at midnight EST.")
     with st.expander("🔮 Team Projections"):
         st.markdown(f"Three years of stats blended at {int(WEIGHT_CURRENT_SEASON*100)}% current / {int(WEIGHT_LAST_YEAR*100)}% last year / {int(WEIGHT_TWO_YEARS_AGO*100)}% two years ago.\nCurrent year weight grows toward 70% by September as sample size increases.\nPitching uses 70% FIP + 30% ERA.\nPythagorean win% formula: RS^(exp) / (RS^(exp) + RA^(exp)) where exp = {PYTHAG_EXPONENT}")
     with st.expander("📈 Buyer / Seller Classification"):
@@ -1309,6 +1309,8 @@ def main():
         st.info(f"🏁 The {SEASON_YEAR} season is complete. Showing frozen final standings. Live projections return on Opening Day.")
         
     st.markdown("---")
+    
+    # Robust session state handling to prevent tab jumping on widget interaction
     if ("master_df" not in st.session_state or "sim_results" not in st.session_state or not st.session_state.get("data_loaded", False)):
         try:
             master_df, sim_results, schedule_df = load_all_data()
