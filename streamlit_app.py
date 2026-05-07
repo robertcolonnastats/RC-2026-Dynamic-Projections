@@ -440,6 +440,192 @@ def _fallback_projections() -> pd.DataFrame:
         "proj_ra_per_game": 4.50, "proj_win_pct": 0.500,
     } for tid in TEAM_INFO.keys()])
 
+# ══════════════════════════════════════════════════════════════════════════════
+# INJURY DATA
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Position-based WAR proxies (per 162 games) for valuing injured players
+# when individual Statcast data is unavailable
+POSITION_WAR_PROXY = {
+    "C": 2.5, "1B": 1.8, "2B": 2.5, "3B": 2.8, "SS": 3.2,
+    "LF": 2.0, "CF": 2.8, "RF": 2.2, "DH": 1.5,
+    "SP": 3.0, "RP": 0.8, "P": 2.0,
+}
+DEADLINE = date.fromisoformat(TRADE_DEADLINE)
+GAMES_PER_DAY_IMPACT = 1 / 162  # one game = this fraction of season win%
+
+
+def fetch_team_il(team_id: int) -> list[dict]:
+    """
+    Fetch current IL players for a team via MLB Stats API transactions.
+    Returns list of dicts with: player_name, il_type, placed_date, position
+    """
+    try:
+        # Pull 40-man roster with status hydration
+        url = f"{MLB_API_BASE}/teams/{team_id}/roster"
+        params = {"rosterType": "40Man", "season": SEASON_YEAR, "hydrate": "person"}
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        il_players = []
+        for entry in data.get("roster", []):
+            status = entry.get("status", {})
+            code   = status.get("code", "")
+            # A = Active, IL10 = 10-day IL, IL60 = 60-day IL, DL15 = 15-day
+            if code in ("IL10", "IL60", "DL10", "DL15", "DL60"):
+                person   = entry.get("person", {})
+                pos_code = entry.get("position", {}).get("abbreviation", "P")
+                il_type  = "60day" if "60" in code else "10day"
+                il_players.append({
+                    "player_name": person.get("fullName", "Unknown"),
+                    "player_id":   person.get("id", 0),
+                    "il_type":     il_type,
+                    "position":    pos_code,
+                    "placed_date": None,  # roster endpoint doesn't give placed date
+                })
+        return il_players
+    except Exception:
+        return []
+
+
+def fetch_il_placed_dates(team_id: int) -> dict[int, str]:
+    """
+    Pull transactions to get IL placement dates per player_id.
+    Returns {player_id: placed_date_str}
+    """
+    try:
+        url = f"{MLB_API_BASE}/transactions"
+        params = {
+            "sportId": 1,
+            "teamId":  team_id,
+            "startDate": f"{SEASON_YEAR}-03-01",
+            "endDate":   date.today().isoformat(),
+            "limit":     200,
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code != 200:
+            return {}
+        data    = resp.json()
+        placed  = {}
+        for txn in data.get("transactions", []):
+            desc = txn.get("typeDesc", "")
+            if "Injured List" in desc or "IL" in desc or "Disabled List" in desc:
+                pid  = txn.get("person", {}).get("id", 0)
+                dstr = txn.get("date", txn.get("effectiveDate", ""))
+                if pid and dstr and pid not in placed:
+                    placed[pid] = dstr[:10]  # keep YYYY-MM-DD only
+        return placed
+    except Exception:
+        return {}
+
+
+def compute_injury_adjustment(team_id: int) -> float:
+    """
+    Compute a win-rate adjustment based on current IL players.
+
+    Logic:
+    - Pull IL players and their placement dates
+    - Estimate days remaining on IL based on IL type + days already served
+    - Determine how many of those days fall before vs after the deadline
+    - Value the player using position WAR proxy
+    - Return a score adjustment (negative = team is hurt by injuries)
+
+    The adjustment feeds into buyer/seller score:
+      - Stars out pre-deadline → team looks worse than they are → pull toward buyer
+      - Stars out post-deadline → doesn't help for deadline purposes → slight seller push
+    """
+    today = date.today()
+
+    il_players  = fetch_team_il(team_id)
+    if not il_players:
+        return 0.0
+
+    placed_dates = fetch_il_placed_dates(team_id)
+
+    # Enrich with placed dates
+    for p in il_players:
+        pid = p["player_id"]
+        if pid in placed_dates:
+            p["placed_date"] = placed_dates[pid]
+
+    score_adj = 0.0
+
+    for p in il_players:
+        pos     = p.get("position", "P")
+        il_type = p.get("il_type", "10day")
+        war_162 = POSITION_WAR_PROXY.get(pos, 2.0)
+
+        # Estimate expected return date
+        placed_str = p.get("placed_date")
+        if placed_str:
+            try:
+                placed_dt = date.fromisoformat(placed_str)
+                days_on_il = (today - placed_dt).days
+            except Exception:
+                days_on_il = 0
+        else:
+            days_on_il = 0
+
+        # Estimate days remaining on IL
+        if il_type == "60day":
+            if days_on_il < 30:
+                # Recently placed — assume roughly 60-90 more days
+                days_remaining = 75
+            elif days_on_il < 60:
+                days_remaining = 45
+            else:
+                days_remaining = 20
+        else:
+            # 10-day IL
+            if days_on_il < 15:
+                days_remaining = 20
+            elif days_on_il < 30:
+                # Extended — likely not a typical 10-day
+                days_remaining = 25
+            else:
+                # Been out a while — getting close to return
+                days_remaining = 10
+
+        expected_return = today + timedelta(days=days_remaining)
+
+        # Split days into pre-deadline vs post-deadline
+        days_to_deadline = max((DEADLINE - today).days, 0)
+        days_out_pre_dl  = min(days_remaining, days_to_deadline)
+        days_out_post_dl = max(days_remaining - days_to_deadline, 0)
+
+        # Win impact = WAR per game * days missing
+        war_per_game      = war_162 / 162
+        pre_dl_win_impact  = war_per_game * days_out_pre_dl  * GAMES_PER_DAY_IMPACT
+        post_dl_win_impact = war_per_game * days_out_post_dl * GAMES_PER_DAY_IMPACT
+
+        # Pre-deadline injuries: team is currently worse than true talent
+        # This pulls them AWAY from seller classification (they may be better when healthy)
+        # Apply as a negative to the buyer/seller score (reduces seller score)
+        score_adj -= pre_dl_win_impact * 15   # scale to games-back units
+
+        # Post-deadline injuries: doesn't help pre-deadline but team truly is weaker
+        # Small push toward seller
+        score_adj += post_dl_win_impact * 5
+
+    return round(score_adj, 3)
+
+
+def fetch_all_team_injuries(team_ids: list[int]) -> dict[int, float]:
+    """
+    Fetch injury adjustments for all 30 teams.
+    Returns {team_id: score_adjustment}
+    """
+    adjustments = {}
+    for tid in team_ids:
+        try:
+            adjustments[tid] = compute_injury_adjustment(tid)
+        except Exception:
+            adjustments[tid] = 0.0
+    return adjustments
+
+
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ENGINE
@@ -465,9 +651,25 @@ def build_master(standings_df, statcast_df) -> pd.DataFrame:
     return df
 
 
-def compute_buyer_seller(df: pd.DataFrame) -> pd.DataFrame:
+def _games_played_dampener(games_played: float) -> float:
+    """
+    Returns a dampening factor 0.0-1.0 applied to the buyer/seller score.
+    Small samples early in season are dampened but not ignored —
+    a team that digs a real hole still gets penalized.
+      0-30 GP:  50% dampened (record matters but noise is high)
+      31-55 GP: 75%
+      56-81 GP: 90%
+      82+ GP:   100% (full signal)
+    """
+    if games_played <= 30:  return 0.50
+    if games_played <= 55:  return 0.75
+    if games_played <= 81:  return 0.90
+    return 1.00
+
+
+def compute_buyer_seller(df: pd.DataFrame, injury_adjustments: dict | None = None) -> pd.DataFrame:
     df = df.copy()
-    df["pythag_win_pct"]      = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
+    df["pythag_win_pct"]       = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
     df["pythag_expected_wins"] = df["pythag_win_pct"] * df["games_played"]
     df["luck_wins"]            = df["wins"] - df["pythag_expected_wins"]
     df["rd_per_162"]           = (df["run_differential"] / df["games_played"].clip(1)) * RD_SCALE_GAMES
@@ -475,7 +677,19 @@ def compute_buyer_seller(df: pd.DataFrame) -> pd.DataFrame:
 
     rd_mod   = (-df["rd_per_162"] * RD_SENSITIVITY).clip(-RD_MODIFIER_CAP, RD_MODIFIER_CAP)
     luck_mod = df["luck_wins"] * PYTHAG_GAP_SENSITIVITY
-    df["adjusted_score"] = df["raw_score"] + rd_mod + luck_mod
+
+    # Injury adjustment: negative = team hurt by injuries (pull toward buyer)
+    if injury_adjustments:
+        df["injury_score_adj"] = df["team_id"].map(injury_adjustments).fillna(0.0)
+    else:
+        df["injury_score_adj"] = 0.0
+
+    # Raw adjusted score before dampening
+    df["pre_dampened_score"] = df["raw_score"] + rd_mod + luck_mod + df["injury_score_adj"]
+
+    # Apply games-played dampener — pulls score toward neutral (0) proportionally
+    df["dampener"] = df["games_played"].apply(_games_played_dampener)
+    df["adjusted_score"] = df["pre_dampened_score"] * df["dampener"]
 
     def tier(s):
         if s >= HARD_SELLER_GB:  return "hard_seller"
@@ -662,6 +876,8 @@ def render_projections_tab(master_df, sim_results):
             "Pythag%":   f"{row.get('pythag_win_pct', row['win_pct']):.3f}",
             "GB (WC)":   f"{row['wc_games_back']:.1f}" if row["wc_games_back"] > 0 else "—",
             "Proj W":    round(sim_results["proj_wins"].get(tid, row["wins"]), 1),
+            "Proj L":    round(162 - sim_results["proj_wins"].get(tid, row["wins"]), 1),
+            "Proj Rec":  f"{round(sim_results['proj_wins'].get(tid, row['wins']))}-{round(162 - sim_results['proj_wins'].get(tid, row['wins']))}",
             "Div%":      f"{sim_results['division_odds'].get(tid, 0):.1%}",
             "Playoff%":  f"{sim_results['playoff_odds'].get(tid, 0):.1%}",
             "WS%":       f"{sim_results['ws_odds'].get(tid, 0):.2%}",
@@ -684,7 +900,7 @@ def render_projections_tab(master_df, sim_results):
     for div in sorted(display_df["Division"].unique()):
         div_df = display_df[display_df["Division"] == div].sort_values("Proj W", ascending=False)
         st.markdown(f"### {div}")
-        render_df = div_df[["Team","W","L","Win%","Pythag%","GB (WC)","Proj W","Div%","Playoff%","WS%","Status","SoS"]].copy()
+        render_df = div_df[["Team","W","L","Win%","Pythag%","GB (WC)","Proj Rec","Div%","Playoff%","WS%","Status","SoS"]].copy()
         render_df["Status"] = render_df.apply(lambda r: f"{TIER_EMOJI.get(div_df.loc[r.name,'tier'],'⚪')} {r['Status']}", axis=1)
         st.dataframe(render_df, use_container_width=True, hide_index=True)
 
@@ -839,12 +1055,15 @@ def render_team_tab(master_df, sim_results):
             st.markdown(f"- **{k}:** {v}")
     with d2:
         st.markdown("**Score**")
+        dampener_pct = int(row.get("dampener", 1.0) * 100)
         for k, v in [
-            ("Adjusted Score",   f"{row.get('adjusted_score',0):.2f}"),
-            ("Base Win Adj",     f"{row.get('base_adj',0):+.1%}"),
-            ("Magnitude Mod",    f"{row.get('magnitude_modifier',0):+.1%}"),
-            ("Full Adj (post-DL)",f"{row.get('final_adj',0):+.1%}"),
-            ("Ramped Adj (today)",f"{row.get('ramped_adj',0):+.1%}"),
+            ("Pre-Dampened Score",  f"{row.get('pre_dampened_score',0):.2f}"),
+            ("Games Played Dampener", f"{dampener_pct}% of full score applied"),
+            ("Adjusted Score",      f"{row.get('adjusted_score',0):.2f}"),
+            ("Injury Adj (GB units)",f"{row.get('injury_score_adj',0):+.2f}"),
+            ("Base Win Adj",        f"{row.get('base_adj',0):+.1%}"),
+            ("Full Adj (post-DL)",  f"{row.get('final_adj',0):+.1%}"),
+            ("Ramped Adj (today)",  f"{row.get('ramped_adj',0):+.1%}"),
         ]:
             st.markdown(f"- **{k}:** {v}")
 
@@ -968,10 +1187,8 @@ whose remaining opponents are all sellers gets an easier schedule automatically.
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def load_all_data():
-    state = get_season_state()
-
+    # ── Try cache first ────────────────────────────────────────────────────────
     cached = load_cache()
     if cached:
         master_df   = pd.DataFrame(cached["master"])
@@ -982,28 +1199,62 @@ def load_all_data():
                 schedule_df["game_date"] = pd.to_datetime(schedule_df["game_date"])
             return master_df, sim_results, schedule_df
 
-    with st.spinner("📡 Fetching standings..."):
-        standings_df = fetch_standings()
+    # ── Fresh load with progress bar ──────────────────────────────────────────
+    st.markdown("### ⚾ Loading fresh data...")
+    progress_bar  = st.progress(0)
+    status_text   = st.empty()
 
-    with st.spinner("📅 Loading schedule..."):
-        schedule_df = fetch_schedule()
+    steps = [
+        (10,  "📡 Fetching current standings..."),
+        (22,  "📅 Loading remaining schedule..."),
+        (38,  "⚾ Pulling Statcast projections (3 seasons)..."),
+        (52,  "🧮 Building team projections..."),
+        (60,  "🏥 Fetching injury data for all 30 teams..."),
+        (68,  "📈 Classifying buyers and sellers..."),
+        (74,  "📋 Computing strength of schedule..."),
+        (80,  "🎲 Running simulations (this takes ~30 seconds)..."),
+        (100, "✅ Done!"),
+    ]
 
-    with st.spinner("⚾ Pulling Statcast projections..."):
-        statcast_df = fetch_team_projections()
+    def update(pct, msg):
+        progress_bar.progress(pct)
+        status_text.markdown(f"**{msg}**")
 
+    update(5, "🚀 Starting up...")
+
+    update(*steps[0])
+    standings_df = fetch_standings()
+
+    update(*steps[1])
+    schedule_df = fetch_schedule()
+
+    update(*steps[2])
+    statcast_df = fetch_team_projections()
+
+    update(*steps[3])
     master_df = build_master(standings_df, statcast_df)
-    master_df = compute_buyer_seller(master_df)
+
+    update(*steps[4])
+    injury_adjs = fetch_all_team_injuries(list(TEAM_INFO.keys()))
+    master_df = compute_buyer_seller(master_df, injury_adjustments=injury_adjs)
     master_df = apply_ramp(master_df, get_deadline_ramp_factor())
+
+    update(*steps[5])
     master_df = compute_sos(master_df, compute_remaining_opponents(schedule_df))
 
-    with st.spinner(f"🎲 Running {N_SIMULATIONS:,} simulations..."):
-        sim_results = run_simulation(master_df, schedule_df)
+    update(*steps[6])
+    sim_results = run_simulation(master_df, schedule_df)
+
+    update(*steps[7])
 
     save_cache({
         "master":      master_df.to_dict(orient="records"),
         "sim_results": sim_results,
         "schedule":    schedule_df.to_dict(orient="records"),
     })
+
+    progress_bar.empty()
+    status_text.empty()
 
     return master_df, sim_results, schedule_df
 
