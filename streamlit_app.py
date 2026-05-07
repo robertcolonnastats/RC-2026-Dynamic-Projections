@@ -270,7 +270,10 @@ def _compute_wc_games_back(df: pd.DataFrame) -> pd.DataFrame:
 
 def fetch_schedule() -> pd.DataFrame:
     today    = date.today()
-    end_date = date.fromisoformat(WORLD_SERIES_END_APPROX)
+    # Cap at end of regular season (~Sep 30) not World Series end
+    # Postseason games don't affect standings simulation
+    reg_season_end = date(SEASON_YEAR, 9, 30)
+    end_date = min(date.fromisoformat(WORLD_SERIES_END_APPROX), reg_season_end)
     if today > end_date:
         return pd.DataFrame(columns=["game_id", "game_date", "home_team_id", "away_team_id", "status"])
 
@@ -335,10 +338,14 @@ def get_remaining_games(schedule_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_remaining_opponents(schedule_df: pd.DataFrame) -> dict[int, list[int]]:
-    remaining  = get_remaining_games(schedule_df)
+    remaining = get_remaining_games(schedule_df)
+    if remaining.empty:
+        return {}
+    # Vectorized — no row iteration
+    home = remaining["home_team_id"].astype(int).values
+    away = remaining["away_team_id"].astype(int).values
     opponents: dict[int, list[int]] = {}
-    for _, row in remaining.iterrows():
-        h, a = int(row["home_team_id"]), int(row["away_team_id"])
+    for h, a in zip(home, away):
         opponents.setdefault(h, []).append(a)
         opponents.setdefault(a, []).append(h)
     return opponents
@@ -1139,12 +1146,23 @@ def apply_ramp(df: pd.DataFrame, ramp: float) -> pd.DataFrame:
 
 
 def compute_sos(df: pd.DataFrame, remaining_opponents: dict) -> pd.DataFrame:
+    if not remaining_opponents:
+        df = df.copy()
+        df["sos_raw"]   = 0.500
+        df["sos_rank"]  = 15
+        df["sos_label"] = "Average"
+        return df
     df = df.copy()
-    wp_map = df.set_index("team_id")["adj_win_pct"].to_dict()
+    wp_arr = df.set_index("team_id")["adj_win_pct"]
+    # Build a flat opponent win-pct lookup using numpy
     sos = {}
-    for tid in df["team_id"]:
+    for tid in df["team_id"].values:
         opps = remaining_opponents.get(int(tid), [])
-        sos[tid] = np.mean([wp_map.get(int(o), 0.500) for o in opps]) if opps else 0.500
+        if opps:
+            opp_wps = np.array([wp_arr.get(int(o), 0.500) for o in opps])
+            sos[tid] = float(opp_wps.mean())
+        else:
+            sos[tid] = 0.500
     df["sos_raw"]  = df["team_id"].map(sos).fillna(0.500)
     df["sos_rank"] = df["sos_raw"].rank(ascending=False, method="min").astype(int)
     p33, p67 = df["sos_raw"].quantile(0.33), df["sos_raw"].quantile(0.67)
@@ -1705,7 +1723,16 @@ def load_all_data():
     master_df = apply_ramp(master_df, get_deadline_ramp_factor())
 
     update(*steps[5])
-    master_df = compute_sos(master_df, compute_remaining_opponents(schedule_df))
+    import concurrent.futures as _sosf
+    try:
+        with _sosf.ThreadPoolExecutor(max_workers=1) as _sosx:
+            _sosfut = _sosx.submit(compute_sos, master_df, compute_remaining_opponents(schedule_df))
+            master_df = _sosfut.result(timeout=30)
+    except Exception as _sose:
+        print(f"SoS timed out or failed: {_sose}, skipping")
+        master_df["sos_raw"]   = 0.500
+        master_df["sos_rank"]  = 15
+        master_df["sos_label"] = "Average"
 
     update(*steps[6])
     sim_results = run_simulation(master_df, schedule_df)
