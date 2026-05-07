@@ -1,6 +1,6 @@
 """
 MLB 2026 Season Projections
-Full Restored Version: Monte Carlo Simulations + FanGraphs Integration
+Restored Version: Monte Carlo Simulations + FanGraphs Integration
 """
 
 import os
@@ -26,7 +26,7 @@ st.set_page_config(
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CONSTANTS & CONFIG
+# CONSTANTS & CONFIG (Restored from App 10)
 # ══════════════════════════════════════════════════════════════════════════════
 
 SEASON_YEAR              = 2026
@@ -34,11 +34,10 @@ OPENING_DAY              = "2026-03-27"
 WORLD_SERIES_END_APPROX  = "2026-11-01"
 TRADE_DEADLINE           = "2026-07-31"
 
-# Weights for blending record with projections
 WEIGHT_CURRENT_SEASON    = 0.50
 WEIGHT_PROJECTIONS       = 0.50
-
 N_SIMULATIONS            = 10_000
+PYTHAG_EXPONENT          = 1.83
 EST = ZoneInfo("America/New_York")
 
 TEAM_INFO = {
@@ -75,7 +74,7 @@ TEAM_INFO = {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DATA FETCHING (FIXED)
+# DATA FETCHING (Corrected)
 # ══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=3600)
@@ -95,11 +94,11 @@ def fetch_standings():
             gp = w + l
             rs, ra = tr.get("runsScored", 0) or 0, tr.get("runsAllowed", 0) or 0
             
-            # --- THE FIX: Handle '-' for team leading the race ---
+            # API safety for '-' leading values
             wc_val = tr.get("wildCardGamesBack", "0.0")
             try:
                 wc_gb = float(wc_val) if wc_val != "-" else 0.0
-            except (ValueError, TypeError):
+            except:
                 wc_gb = 0.0
             
             rows.append({
@@ -110,7 +109,7 @@ def fetch_standings():
     return pd.DataFrame(rows)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SIMULATION ENGINE
+# SIMULATION ENGINE (Restored 10k Logic)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_monte_carlo(df):
@@ -119,82 +118,67 @@ def run_monte_carlo(df):
         tid = team["team_id"]
         rem_games = 162 - team["games_played"]
         
-        # Blending logic: Current Record vs League Average (Regressed)
-        # We ensure the Mets (and others) maintain their roster-based strength
+        # Regression logic to prevent win swings (Mets preservation)
         true_talent = (team["win_pct"] * WEIGHT_CURRENT_SEASON) + (0.500 * WEIGHT_PROJECTIONS)
         
-        # 10,000 simulations of the remaining schedule
         outcomes = np.random.binomial(rem_games, true_talent, N_SIMULATIONS)
         season_totals = team["wins"] + outcomes
         
         sim_results[tid] = {
             "mean_wins": np.mean(season_totals),
             "mean_losses": 162 - np.mean(season_totals),
-            "playoff_odds": np.mean(season_totals >= 88) * 100 # Rough threshold
+            "playoff_odds": np.mean(season_totals >= 88) * 100
         }
     return sim_results
 
 # ══════════════════════════════════════════════════════════════════════════════
-# UI COMPONENTS (RESTORED)
+# UI COMPONENTS (Restored Divisions & Formatting)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def render_projections_tab(df, sim):
+    # Group by League and then Division as originally intended
     for lg in ["AL", "NL"]:
-        st.header(f"{lg} Standings & Projections")
+        st.subheader(f"{lg} Standings")
         lg_df = df[df["league"] == lg]
         
-        table_rows = []
-        for _, row in lg_df.iterrows():
-            res = sim[row["team_id"]]
-            table_rows.append({
-                "Team": row["name"],
-                "Division": row["division"],
-                "Current W-L": f"{row['wins']}-{row['losses']}",
-                "Proj Wins": round(res["mean_wins"], 1),
-                "Proj Losses": round(res["mean_losses"], 1),
-                "Playoff Odds": f"{res['playoff_odds']:.1f}%"
-            })
-        st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+        for div in sorted(lg_df["division"].unique()):
+            st.markdown(f"**{div}**")
+            div_df = lg_df[lg_df["division"] == div]
+            
+            table_rows = []
+            for _, row in div_df.iterrows():
+                res = sim[row["team_id"]]
+                table_rows.append({
+                    "Team": row["name"],
+                    "Current W-L": f"{row['wins']}-{row['losses']}",
+                    "Proj Wins": round(res["mean_wins"], 1),
+                    "Proj Losses": round(res["mean_losses"], 1),
+                    "Playoff Odds": f"{res['playoff_odds']:.1f}%"
+                })
+            st.dataframe(pd.DataFrame(table_rows), width="stretch", hide_index=True)
 
 def render_team_detail(df, sim):
-    team_name = st.selectbox("Select Team for Deep Dive", sorted(df["name"].unique()))
+    team_name = st.selectbox("Select Team", sorted(df["name"].unique()))
     row = df[df["name"] == team_name].iloc[0]
     res = sim[row["team_id"]]
     
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Current Win %", f"{row['win_pct']:.3f}")
-    col2.metric("Proj. Total Wins", f"{res['mean_wins']:.1.1f}")
-    col3.metric("Proj. Total Losses", f"{res['mean_losses']:.1.1f}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Current Win %", f"{row['win_pct']:.3f}")
+    # FIXED: removed invalid .1.1f format
+    c2.metric("Proj. Total Wins", f"{res['mean_wins']:.1f}")
+    c3.metric("Proj. Total Losses", f"{res['mean_losses']:.1f}")
 
-    # Plotly Chart Restored
     fig = go.Figure(go.Indicator(
         mode = "gauge+number",
         value = res['playoff_odds'],
-        title = {'text': "Playoff Probability (%)"},
+        title = {'text': f"{team_name} Playoff Odds %"},
         gauge = {'axis': {'range': [0, 100]}, 'bar': {'color': "#1f77b4"}}
     ))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MAIN APP
+# MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    st.title("⚾ MLB 2026 Dynamic Projections (v10.0 Restored)")
-    
-    try:
-        with st.spinner("Fetching data and running 10k simulations..."):
-            df = fetch_standings()
-            sim_results = run_monte_carlo(df)
-            
-        t1, t2 = st.tabs(["📊 Standings & Projections", "🔍 Team Detail"])
-        
-        with t1: render_projections_tab(df, sim_results)
-        with t2: render_team_detail(df, sim_results)
-            
-    except Exception as e:
-        st.error(f"Critical Error: {e}")
-        st.code(traceback.format_exc())
-
-if __name__ == "__main__":
-    main()
+    st.title("⚾
