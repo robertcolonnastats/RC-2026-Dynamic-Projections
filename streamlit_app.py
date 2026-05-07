@@ -355,7 +355,9 @@ def compute_remaining_opponents(schedule_df: pd.DataFrame) -> dict[int, list[int
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PROJECTION ENGINE — FanGraphs DC → Marcel → Statcast cascade
+# PROJECTION ENGINE
+# Core: Regression-to-mean from standings (always works, no external deps)
+# Enhancement: FanGraphs DC individual player projections (when available)
 # ══════════════════════════════════════════════════════════════════════════════
 
 FG_TEAM_MAP = {
@@ -368,7 +370,6 @@ FG_TEAM_MAP = {
     "Phillies": 143, "Braves": 144, "White Sox": 145, "Marlins": 146,
     "Yankees": 147, "Brewers": 158,
 }
-
 FG_ABBR_MAP = {
     "LAA": 108, "ARI": 109, "BAL": 110, "BOS": 111, "CHC": 112,
     "CIN": 113, "CLE": 114, "COL": 115, "DET": 116, "HOU": 117,
@@ -376,28 +377,41 @@ FG_ABBR_MAP = {
     "PIT": 134, "SDP": 135, "SEA": 136, "SFG": 137, "STL": 138,
     "TBR": 139, "TEX": 140, "TOR": 141, "MIN": 142, "PHI": 143,
     "ATL": 144, "CHW": 145, "MIA": 146, "NYY": 147, "MIL": 158,
-    # Alternate abbreviations FanGraphs sometimes uses
-    "KC":  118, "SD":  135, "SF":  137, "TB":  139, "WSH": 120,
-    "CWS": 145,
+    "KC": 118, "SD": 135, "SF": 137, "TB": 139, "WSH": 120, "CWS": 145,
 }
-
 LEAGUE_AVG_RPG    = 4.50
 LEAGUE_AVG_FIP    = 4.10
 LEAGUE_AVG_WRC    = 100.0
-LEAGUE_SP_IP_SHARE = 0.57   # SPs pitch ~57% of innings
+LEAGUE_SP_IP_SHARE = 0.57
 LEAGUE_RP_IP_SHARE = 0.43
 
 
-# ── Tier 1: FanGraphs Depth Charts ────────────────────────────────────────────
+def _regressed_win_pct(rs_per_g: float, ra_per_g: float, games_played: int) -> tuple[float, float, float]:
+    """
+    Regress team RS/RA toward league average based on sample size.
+    This is the core projection when external data is unavailable.
+    
+    At 0 GP:   100% league average (no info)
+    At 81 GP:  50% actual / 50% league average
+    At 162 GP: 100% actual (full season)
+    
+    Returns (regressed_rs_per_g, regressed_ra_per_g, projected_win_pct)
+    """
+    exp          = PYTHAG_EXPONENT
+    prior_games  = max(162 - games_played, 0)
+    total        = games_played + prior_games
+    reg_rs       = (rs_per_g * games_played + LEAGUE_AVG_RPG * prior_games) / total
+    reg_ra       = (ra_per_g * games_played + LEAGUE_AVG_RPG * prior_games) / total
+    reg_rs       = float(np.clip(reg_rs, 2.5, 7.5))
+    reg_ra       = float(np.clip(reg_ra, 2.5, 7.5))
+    wp           = reg_rs ** exp / (reg_rs ** exp + reg_ra ** exp)
+    return reg_rs, reg_ra, float(wp)
+
 
 def _fetch_fg_dc_batting() -> pd.DataFrame | None:
-    """
-    Fetch FanGraphs Depth Charts batting projections.
-    Returns DataFrame with columns: Name, Team, PA, wRC+, OBP, WAR, teamid
-    """
-    import requests
+    """Fetch FanGraphs Depth Charts batting projections."""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
         "Accept": "application/json",
         "Referer": "https://www.fangraphs.com/projections",
     }
@@ -408,13 +422,12 @@ def _fetch_fg_dc_batting() -> pd.DataFrame | None:
                     "team": 0, "players": 0, "lg": "all"},
             headers=headers, timeout=20,
         )
-        if r.status_code != 200:
+        if r.status_code != 200 or not r.content:
             return None
         data = r.json()
-        if not isinstance(data, list) or len(data) == 0:
+        if not isinstance(data, list) or len(data) < 100:
             return None
         df = pd.DataFrame(data)
-        # Normalize column names — FG uses various capitalizations
         df.columns = [c.strip() for c in df.columns]
         return df
     except Exception:
@@ -422,13 +435,9 @@ def _fetch_fg_dc_batting() -> pd.DataFrame | None:
 
 
 def _fetch_fg_dc_pitching() -> pd.DataFrame | None:
-    """
-    Fetch FanGraphs Depth Charts pitching projections (all pitchers).
-    Returns DataFrame with: Name, Team, IP, GS, FIP, ERA, WAR, teamid
-    """
-    import requests
+    """Fetch FanGraphs Depth Charts pitching projections."""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
         "Accept": "application/json",
         "Referer": "https://www.fangraphs.com/projections",
     }
@@ -439,10 +448,10 @@ def _fetch_fg_dc_pitching() -> pd.DataFrame | None:
                     "team": 0, "players": 0, "lg": "all"},
             headers=headers, timeout=20,
         )
-        if r.status_code != 200:
+        if r.status_code != 200 or not r.content:
             return None
         data = r.json()
-        if not isinstance(data, list) or len(data) == 0:
+        if not isinstance(data, list) or len(data) < 100:
             return None
         df = pd.DataFrame(data)
         df.columns = [c.strip() for c in df.columns]
@@ -451,22 +460,18 @@ def _fetch_fg_dc_pitching() -> pd.DataFrame | None:
         return None
 
 
-def _team_id_from_fg(row: pd.Series) -> int | None:
-    """Map a FanGraphs row to our team_id using team name or abbreviation."""
-    # Try teamid field first (FG sometimes includes numeric team id)
+def _team_id_from_fg_row(row: pd.Series) -> int | None:
     for col in ["teamid", "TeamId", "team_id"]:
-        if col in row.index and pd.notna(row[col]):
+        if col in row.index and pd.notna(row.get(col)):
             try:
                 return int(row[col])
             except Exception:
                 pass
-    # Try team abbreviation
     for col in ["Team", "team"]:
         if col in row.index:
             abbr = str(row[col]).strip().upper()
             if abbr in FG_ABBR_MAP:
                 return FG_ABBR_MAP[abbr]
-    # Try team name
     for col in ["TeamName", "Tm"]:
         if col in row.index:
             name = str(row[col]).strip()
@@ -475,424 +480,189 @@ def _team_id_from_fg(row: pd.Series) -> int | None:
     return None
 
 
-def _build_from_fg_dc(bat_df: pd.DataFrame, pit_df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """
-    Build team-level projections from FanGraphs Depth Charts data.
-    Returns (team_proj_df, player_detail_dict)
-    player_detail_dict: {team_id: {"batters": [...], "sp": [...], "rp": [...]}}
-    """
-    all_ids = list(TEAM_INFO.keys())
+def _build_fg_dc_projections(bat_df: pd.DataFrame, pit_df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Build team projections and player detail from FanGraphs DC data."""
+    all_ids       = list(TEAM_INFO.keys())
     player_detail = {tid: {"batters": [], "sp": [], "rp": []} for tid in all_ids}
+    team_wrc      = {}
+    team_sp_fip   = {}
+    team_rp_fip   = {}
 
     # ── Batting ───────────────────────────────────────────────────────────────
-    bat_team_rpg = {}
-    bat_team_wrc = {}
-
-    # Normalize column names
-    wrc_col = next((c for c in bat_df.columns if c in ["wRC+", "wrc+", "WRC+"]), None)
-    pa_col  = next((c for c in bat_df.columns if c in ["PA", "pa"]), None)
-    obp_col = next((c for c in bat_df.columns if c in ["OBP", "obp"]), None)
-    name_col= next((c for c in bat_df.columns if c in ["PlayerName", "Name", "name"]), None)
-    war_col = next((c for c in bat_df.columns if c in ["WAR", "war"]), None)
+    wrc_col  = next((c for c in bat_df.columns if c in ["wRC+","wrc+","WRC+"]), None)
+    pa_col   = next((c for c in bat_df.columns if c in ["PA","pa"]),            None)
+    name_col = next((c for c in bat_df.columns if c in ["PlayerName","Name","name"]), None)
+    war_col  = next((c for c in bat_df.columns if c in ["WAR","war"]),          None)
 
     if wrc_col and pa_col:
         bat_df = bat_df.copy()
-        bat_df["_team_id"] = bat_df.apply(_team_id_from_fg, axis=1)
-        bat_df = bat_df.dropna(subset=["_team_id"])
-        bat_df["_team_id"] = bat_df["_team_id"].astype(int)
+        bat_df["_tid"] = bat_df.apply(_team_id_from_fg_row, axis=1)
+        bat_df = bat_df.dropna(subset=["_tid"])
+        bat_df["_tid"]  = bat_df["_tid"].astype(int)
         bat_df[wrc_col] = pd.to_numeric(bat_df[wrc_col], errors="coerce").fillna(100)
         bat_df[pa_col]  = pd.to_numeric(bat_df[pa_col],  errors="coerce").fillna(0)
-
         for tid in all_ids:
-            tdf = bat_df[bat_df["_team_id"] == tid]
-            if tdf.empty:
+            tdf = bat_df[bat_df["_tid"] == tid]
+            if tdf.empty or tdf[pa_col].sum() == 0:
                 continue
-            # Weight by projected PA
-            total_pa = tdf[pa_col].sum()
-            if total_pa > 0:
-                wrc_avg = np.average(tdf[wrc_col], weights=tdf[pa_col].clip(1))
-                bat_team_wrc[tid] = wrc_avg
-                bat_team_rpg[tid] = (wrc_avg / 100.0) * LEAGUE_AVG_RPG
-
-            # Store player detail (top 9 by PA for display)
-            top_batters = tdf.nlargest(9, pa_col)
-            for _, p in top_batters.iterrows():
+            team_wrc[tid] = float(np.average(tdf[wrc_col], weights=tdf[pa_col].clip(1)))
+            for _, p in tdf.nlargest(9, pa_col).iterrows():
                 player_detail[tid]["batters"].append({
-                    "name":    str(p.get(name_col, "Unknown"))  if name_col else "Unknown",
-                    "pa":      int(p[pa_col]),
-                    "wrc_plus":round(float(p[wrc_col]), 1),
-                    "war":     round(float(p[war_col]), 1) if war_col and pd.notna(p.get(war_col)) else None,
+                    "name":     str(p.get(name_col, "?")) if name_col else "?",
+                    "pa":       int(p[pa_col]),
+                    "wrc_plus": round(float(p[wrc_col]), 1),
+                    "war":      round(float(p[war_col]), 1) if war_col and pd.notna(p.get(war_col)) else None,
                 })
 
     # ── Pitching ─────────────────────────────────────────────────────────────
-    pit_team_rapg_sp = {}
-    pit_team_rapg_rp = {}
-
-    ip_col  = next((c for c in pit_df.columns if c in ["IP", "ip"]), None)
-    gs_col  = next((c for c in pit_df.columns if c in ["GS", "gs"]), None)
-    fip_col = next((c for c in pit_df.columns if c in ["FIP", "fip"]), None)
-    era_col = next((c for c in pit_df.columns if c in ["ERA", "era"]), None)
-    pname_col = next((c for c in pit_df.columns if c in ["PlayerName", "Name", "name"]), None)
-    pwar_col  = next((c for c in pit_df.columns if c in ["WAR", "war"]), None)
+    ip_col   = next((c for c in pit_df.columns if c in ["IP","ip"]),            None)
+    gs_col   = next((c for c in pit_df.columns if c in ["GS","gs"]),            None)
+    fip_col  = next((c for c in pit_df.columns if c in ["FIP","fip"]),          None)
+    era_col  = next((c for c in pit_df.columns if c in ["ERA","era"]),          None)
+    pname    = next((c for c in pit_df.columns if c in ["PlayerName","Name","name"]), None)
+    pwar     = next((c for c in pit_df.columns if c in ["WAR","war"]),          None)
 
     if ip_col and fip_col:
         pit_df = pit_df.copy()
-        pit_df["_team_id"] = pit_df.apply(_team_id_from_fg, axis=1)
-        pit_df = pit_df.dropna(subset=["_team_id"])
-        pit_df["_team_id"] = pit_df["_team_id"].astype(int)
+        pit_df["_tid"] = pit_df.apply(_team_id_from_fg_row, axis=1)
+        pit_df = pit_df.dropna(subset=["_tid"])
+        pit_df["_tid"]  = pit_df["_tid"].astype(int)
         pit_df[ip_col]  = pd.to_numeric(pit_df[ip_col],  errors="coerce").fillna(0)
-        pit_df[fip_col] = pd.to_numeric(pit_df[fip_col], errors="coerce").fillna(LEAGUE_AVG_FIP)
+        pit_df[fip_col] = pd.to_numeric(pit_df[fip_col], errors="coerce").fillna(LEAGUE_AVG_FIP).clip(2.0, 7.5)
         if era_col:
-            pit_df[era_col] = pd.to_numeric(pit_df[era_col], errors="coerce").fillna(LEAGUE_AVG_FIP)
+            pit_df[era_col] = pd.to_numeric(pit_df[era_col], errors="coerce").fillna(LEAGUE_AVG_FIP).clip(1.5, 8.0)
         if gs_col:
-            pit_df[gs_col]  = pd.to_numeric(pit_df[gs_col],  errors="coerce").fillna(0)
-
-        # Classify SP vs RP by GS threshold
-        if gs_col:
+            pit_df[gs_col]   = pd.to_numeric(pit_df[gs_col], errors="coerce").fillna(0)
             pit_df["_is_sp"] = pit_df[gs_col] >= 8
         else:
-            # If no GS col, classify by IP (SPs tend to have more IP)
             pit_df["_is_sp"] = pit_df[ip_col] >= 80
 
         for tid in all_ids:
-            tdf = pit_df[pit_df["_team_id"] == tid]
+            tdf = pit_df[pit_df["_tid"] == tid]
             if tdf.empty:
                 continue
-
             sp_df = tdf[tdf["_is_sp"]]
             rp_df = tdf[~tdf["_is_sp"]]
 
-            # Blended FIP/ERA metric
-            def blended_pitching(df_):
-                if df_.empty:
+            def _blended_fip(df_):
+                if df_.empty or df_[ip_col].sum() == 0:
                     return LEAGUE_AVG_FIP
-                fip_vals = df_[fip_col].clip(2.0, 7.5)
-                era_vals = df_[era_col].clip(1.5, 8.0) if era_col else fip_vals
-                blended  = fip_vals * 0.70 + era_vals * 0.30
-                weights  = df_[ip_col].clip(1)
-                return float(np.average(blended, weights=weights))
+                blended = df_[fip_col].clip(2.0, 7.5)
+                if era_col:
+                    blended = blended * 0.70 + df_[era_col].clip(1.5, 8.0) * 0.30
+                return float(np.average(blended, weights=df_[ip_col].clip(1)))
 
-            total_ip = tdf[ip_col].sum()
-            sp_ip    = sp_df[ip_col].sum() if not sp_df.empty else 0
-            rp_ip    = rp_df[ip_col].sum() if not rp_df.empty else 0
+            if not sp_df.empty:
+                team_sp_fip[tid] = _blended_fip(sp_df)
+                for _, p in sp_df.nlargest(5, ip_col).iterrows():
+                    player_detail[tid]["sp"].append({
+                        "name": str(p.get(pname, "?")) if pname else "?",
+                        "ip":   round(float(p[ip_col]), 1),
+                        "fip":  round(float(p[fip_col]), 2),
+                        "era":  round(float(p[era_col]), 2) if era_col else None,
+                        "war":  round(float(p[pwar]), 1) if pwar and pd.notna(p.get(pwar)) else None,
+                    })
+            if not rp_df.empty:
+                team_rp_fip[tid] = _blended_fip(rp_df)
+                for _, p in rp_df.nlargest(7, ip_col).iterrows():
+                    player_detail[tid]["rp"].append({
+                        "name": str(p.get(pname, "?")) if pname else "?",
+                        "ip":   round(float(p[ip_col]), 1),
+                        "fip":  round(float(p[fip_col]), 2),
+                        "era":  round(float(p[era_col]), 2) if era_col else None,
+                        "war":  round(float(p[pwar]), 1) if pwar and pd.notna(p.get(pwar)) else None,
+                    })
 
-            sp_fip   = blended_pitching(sp_df)
-            rp_fip   = blended_pitching(rp_df)
-
-            # Convert to runs/game weighted by innings share
-            sp_share = (sp_ip / total_ip) if total_ip > 0 else LEAGUE_SP_IP_SHARE
-            rp_share = 1.0 - sp_share
-
-            # Team RA/G = weighted average of SP and RP quality scaled to league avg
-            team_rapg = (
-                (sp_fip / LEAGUE_AVG_FIP) * sp_share +
-                (rp_fip / LEAGUE_AVG_FIP) * rp_share
-            ) * LEAGUE_AVG_RPG
-
-            pit_team_rapg_sp[tid] = sp_fip
-            pit_team_rapg_rp[tid] = rp_fip
-
-            # Store player detail — top 5 SP and top 7 RP by IP
-            for _, p in sp_df.nlargest(min(5, len(sp_df)), ip_col).iterrows():
-                player_detail[tid]["sp"].append({
-                    "name": str(p.get(pname_col, "Unknown")) if pname_col else "Unknown",
-                    "ip":   round(float(p[ip_col]), 1),
-                    "fip":  round(float(p[fip_col]), 2),
-                    "era":  round(float(p[era_col]), 2) if era_col else None,
-                    "war":  round(float(p[pwar_col]), 1) if pwar_col and pd.notna(p.get(pwar_col)) else None,
-                })
-            for _, p in rp_df.nlargest(min(7, len(rp_df)), ip_col).iterrows():
-                player_detail[tid]["rp"].append({
-                    "name": str(p.get(pname_col, "Unknown")) if pname_col else "Unknown",
-                    "ip":   round(float(p[ip_col]), 1),
-                    "fip":  round(float(p[fip_col]), 2),
-                    "era":  round(float(p[era_col]), 2) if era_col else None,
-                    "war":  round(float(p[pwar_col]), 1) if pwar_col and pd.notna(p.get(pwar_col)) else None,
-                })
-
-    # ── Assemble team projections ─────────────────────────────────────────────
-    rows = []
+    # ── Assemble ──────────────────────────────────────────────────────────────
     exp  = PYTHAG_EXPONENT
+    rows = []
     for tid in all_ids:
-        rpg  = bat_team_rpg.get(tid, LEAGUE_AVG_RPG)
-        sp_f = pit_team_rapg_sp.get(tid, LEAGUE_AVG_FIP)
-        rp_f = pit_team_rapg_rp.get(tid, LEAGUE_AVG_FIP)
-        # Weighted RA/G
-        sp_rapg = (sp_f / LEAGUE_AVG_FIP) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE
-        rp_rapg = (rp_f / LEAGUE_AVG_FIP) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE
-        rapg    = (sp_rapg + rp_rapg).clip(2.5, 7.5) if hasattr(sp_rapg, 'clip') else min(max(sp_rapg + rp_rapg, 2.5), 7.5)
-        rpg     = min(max(rpg, 2.5), 7.5)
-        wp      = rpg ** exp / (rpg ** exp + rapg ** exp)
+        wrc   = team_wrc.get(tid, LEAGUE_AVG_WRC)
+        sp_f  = team_sp_fip.get(tid, LEAGUE_AVG_FIP)
+        rp_f  = team_rp_fip.get(tid, LEAGUE_AVG_FIP)
+        rpg   = float(np.clip((wrc / 100.0) * LEAGUE_AVG_RPG, 2.5, 7.5))
+        rapg  = float(np.clip(
+            (sp_f / LEAGUE_AVG_FIP) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE +
+            (rp_f / LEAGUE_AVG_FIP) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE,
+            2.5, 7.5))
+        wp    = rpg ** exp / (rpg ** exp + rapg ** exp)
         rows.append({
             "team_id":            tid,
             "proj_runs_per_game": round(rpg,  3),
             "proj_ra_per_game":   round(rapg, 3),
-            "proj_win_pct":       round(wp,   4),
+            "proj_win_pct":       round(float(wp), 4),
             "proj_sp_fip":        round(sp_f, 2),
             "proj_rp_fip":        round(rp_f, 2),
-            "proj_wrc_plus":      round(bat_team_wrc.get(tid, 100.0), 1),
+            "proj_wrc_plus":      round(wrc,  1),
         })
-
     return pd.DataFrame(rows), player_detail
 
 
-# ── Tier 2: Marcel Projections (pybaseball built-in) ─────────────────────────
-
-def _build_from_marcel() -> pd.DataFrame | None:
+def fetch_team_projections(standings_df: pd.DataFrame | None = None) -> tuple[pd.DataFrame, dict]:
     """
-    3-year weighted average projection using pybaseball team stats.
-    Weights: 50% current / 30% last year / 20% two years ago.
-    """
-    try:
-        import pybaseball as pb
-        pb.cache.enable()
+    Fetch team projections using two-tier approach:
 
-        seasons = [SEASON_YEAR - 2, SEASON_YEAR - 1, SEASON_YEAR]
-        bat_data = {}
-        pit_data = {}
+    Tier 1 — FanGraphs Depth Charts (individual player projections, injury-aware)
+              Best source when available. 20-second timeout.
 
-        import concurrent.futures
-
-        def _fetch_bat(yr):
-            return yr, pb.batting_stats(yr, qual=50)
-
-        def _fetch_pit(yr):
-            return yr, pb.pitching_stats(yr, qual=10)
-
-        # Fetch all seasons with a hard 45-second timeout per call
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
-            bat_futures = {ex.submit(_fetch_bat, yr): yr for yr in seasons}
-            for fut in concurrent.futures.as_completed(bat_futures, timeout=50):
-                try:
-                    yr, df = fut.result(timeout=45)
-                    bat_data[yr] = df
-                except Exception:
-                    pass
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
-            pit_futures = {ex.submit(_fetch_pit, yr): yr for yr in seasons}
-            for fut in concurrent.futures.as_completed(pit_futures, timeout=50):
-                try:
-                    yr, df = fut.result(timeout=45)
-                    pit_data[yr] = df
-                except Exception:
-                    pass
-
-        if not bat_data and not pit_data:
-            return None
-
-        rows = []
-        all_ids = list(TEAM_INFO.keys())
-        exp = PYTHAG_EXPONENT
-
-        # Build team-level from most recent season with Marcel weighting
-        weights = {SEASON_YEAR: 0.50, SEASON_YEAR-1: 0.30, SEASON_YEAR-2: 0.20}
-
-        bat_team = {tid: {"wrc": [], "w": []} for tid in all_ids}
-        pit_sp_team = {tid: {"fip": [], "w": []} for tid in all_ids}
-        pit_rp_team = {tid: {"fip": [], "w": []} for tid in all_ids}
-
-        for yr, wt in weights.items():
-            if yr in bat_data:
-                df = bat_data[yr].copy()
-                df["_tid"] = df["Team"].map(FG_TEAM_MAP)
-                df = df.dropna(subset=["_tid"])
-                df["_tid"] = df["_tid"].astype(int)
-                pa_col  = "PA"  if "PA"   in df.columns else None
-                wrc_col = "wRC+" if "wRC+" in df.columns else None
-                if pa_col and wrc_col:
-                    df[pa_col]  = pd.to_numeric(df[pa_col],  errors="coerce").fillna(0)
-                    df[wrc_col] = pd.to_numeric(df[wrc_col], errors="coerce").fillna(100)
-                    for tid in all_ids:
-                        tdf = df[df["_tid"] == tid]
-                        if not tdf.empty and tdf[pa_col].sum() > 0:
-                            wrc_avg = np.average(tdf[wrc_col], weights=tdf[pa_col].clip(1))
-                            bat_team[tid]["wrc"].append(wrc_avg)
-                            bat_team[tid]["w"].append(wt)
-
-            if yr in pit_data:
-                df = pit_data[yr].copy()
-                df["_tid"] = df["Team"].map(FG_TEAM_MAP)
-                df = df.dropna(subset=["_tid"])
-                df["_tid"] = df["_tid"].astype(int)
-                ip_col  = "IP"  if "IP"  in df.columns else None
-                gs_col  = "GS"  if "GS"  in df.columns else None
-                fip_col = "FIP" if "FIP" in df.columns else None
-                era_col = "ERA" if "ERA" in df.columns else None
-                if ip_col and fip_col:
-                    df[ip_col]  = pd.to_numeric(df[ip_col],  errors="coerce").fillna(0)
-                    df[fip_col] = pd.to_numeric(df[fip_col], errors="coerce").fillna(LEAGUE_AVG_FIP)
-                    if gs_col:
-                        df[gs_col] = pd.to_numeric(df[gs_col], errors="coerce").fillna(0)
-                        df["_is_sp"] = df[gs_col] >= 8
-                    else:
-                        df["_is_sp"] = df[ip_col] >= 80
-
-                    for tid in all_ids:
-                        tdf = df[df["_tid"] == tid]
-                        for pool, is_sp in [("sp", True), ("rp", False)]:
-                            pdf = tdf[tdf["_is_sp"] == is_sp]
-                            if not pdf.empty and pdf[ip_col].sum() > 0:
-                                blended = pdf[fip_col].clip(2.0, 7.5)
-                                if era_col:
-                                    era_vals = pd.to_numeric(pdf[era_col], errors="coerce").fillna(LEAGUE_AVG_FIP).clip(1.5, 8.0)
-                                    blended  = blended * 0.70 + era_vals * 0.30
-                                fip_avg = float(np.average(blended, weights=pdf[ip_col].clip(1)))
-                                if pool == "sp":
-                                    pit_sp_team[tid]["fip"].append(fip_avg)
-                                    pit_sp_team[tid]["w"].append(wt)
-                                else:
-                                    pit_rp_team[tid]["fip"].append(fip_avg)
-                                    pit_rp_team[tid]["w"].append(wt)
-
-        for tid in all_ids:
-            # Batting
-            if bat_team[tid]["wrc"]:
-                wrc = np.average(bat_team[tid]["wrc"], weights=bat_team[tid]["w"])
-            else:
-                wrc = LEAGUE_AVG_WRC
-            rpg = min(max((wrc / 100.0) * LEAGUE_AVG_RPG, 2.5), 7.5)
-
-            # Pitching
-            sp_fip = np.average(pit_sp_team[tid]["fip"], weights=pit_sp_team[tid]["w"]) if pit_sp_team[tid]["fip"] else LEAGUE_AVG_FIP
-            rp_fip = np.average(pit_rp_team[tid]["fip"], weights=pit_rp_team[tid]["w"]) if pit_rp_team[tid]["fip"] else LEAGUE_AVG_FIP
-            rapg   = min(max(
-                (sp_fip / LEAGUE_AVG_FIP) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE +
-                (rp_fip / LEAGUE_AVG_FIP) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE,
-                2.5), 7.5)
-
-            wp = rpg ** exp / (rpg ** exp + rapg ** exp)
-            rows.append({
-                "team_id":            tid,
-                "proj_runs_per_game": round(rpg,  3),
-                "proj_ra_per_game":   round(rapg, 3),
-                "proj_win_pct":       round(wp,   4),
-                "proj_sp_fip":        round(sp_fip, 2),
-                "proj_rp_fip":        round(rp_fip, 2),
-                "proj_wrc_plus":      round(wrc, 1),
-            })
-
-        return pd.DataFrame(rows) if rows else None
-
-    except Exception as e:
-        print(f"Marcel failed: {e}")
-        return None
-
-
-# ── Tier 3: Fallback ──────────────────────────────────────────────────────────
-
-def _fallback_projections() -> pd.DataFrame:
-    return pd.DataFrame([{
-        "team_id":            tid,
-        "proj_runs_per_game": LEAGUE_AVG_RPG,
-        "proj_ra_per_game":   LEAGUE_AVG_RPG,
-        "proj_win_pct":       0.500,
-        "proj_sp_fip":        LEAGUE_AVG_FIP,
-        "proj_rp_fip":        LEAGUE_AVG_FIP,
-        "proj_wrc_plus":      LEAGUE_AVG_WRC,
-    } for tid in TEAM_INFO.keys()])
-
-
-# ── Main entry point ──────────────────────────────────────────────────────────
-
-def fetch_team_projections() -> tuple[pd.DataFrame, dict]:
-    """
-    Fetch team projections using cascade:
-      1. FanGraphs Depth Charts (best — daily, injury-aware, individual players)
-      2. Marcel via pybaseball (solid fallback, 3-year weighted)
-      3. League-average fallback (never crashes)
+    Tier 2 — Regression-to-mean from standings data (always works, no external deps)
+              Uses current RS/RA regressed toward league average based on sample size.
+              Honest about uncertainty: early season = more regression, late = less.
+              This is the Marcel/Pythagorean insight without needing external data.
 
     Returns (team_proj_df, player_detail_dict)
-    player_detail_dict: {team_id: {"batters": [...], "sp": [...], "rp": [...]}}
     """
-    player_detail = {tid: {"batters": [], "sp": [], "rp": []} for tid in TEAM_INFO.keys()}
+    all_ids       = list(TEAM_INFO.keys())
+    player_detail = {tid: {"batters": [], "sp": [], "rp": []} for tid in all_ids}
 
-    # Tier 1: FanGraphs Depth Charts (hard 30-second timeout)
+    # ── Tier 1: FanGraphs Depth Charts ───────────────────────────────────────
     try:
-        import concurrent.futures as _cf2
-        with _cf2.ThreadPoolExecutor(max_workers=2) as _ex2:
-            _bat_fut = _ex2.submit(_fetch_fg_dc_batting)
-            _pit_fut = _ex2.submit(_fetch_fg_dc_pitching)
+        import concurrent.futures as _fgf
+        with _fgf.ThreadPoolExecutor(max_workers=2) as _fgx:
+            _bat_fut = _fgx.submit(_fetch_fg_dc_batting)
+            _pit_fut = _fgx.submit(_fetch_fg_dc_pitching)
             try:
-                bat_df = _bat_fut.result(timeout=30)
-                pit_df = _pit_fut.result(timeout=30)
+                bat_df = _bat_fut.result(timeout=25)
+                pit_df = _pit_fut.result(timeout=25)
                 if bat_df is not None and pit_df is not None and len(bat_df) > 100:
-                    proj_df, player_detail = _build_from_fg_dc(bat_df, pit_df)
-                    if not proj_df.empty:
+                    proj_df, player_detail = _build_fg_dc_projections(bat_df, pit_df)
+                    if not proj_df.empty and proj_df["proj_win_pct"].std() > 0.01:
                         proj_df["proj_source"] = "FanGraphs DC"
                         return proj_df, player_detail
-            except _cf2.TimeoutError:
-                print("FanGraphs DC timed out after 30s")
-    except Exception as e:
-        print(f"FanGraphs DC failed: {e}")
+            except Exception:
+                pass
+    except Exception:
+        pass
 
-    # Tier 2: Marcel (hard 90-second total timeout)
-    try:
-        import concurrent.futures as _cf
-        with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
-            _fut = _ex.submit(_build_from_marcel)
-            try:
-                proj_df = _fut.result(timeout=90)
-                if proj_df is not None and not proj_df.empty:
-                    proj_df["proj_source"] = "Marcel"
-                    return proj_df, player_detail
-            except _cf.TimeoutError:
-                print("Marcel timed out after 90s, falling back to league average")
-            except Exception as e:
-                print(f"Marcel failed: {e}")
-    except Exception as e:
-        print(f"Marcel wrapper failed: {e}")
-
-    # Tier 3: Current season pybaseball stats (better than pure league average)
-    try:
-        import pybaseball as pb
-        pb.cache.enable()
-        import concurrent.futures as _pbf
-        def _quick_pb():
-            bat = pb.batting_stats(SEASON_YEAR, qual=50)
-            pit = pb.pitching_stats(SEASON_YEAR, qual=10)
-            return bat, pit
-        with _pbf.ThreadPoolExecutor(max_workers=1) as _pbx:
-            _pbfut = _pbx.submit(_quick_pb)
-            bat_cur, pit_cur = _pbfut.result(timeout=45)
-
-        all_ids = list(TEAM_INFO.keys())
-        exp = PYTHAG_EXPONENT
+    # ── Tier 2: Regression-to-mean from standings ────────────────────────────
+    # This always works — uses data already fetched from MLB Stats API
+    if standings_df is not None and not standings_df.empty:
         rows = []
-        for tid in all_ids:
-            # Batting
-            bat_t = bat_cur[bat_cur["Team"].map(FG_TEAM_MAP) == tid] if "Team" in bat_cur.columns else pd.DataFrame()
-            if not bat_t.empty and "wRC+" in bat_t.columns and "PA" in bat_t.columns:
-                wrc = float(np.average(pd.to_numeric(bat_t["wRC+"], errors="coerce").fillna(100),
-                                       weights=pd.to_numeric(bat_t["PA"], errors="coerce").fillna(1).clip(1)))
-            else:
-                wrc = 100.0
-            rpg = min(max((wrc / 100.0) * LEAGUE_AVG_RPG, 2.5), 7.5)
-
-            # Pitching
-            pit_t = pit_cur[pit_cur["Team"].map(FG_TEAM_MAP) == tid] if "Team" in pit_cur.columns else pd.DataFrame()
-            if not pit_t.empty and "FIP" in pit_t.columns and "IP" in pit_t.columns:
-                pit_t = pit_t.copy()
-                pit_t["IP"]  = pd.to_numeric(pit_t["IP"],  errors="coerce").fillna(0)
-                pit_t["FIP"] = pd.to_numeric(pit_t["FIP"], errors="coerce").fillna(LEAGUE_AVG_FIP).clip(2.0, 7.5)
-                fip = float(np.average(pit_t["FIP"], weights=pit_t["IP"].clip(1)))
-            else:
-                fip = LEAGUE_AVG_FIP
-            rapg = min(max((fip / LEAGUE_AVG_FIP) * LEAGUE_AVG_RPG, 2.5), 7.5)
-
-            wp = rpg ** exp / (rpg ** exp + rapg ** exp)
-            rows.append({"team_id": tid, "proj_runs_per_game": rpg,
-                         "proj_ra_per_game": rapg, "proj_win_pct": wp,
-                         "proj_sp_fip": fip, "proj_rp_fip": fip, "proj_wrc_plus": wrc})
-
+        for _, row in standings_df.iterrows():
+            tid   = row["team_id"]
+            gp    = max(int(row.get("games_played", 0)), 1)
+            rs_g  = row.get("runs_scored",  0) / gp
+            ra_g  = row.get("runs_allowed", 0) / gp
+            reg_rs, reg_ra, wp = _regressed_win_pct(rs_g, ra_g, gp)
+            rows.append({
+                "team_id":            tid,
+                "proj_runs_per_game": round(reg_rs, 3),
+                "proj_ra_per_game":   round(reg_ra, 3),
+                "proj_win_pct":       round(wp, 4),
+                "proj_sp_fip":        LEAGUE_AVG_FIP,
+                "proj_rp_fip":        LEAGUE_AVG_FIP,
+                "proj_wrc_plus":      LEAGUE_AVG_WRC,
+            })
         proj_df = pd.DataFrame(rows)
-        proj_df["proj_source"] = "Current Season Stats"
+        proj_df["proj_source"] = "Regression-to-Mean"
         return proj_df, player_detail
-    except Exception as e:
-        print(f"Current season fallback failed: {e}")
 
-    # Tier 4: True last resort — league average
-    proj_df = _fallback_projections()
+    # ── Tier 3: True last resort ──────────────────────────────────────────────
+    rows = [{"team_id": tid, "proj_runs_per_game": LEAGUE_AVG_RPG,
+             "proj_ra_per_game": LEAGUE_AVG_RPG, "proj_win_pct": 0.500,
+             "proj_sp_fip": LEAGUE_AVG_FIP, "proj_rp_fip": LEAGUE_AVG_FIP,
+             "proj_wrc_plus": LEAGUE_AVG_WRC} for tid in all_ids]
+    proj_df = pd.DataFrame(rows)
     proj_df["proj_source"] = "League Average"
     return proj_df, player_detail
 
@@ -1096,8 +866,12 @@ def pythag(rs, ra):
 
 def build_master(standings_df, statcast_df, player_detail=None) -> pd.DataFrame:
     df = standings_df.copy()
-    df = df.merge(statcast_df[["team_id", "proj_win_pct", "proj_runs_per_game", "proj_ra_per_game"]],
-                  on="team_id", how="left")
+    merge_cols = ["team_id", "proj_win_pct", "proj_runs_per_game", "proj_ra_per_game"]
+    if "proj_source" in statcast_df.columns:
+        merge_cols.append("proj_source")
+    if "proj_sp_fip" in statcast_df.columns:
+        merge_cols += ["proj_sp_fip", "proj_rp_fip", "proj_wrc_plus"]
+    df = df.merge(statcast_df[merge_cols], on="team_id", how="left")
     df["proj_win_pct"]   = df["proj_win_pct"].fillna(df["win_pct"]).fillna(0.500)
     df["pythag_win_pct"] = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
 
@@ -1521,7 +1295,7 @@ def render_deadline_tab(master_df, sim_results):
 def render_team_tab(master_df, sim_results):
     st.markdown("## Team Detail")
     options = sorted([(row["name"], row["team_id"]) for _, row in master_df.iterrows()], key=lambda x: x[0])
-    selected = st.selectbox("Select a team", [o[0] for o in options])
+    selected = st.selectbox("Select a team", [o[0] for o in options], key="team_select_box")
     tid = next(o[1] for o in options if o[0] == selected)
     row = master_df[master_df["team_id"] == tid].iloc[0]
 
@@ -1808,7 +1582,7 @@ def load_all_data():
         schedule_df = pd.DataFrame(columns=["game_id","game_date","home_team_id","away_team_id","status"])
 
     update(*steps[2])
-    statcast_df, player_detail = fetch_team_projections()
+    statcast_df, player_detail = fetch_team_projections(standings_df)
 
     update(*steps[3])
     master_df = build_master(standings_df, statcast_df, player_detail)
@@ -1873,13 +1647,17 @@ def main():
 
     st.markdown("---")
 
-    # Use session_state to prevent full reload on every widget interaction
-    if "master_df" not in st.session_state or "sim_results" not in st.session_state:
+    # Use session_state to prevent re-running the full pipeline on widget interactions.
+    # Once data is loaded in a session it stays in memory until midnight cache expires.
+    if ("master_df" not in st.session_state
+            or "sim_results" not in st.session_state
+            or not st.session_state.get("data_loaded", False)):
         try:
             master_df, sim_results, schedule_df = load_all_data()
             st.session_state["master_df"]    = master_df
             st.session_state["sim_results"]  = sim_results
             st.session_state["schedule_df"]  = schedule_df
+            st.session_state["data_loaded"]  = True
         except Exception as e:
             st.error(f"⚠️ Data loading failed: {e}")
             st.code(traceback.format_exc())
