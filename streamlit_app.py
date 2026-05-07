@@ -846,7 +846,55 @@ def fetch_team_projections() -> tuple[pd.DataFrame, dict]:
     except Exception as e:
         print(f"Marcel wrapper failed: {e}")
 
-    # Tier 3: Fallback
+    # Tier 3: Current season pybaseball stats (better than pure league average)
+    try:
+        import pybaseball as pb
+        pb.cache.enable()
+        import concurrent.futures as _pbf
+        def _quick_pb():
+            bat = pb.batting_stats(SEASON_YEAR, qual=50)
+            pit = pb.pitching_stats(SEASON_YEAR, qual=10)
+            return bat, pit
+        with _pbf.ThreadPoolExecutor(max_workers=1) as _pbx:
+            _pbfut = _pbx.submit(_quick_pb)
+            bat_cur, pit_cur = _pbfut.result(timeout=45)
+
+        all_ids = list(TEAM_INFO.keys())
+        exp = PYTHAG_EXPONENT
+        rows = []
+        for tid in all_ids:
+            # Batting
+            bat_t = bat_cur[bat_cur["Team"].map(FG_TEAM_MAP) == tid] if "Team" in bat_cur.columns else pd.DataFrame()
+            if not bat_t.empty and "wRC+" in bat_t.columns and "PA" in bat_t.columns:
+                wrc = float(np.average(pd.to_numeric(bat_t["wRC+"], errors="coerce").fillna(100),
+                                       weights=pd.to_numeric(bat_t["PA"], errors="coerce").fillna(1).clip(1)))
+            else:
+                wrc = 100.0
+            rpg = min(max((wrc / 100.0) * LEAGUE_AVG_RPG, 2.5), 7.5)
+
+            # Pitching
+            pit_t = pit_cur[pit_cur["Team"].map(FG_TEAM_MAP) == tid] if "Team" in pit_cur.columns else pd.DataFrame()
+            if not pit_t.empty and "FIP" in pit_t.columns and "IP" in pit_t.columns:
+                pit_t = pit_t.copy()
+                pit_t["IP"]  = pd.to_numeric(pit_t["IP"],  errors="coerce").fillna(0)
+                pit_t["FIP"] = pd.to_numeric(pit_t["FIP"], errors="coerce").fillna(LEAGUE_AVG_FIP).clip(2.0, 7.5)
+                fip = float(np.average(pit_t["FIP"], weights=pit_t["IP"].clip(1)))
+            else:
+                fip = LEAGUE_AVG_FIP
+            rapg = min(max((fip / LEAGUE_AVG_FIP) * LEAGUE_AVG_RPG, 2.5), 7.5)
+
+            wp = rpg ** exp / (rpg ** exp + rapg ** exp)
+            rows.append({"team_id": tid, "proj_runs_per_game": rpg,
+                         "proj_ra_per_game": rapg, "proj_win_pct": wp,
+                         "proj_sp_fip": fip, "proj_rp_fip": fip, "proj_wrc_plus": wrc})
+
+        proj_df = pd.DataFrame(rows)
+        proj_df["proj_source"] = "Current Season Stats"
+        return proj_df, player_detail
+    except Exception as e:
+        print(f"Current season fallback failed: {e}")
+
+    # Tier 4: True last resort — league average
     proj_df = _fallback_projections()
     proj_df["proj_source"] = "League Average"
     return proj_df, player_detail
@@ -1108,8 +1156,14 @@ def compute_buyer_seller(df: pd.DataFrame, injury_adjustments: dict | None = Non
     df["rd_per_162"]           = (df["run_differential"] / df["games_played"].clip(1)) * RD_SCALE_GAMES
     df["raw_score"]            = df["wc_games_back"]
 
-    rd_mod   = (-df["rd_per_162"] * RD_SENSITIVITY).clip(-RD_MODIFIER_CAP, RD_MODIFIER_CAP)
-    luck_mod = df["luck_wins"] * PYTHAG_GAP_SENSITIVITY
+    # Run differential dampener — early season RD is noisy (injuries, small sample)
+    # Scale from 25% weight at 0 GP to 100% at 100+ GP
+    rd_gp_scale = (df["games_played"] / 100.0).clip(0.25, 1.0)
+    rd_mod   = (-df["rd_per_162"] * RD_SENSITIVITY * rd_gp_scale).clip(-RD_MODIFIER_CAP, RD_MODIFIER_CAP)
+
+    # Same dampener on luck wins — small sample luck is noise
+    luck_scale = (df["games_played"] / 81.0).clip(0.30, 1.0)
+    luck_mod = df["luck_wins"] * PYTHAG_GAP_SENSITIVITY * luck_scale
 
     # Injury adjustment: negative = team hurt by injuries (pull toward buyer)
     if injury_adjustments:
@@ -1806,12 +1860,21 @@ def main():
 
     st.markdown("---")
 
-    try:
-        master_df, sim_results, schedule_df = load_all_data()
-    except Exception as e:
-        st.error(f"⚠️ Data loading failed: {e}")
-        st.code(traceback.format_exc())
-        st.stop()
+    # Use session_state to prevent full reload on every widget interaction
+    if "master_df" not in st.session_state or "sim_results" not in st.session_state:
+        try:
+            master_df, sim_results, schedule_df = load_all_data()
+            st.session_state["master_df"]    = master_df
+            st.session_state["sim_results"]  = sim_results
+            st.session_state["schedule_df"]  = schedule_df
+        except Exception as e:
+            st.error(f"⚠️ Data loading failed: {e}")
+            st.code(traceback.format_exc())
+            st.stop()
+    else:
+        master_df   = st.session_state["master_df"]
+        sim_results = st.session_state["sim_results"]
+        schedule_df = st.session_state["schedule_df"]
 
     if master_df.empty:
         st.warning("No standings data available. Please try again shortly.")
