@@ -1281,10 +1281,19 @@ def run_simulation(master_df: pd.DataFrame, schedule_df: pd.DataFrame) -> dict:
 
 
 def _empty_sim(master_df):
-    tids = master_df["team_id"].tolist()
-    return {k: {tid: 0.0 for tid in tids} for k in [
-        "division_odds","playoff_odds","ws_odds","proj_wins","proj_wins_std",
+    tids     = master_df["team_id"].tolist()
+    cur_wins = master_df.set_index("team_id")["wins"].to_dict()
+    result   = {k: {tid: 0.0 for tid in tids} for k in [
+        "division_odds","playoff_odds","ws_odds","proj_wins_std",
         "pre_deadline_division_odds","pre_deadline_playoff_odds","pre_deadline_ws_odds"]}
+    # proj_wins = current wins + projected wins from remaining games using adj_win_pct
+    adj_wp = master_df.set_index("team_id")["adj_win_pct"].to_dict()
+    gr     = master_df.set_index("team_id")["games_remaining"].to_dict()
+    result["proj_wins"] = {
+        tid: float(cur_wins.get(tid, 0)) + float(adj_wp.get(tid, 0.5)) * float(gr.get(tid, 0))
+        for tid in tids
+    }
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1307,7 +1316,7 @@ def render_projections_tab(master_df, sim_results):
             "GB (WC)":   f"{row['wc_games_back']:.1f}" if row["wc_games_back"] > 0 else "—",
             "Proj W":    round(sim_results["proj_wins"].get(tid, row["wins"]), 1),
             "Proj L":    round(162 - sim_results["proj_wins"].get(tid, row["wins"]), 1),
-            "Proj Rec":  f"{round(sim_results['proj_wins'].get(tid, row['wins']))}-{round(162 - sim_results['proj_wins'].get(tid, row['wins']))}",
+            "Proj Rec":  f"{int(round(sim_results['proj_wins'].get(tid, row['wins'])))} - {int(round(162 - sim_results['proj_wins'].get(tid, row['wins'])))}",
             "Div%":      f"{sim_results['division_odds'].get(tid, 0):.1%}",
             "Playoff%":  f"{sim_results['playoff_odds'].get(tid, 0):.1%}",
             "WS%":       f"{sim_results['ws_odds'].get(tid, 0):.2%}",
@@ -1723,13 +1732,17 @@ def load_all_data():
     master_df = apply_ramp(master_df, get_deadline_ramp_factor())
 
     update(*steps[5])
+    def _run_sos():
+        opps = compute_remaining_opponents(schedule_df)
+        return compute_sos(master_df, opps)
     import concurrent.futures as _sosf
     try:
         with _sosf.ThreadPoolExecutor(max_workers=1) as _sosx:
-            _sosfut = _sosx.submit(compute_sos, master_df, compute_remaining_opponents(schedule_df))
-            master_df = _sosfut.result(timeout=30)
+            _sosfut = _sosx.submit(_run_sos)
+            master_df = _sosfut.result(timeout=25)
     except Exception as _sose:
-        print(f"SoS timed out or failed: {_sose}, skipping")
+        print(f"SoS skipped: {_sose}")
+        master_df = master_df.copy()
         master_df["sos_raw"]   = 0.500
         master_df["sos_rank"]  = 15
         master_df["sos_label"] = "Average"
