@@ -61,7 +61,7 @@ CACHE_DIR                = "data/cache"
 CACHE_FILE               = "data/cache/latest.json"
 MLB_API_BASE             = "https://statsapi.mlb.com/api/v1"
 
-# Safe session handling (uses cloudscraper if available, else requests)
+# Cloudscraper session for bypassing FanGraphs Cloudflare
 try:
     import cloudscraper
     _SCRAPER = cloudscraper.create_scraper()
@@ -263,7 +263,6 @@ def fetch_schedule() -> pd.DataFrame:
     
     all_games = []
     chunk_start = today
-    # Limit to current season end to avoid long loops in offseason
     while chunk_start <= end_date:
         chunk_end = date(chunk_start.year, chunk_start.month + 1, 1) - timedelta(days=1)
         chunk_end = min(chunk_end, end_date)
@@ -273,7 +272,7 @@ def fetch_schedule() -> pd.DataFrame:
                 "sportId": 1, "startDate": chunk_start.isoformat(),
                 "endDate": chunk_end.isoformat(), "gameType": "R",
                 "hydrate": "team", "season": SEASON_YEAR,
-            }, timeout=8)  # Reduced timeout for speed
+            }, timeout=8)
             resp.raise_for_status()
             for date_entry in resp.json().get("dates", []):
                 for game in date_entry.get("games", []):
@@ -295,7 +294,6 @@ def fetch_schedule() -> pd.DataFrame:
             print(f"Schedule chunk failed {chunk_start}: {e}")
 
         chunk_start = chunk_end + timedelta(days=1)
-        # Safety break if API is failing
         if not all_games and (date.today() - chunk_start).days > 30:
             break
 
@@ -609,7 +607,7 @@ def fetch_team_il(team_id: int) -> list[dict]:
     try:
         url = f"{MLB_API_BASE}/teams/{team_id}/roster"
         params = {"rosterType": "40Man", "season": SEASON_YEAR, "hydrate": "person"}
-        resp = requests.get(url, params=params, timeout=10)
+        resp = requests.get(url, params=params, timeout=5)
         if resp.status_code != 200: return []
         data = resp.json()
         il_players = []
@@ -635,7 +633,7 @@ def fetch_il_placed_dates(team_id: int) -> dict[int, str]:
     try:
         url = f"{MLB_API_BASE}/transactions"
         params = {"sportId": 1, "teamId": team_id, "startDate": f"{SEASON_YEAR}-03-01", "endDate": date.today().isoformat(), "limit": 200}
-        resp = requests.get(url, params=params, timeout=10)
+        resp = requests.get(url, params=params, timeout=5)
         if resp.status_code != 200: return {}
         data    = resp.json()
         placed  = {}
@@ -699,9 +697,9 @@ def fetch_all_team_injuries(team_ids: list[int]) -> dict[int, float]:
         def _get_adj(tid):
             try: return tid, compute_injury_adjustment(tid)
             except: return tid, 0.0
-        with _ilf.ThreadPoolExecutor(max_workers=6) as ex:
+        with _ilf.ThreadPoolExecutor(max_workers=10) as ex:
             futures = {ex.submit(_get_adj, tid): tid for tid in team_ids}
-            for f in _ilf.as_completed(futures, timeout=12):
+            for f in _ilf.as_completed(futures, timeout=15):
                 tid, adj = f.result()
                 adjustments[tid] = adj
     except Exception as _ile:
@@ -1000,7 +998,7 @@ def render_projections_tab(master_df, sim_results):
         st.markdown(f"### {div}")
         render_df = div_df[["Team", "W", "L", "Win%", "Pythag%", "GB (WC)", "Proj Rec", "Div%", "Playoff%", "WS%", "Status", "SoS"]].copy()
         render_df["Status"] = render_df.apply(lambda r: f"{TIER_EMOJI.get(div_df.loc[r.name,'tier'],'⚪')} {r['Status']}", axis=1)
-        st.dataframe(render_df, use_container_width=True, hide_index=True)
+        st.dataframe(render_df, width="stretch", hide_index=True)
         
     st.markdown("---")
     c = st.columns(5)
@@ -1055,7 +1053,7 @@ def render_deadline_tab(master_df, sim_results):
     ))
     fig.update_layout(title="Playoff Odds Change", xaxis_title="Team", yaxis_title="Percentage Point Change", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", height=400)
     fig.add_hline(y=0, line_dash="dash", line_color="rgba(128,128,128,0.5)")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     
     st.markdown("### Full Breakdown")
     disp = comp[["Team", "Status", "Win Adj"]].copy()
@@ -1066,7 +1064,7 @@ def render_deadline_tab(master_df, sim_results):
     disp["Pre WS%"]      = (comp["Pre WS%"]*100).round(2).apply(lambda v: f"{v:.2f}%")
     disp["Post WS%"]     = (comp["Post WS%"]*100).round(2).apply(lambda v: f"{v:.2f}%")
     disp["WS Delta"]     = (comp["ws_delta"]*100).round(2).apply(lambda v: f"{v:+.2f}pp")
-    st.dataframe(disp, use_container_width=True, hide_index=True)
+    st.dataframe(disp, width="stretch", hide_index=True)
     
     st.markdown("### Classification Drivers")
     fig2 = go.Figure()
@@ -1076,7 +1074,7 @@ def render_deadline_tab(master_df, sim_results):
     fig2.add_vline(x=4.0, line_dash="dash", line_color="rgba(255,127,14,0.4)")
     fig2.add_vline(x=8.0, line_dash="dash", line_color="rgba(214,39,39,0.4)")
     fig2.add_hline(y=0,   line_dash="dot",  line_color="rgba(128,128,128,0.3)")
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig2, width="stretch")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # UI — TEAM DETAIL TAB
@@ -1173,7 +1171,7 @@ def render_team_tab(master_df, sim_results):
         batters = detail.get("batters", [])
         if batters:
             bdf = pd.DataFrame(batters)[["name", "pa", "wrc_plus"]].rename(columns={"name": "Player", "pa": "Proj PA", "wrc_plus": "wRC+"})
-            st.dataframe(bdf, hide_index=True, use_container_width=True)
+            st.dataframe(bdf, width="stretch", hide_index=True)
         else:
             st.caption("No data available")
     with rc2:
@@ -1181,7 +1179,7 @@ def render_team_tab(master_df, sim_results):
         sp = detail.get("sp", [])
         if sp:
             sdf = pd.DataFrame(sp)[["name", "ip", "fip"]].rename(columns={"name": "Pitcher", "ip": "Proj IP", "fip": "FIP"})
-            st.dataframe(sdf, hide_index=True, use_container_width=True)
+            st.dataframe(sdf, width="stretch", hide_index=True)
         else:
             st.caption("No data available")
     with rc3:
@@ -1189,7 +1187,7 @@ def render_team_tab(master_df, sim_results):
         rp = detail.get("rp", [])
         if rp:
             rdf = pd.DataFrame(rp)[["name", "ip", "fip"]].rename(columns={"name": "Pitcher", "ip": "Proj IP", "fip": "FIP"})
-            st.dataframe(rdf, hide_index=True, use_container_width=True)
+            st.dataframe(rdf, width="stretch", hide_index=True)
         else:
             st.caption("No data available")
             
@@ -1202,7 +1200,7 @@ def render_team_tab(master_df, sim_results):
     fig.add_trace(go.Scatter(x=x, y=y, fill="tozeroy", mode="lines", line=dict(color="#636efa", width=2), fillcolor="rgba(99,110,250,0.2)"))
     fig.add_vline(x=proj_w, line_dash="dash", line_color="#ef553b", annotation_text=f"Proj: {proj_w:.1f}W", annotation_position="top right")
     fig.update_layout(xaxis_title="Final Wins", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", height=300, showlegend=False, yaxis=dict(showticklabels=False))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # UI — METHODOLOGY TAB
@@ -1214,7 +1212,7 @@ def render_methodology_tab():
     with st.expander("📊 Overview & Philosophy", expanded=True):
         st.markdown("Most projection systems generate a rest-of-season win% and simulate from there, assuming today's roster is August's roster. For sellers that's wrong. This model builds true-talent estimates, identifies likely buyers and sellers algorithmically, adjusts win rates post-deadline, ramps those adjustments gradually across July, and runs 10,000 game-level simulations where every win has a corresponding loss — zero-sum guaranteed.")
     with st.expander("📡 Data Sources"):
-        st.markdown(f"MLB Stats API — standings, schedule, runs scored/allowed (free, real-time, official)\nFanGraphs Depth Charts — individual player projections (bypassed via cloudscraper)\nRefreshes automatically at midnight EST.")
+        st.markdown("MLB Stats API — standings, schedule, runs scored/allowed (free, real-time, official)\nFanGraphs Depth Charts — individual player projections (bypassed via cloudscraper)\nRefreshes automatically at midnight EST.")
     with st.expander("🔮 Team Projections"):
         st.markdown(f"Three years of stats blended at {int(WEIGHT_CURRENT_SEASON*100)}% current / {int(WEIGHT_LAST_YEAR*100)}% last year / {int(WEIGHT_TWO_YEARS_AGO*100)}% two years ago.\nCurrent year weight grows toward 70% by September as sample size increases.\nPitching uses 70% FIP + 30% ERA.\nPythagorean win% formula: RS^(exp) / (RS^(exp) + RA^(exp)) where exp = {PYTHAG_EXPONENT}")
     with st.expander("📈 Buyer / Seller Classification"):
@@ -1268,7 +1266,6 @@ def load_all_data():
     master_df = build_master(standings_df, statcast_df, player_detail)
     
     update(*steps[4])
-    # Injury fetch with hard timeout fallback
     try:
         injury_adjs = fetch_all_team_injuries(list(TEAM_INFO.keys()))
     except Exception:
