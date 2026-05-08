@@ -987,7 +987,10 @@ def _compute_team_projection(roster_data: dict, games_remaining: int) -> dict:
         ops_delta    = (batter["ops"] - REPLACEMENT_OPS) * return_frac * 0.10
         team_ops    += ops_delta
 
-    team_ops     = float(np.clip(team_ops, 0.550, 0.950))
+    # Clamp team OPS to historically realistic range
+    # Best MLB team seasons: ~.810 (2004 Red Sox, 2019 Astros)
+    # Worst MLB team seasons: ~.630 (modern rebuild teams)
+    team_ops     = float(np.clip(team_ops, 0.630, 0.815))
     proj_rpg     = (team_ops / LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG
     proj_rpg     = float(np.clip(proj_rpg, 2.5, 7.5))
 
@@ -1025,8 +1028,9 @@ def _compute_team_projection(roster_data: dict, games_remaining: int) -> dict:
         era_penalty = (REPLACEMENT_ERA - pitcher["era"]) * out_frac * 0.15
         sp_era     += max(era_penalty, 0)
 
-    sp_era = float(np.clip(sp_era, 2.0, 7.0))
-    rp_era = float(np.clip(rp_era, 2.5, 7.0))
+    # Clamp to realistic team ERA ranges
+    sp_era = float(np.clip(sp_era, 3.00, 5.50))
+    rp_era = float(np.clip(rp_era, 3.20, 5.50))
 
     # Combined RA/G
     proj_rapg = (
@@ -1437,20 +1441,28 @@ def build_master(standings_df, statcast_df, player_detail=None) -> pd.DataFrame:
     gp            = df["games_played"].clip(0, 162)
     proj_source   = df["proj_source"].iloc[0] if "proj_source" in df.columns else "Unknown"
 
+    # All projection sources blended with Pythagorean win% as a reality anchor.
+    # Early season: projection gets more weight (less actual data to trust)
+    # Late season: Pythagorean gets more weight (larger sample)
+    # This prevents aging curves or any projection source from running unchecked.
+    #
+    # FanGraphs DC: high projection weight (individual player quality is well-estimated)
+    # MLB Stats API / Regression: moderate — some uncertainty in player-level estimates
+    #
     if proj_source == "FanGraphs DC":
-        # FG DC is roster-quality based — blend with current performance
         proj_weight   = (0.70 - (gp / 162.0) * 0.30).clip(0.40, 0.70)
-        pythag_weight = 1.0 - proj_weight
-        df["blended_win_pct"] = (
-            df["proj_win_pct"]   * proj_weight +
-            df["pythag_win_pct"] * pythag_weight
-        ).clip(0.20, 0.80)
+    elif proj_source == "MLB Stats API":
+        # Player-level MLB API: good signal but cap at 60% early, 50% late
+        proj_weight   = (0.60 - (gp / 162.0) * 0.20).clip(0.40, 0.60)
     else:
-        # Regression-to-mean already blends current performance with league avg
-        # Use it directly — no further blending needed
-        proj_weight   = pd.Series(1.0, index=df.index)
-        pythag_weight = pd.Series(0.0, index=df.index)
-        df["blended_win_pct"] = df["proj_win_pct"].clip(0.20, 0.80)
+        # Regression-to-mean: already incorporates current data, less blending needed
+        proj_weight   = (0.55 - (gp / 162.0) * 0.15).clip(0.40, 0.55)
+
+    pythag_weight = 1.0 - proj_weight
+    df["blended_win_pct"] = (
+        df["proj_win_pct"]   * proj_weight +
+        df["pythag_win_pct"] * pythag_weight
+    ).clip(0.20, 0.80)
 
     df["proj_weight_used"]   = proj_weight.round(2) if hasattr(proj_weight, 'round') else proj_weight
     df["pythag_weight_used"] = pythag_weight.round(2) if hasattr(pythag_weight, 'round') else pythag_weight
@@ -2145,10 +2157,15 @@ def load_all_data():
         progress_bar.progress(pct)
         status_text.markdown(f"**{msg}**")
 
+    import time as _time
+    _t0 = _time.time()
+    def _elapsed(): return f"{_time.time()-_t0:.1f}s"
+
     update(5, "🚀 Starting up...")
 
     update(*steps[0])
     standings_df = fetch_standings()
+    print(f"[{_elapsed()}] Standings done")
 
     update(*steps[1])
     import concurrent.futures as _scf
@@ -2157,6 +2174,7 @@ def load_all_data():
             schedule_df = _sex.submit(fetch_schedule).result(timeout=60)
     except Exception:
         schedule_df = pd.DataFrame(columns=["game_id","game_date","home_team_id","away_team_id","status"])
+    print(f"[{_elapsed()}] Schedule done: {len(schedule_df)} rows")
 
     update(*steps[2])
     import concurrent.futures as _pf
@@ -2184,6 +2202,7 @@ def load_all_data():
         statcast_df["proj_source"] = "Regression-to-Mean"
         player_detail = {tid: {"batters":[],"sp":[],"rp":[]} for tid in TEAM_INFO.keys()}
 
+    print(f"[{_elapsed()}] Projections done: source={statcast_df.get('proj_source', ['?'])[0] if 'proj_source' in statcast_df.columns else '?'}")
     update(*steps[3])
     master_df = build_master(standings_df, statcast_df, player_detail)
 
@@ -2193,23 +2212,29 @@ def load_all_data():
     master_df = apply_ramp(master_df, get_deadline_ramp_factor())
 
     update(*steps[5])
-    def _run_sos():
-        opps = compute_remaining_opponents(schedule_df)
-        return compute_sos(master_df, opps)
-    import concurrent.futures as _sosf
+    # SoS: run directly — no threading (avoids Streamlit thread hang)
+    # Skip gracefully if schedule is empty or very large
     try:
-        with _sosf.ThreadPoolExecutor(max_workers=1) as _sosx:
-            _sosfut = _sosx.submit(_run_sos)
-            master_df = _sosfut.result(timeout=25)
+        if schedule_df is not None and not schedule_df.empty:
+            opps      = compute_remaining_opponents(schedule_df)
+            master_df = compute_sos(master_df, opps)
+        else:
+            master_df = master_df.copy()
+            master_df["sos_raw"]   = 0.500
+            master_df["sos_rank"]  = 15
+            master_df["sos_label"] = "Average"
     except Exception as _sose:
-        print(f"SoS skipped: {_sose}")
+        print(f"SoS error: {_sose}")
         master_df = master_df.copy()
         master_df["sos_raw"]   = 0.500
         master_df["sos_rank"]  = 15
         master_df["sos_label"] = "Average"
 
+    print(f"[{_elapsed()}] SoS done")
     update(*steps[6])
+    print(f"[{_elapsed()}] Starting simulation...")
     sim_results = run_simulation(master_df, schedule_df)
+    print(f"[{_elapsed()}] Simulation done")
 
     update(*steps[7])
 
@@ -2268,17 +2293,19 @@ def main():
 
     st.markdown("---")
 
-    # Use session_state to prevent re-running the full pipeline on widget interactions.
-    # Once data is loaded in a session it stays in memory until midnight cache expires.
-    if ("master_df" not in st.session_state
-            or "sim_results" not in st.session_state
-            or not st.session_state.get("data_loaded", False)):
+    # Load data — session_state prevents re-running pipeline on widget interactions
+    if ("master_df" not in st.session_state or
+            "sim_results" not in st.session_state or
+            not st.session_state.get("data_loaded", False)):
         try:
             master_df, sim_results, schedule_df = load_all_data()
-            st.session_state["master_df"]    = master_df
-            st.session_state["sim_results"]  = sim_results
-            st.session_state["schedule_df"]  = schedule_df
-            st.session_state["data_loaded"]  = True
+            # Store in session state — persists across tab changes, widget clicks
+            st.session_state.update({
+                "master_df":   master_df,
+                "sim_results": sim_results,
+                "schedule_df": schedule_df,
+                "data_loaded": True,
+            })
         except Exception as e:
             st.error(f"⚠️ Data loading failed: {e}")
             st.code(traceback.format_exc())
@@ -2287,6 +2314,16 @@ def main():
         master_df   = st.session_state["master_df"]
         sim_results = st.session_state["sim_results"]
         schedule_df = st.session_state["schedule_df"]
+
+    # Safety: if proj_wins all look like current_wins (simulation didn't run),
+    # clear session and force a reload next time
+    if master_df is not None and not master_df.empty:
+        sample_proj = list(sim_results.get("proj_wins", {}).values())
+        sample_wins = master_df["wins"].tolist()
+        if sample_proj and all(abs(p - w) < 1 for p, w in zip(sample_proj[:5], sample_wins[:5])):
+            print("Detected stale/empty simulation — clearing session cache")
+            st.session_state.pop("data_loaded", None)
+            st.rerun()
 
     if master_df.empty:
         st.warning("No standings data available. Please try again shortly.")
