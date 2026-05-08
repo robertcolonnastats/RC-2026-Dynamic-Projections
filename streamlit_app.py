@@ -114,6 +114,28 @@ def get_last_updated():
     """Returns a human-readable string of when data was last loaded."""
     return datetime.now(EST).strftime("%B %d, %Y %I:%M %p EST")
 
+
+def get_season_state() -> str:
+    today = date.today()
+    opening = date.fromisoformat(OPENING_DAY)
+    ws_end  = date.fromisoformat(WORLD_SERIES_END_APPROX)
+    if today < opening or today > ws_end:
+        return "offseason"
+    deadline = date(SEASON_YEAR, 7, 31)
+    if today < date(SEASON_YEAR, 7, 1):
+        return "pre_deadline"
+    elif today <= deadline:
+        return "deadline_ramp"
+    return "post_deadline"
+
+def get_deadline_ramp_factor() -> float:
+    today = date.today()
+    start = date(SEASON_YEAR, 7, 1)
+    end   = date(SEASON_YEAR, 7, 31)
+    if today < start:  return 0.0
+    if today > end:    return 1.0
+    return (today - start).days / (end - start).days
+
 def fetch_standings() -> pd.DataFrame:
     url = f"{MLB_API_BASE}/standings"
     params = {
