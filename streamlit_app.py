@@ -1,6 +1,7 @@
 """
 MLB 2026 Season Projections
 Deadline-aware Monte Carlo projections for all 30 teams.
+Single-file version for simple deployment.
 """
 import os
 import json
@@ -12,14 +13,25 @@ import plotly.graph_objects as go
 import streamlit as st
 from datetime import date, timedelta, datetime
 from zoneinfo import ZoneInfo
+
 warnings.filterwarnings("ignore")
 
-st.set_page_config(page_title="MLB 2026 Projections", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(
+    page_title="MLB 2026 Projections",
+    page_icon="⚾",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
-st.markdown("""<style>.main .block-container { max-width: 1400px; padding-top: 1rem; }</style>""", unsafe_allow_html=True)
+st.markdown("""
+<style>
+.main .block-container { max-width: 1400px; padding-top: 1rem; }
+.stTabs [data-baseweb="tab"] { padding: 8px 20px; border-radius: 6px 6px 0 0; font-weight: 500; }
+</style>
+""", unsafe_allow_html=True)
 
 # ==============================================================================
-# CONSTANTS (Cleaned: No trailing spaces, Version bumped to force reload)
+# CONSTANTS
 # ==============================================================================
 SEASON_YEAR = 2026
 OPENING_DAY = "2026-03-27"
@@ -27,33 +39,57 @@ WORLD_SERIES_END_APPROX = "2026-11-01"
 TRADE_DEADLINE = "2026-07-31"
 DEADLINE_RAMP_START = "2026-05-20"
 SOS_SENSITIVITY = 0.15
-HARD_SELLER_GB = 8.0; SOFT_SELLER_GB = 4.0; NEUTRAL_BAND = 3.0
-ADJ_HARD_SELLER = -0.12; ADJ_SOFT_SELLER = -0.06; ADJ_NEUTRAL = 0.00
-ADJ_SOFT_BUYER = +0.04; ADJ_HARD_BUYER = +0.07
-RD_SCALE_GAMES = 162; RD_MODIFIER_CAP = 2.0; RD_SENSITIVITY = 0.02
-PYTHAG_EXPONENT = 1.83; PYTHAG_GAP_SENSITIVITY = 0.5
-N_SIMULATIONS = 1_000; RANDOM_SEED = 42
+HARD_SELLER_GB = 8.0
+SOFT_SELLER_GB = 4.0
+NEUTRAL_BAND = 3.0
+ADJ_HARD_SELLER = -0.12
+ADJ_SOFT_SELLER = -0.06
+ADJ_NEUTRAL = 0.00
+ADJ_SOFT_BUYER = +0.04
+ADJ_HARD_BUYER = +0.07
+RD_SCALE_GAMES = 162
+RD_MODIFIER_CAP = 2.0
+RD_SENSITIVITY = 0.02
+PYTHAG_EXPONENT = 1.83
+PYTHAG_GAP_SENSITIVITY = 0.5
+N_SIMULATIONS = 1_000
+RANDOM_SEED = 42
 CACHE_DIR = "/tmp/rc_mlb_2026_v16"
 CACHE_FILE = "/tmp/rc_mlb_2026_v16/latest.json"
-CACHE_VERSION = "v16-reset-force-fresh"  # ⚠️ Changed to bypass old cache
+CACHE_VERSION = "v16-clean-deploy"
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
 TEAM_INFO = {
-    108: ("Los Angeles Angels", "LAA", "AL West", "AL"), 109: ("Arizona Diamondbacks", "ARI", "NL West", "NL"),
-    110: ("Baltimore Orioles", "BAL", "AL East", "AL"), 111: ("Boston Red Sox", "BOS", "AL East", "AL"),
-    112: ("Chicago Cubs", "CHC", "NL Central", "NL"), 113: ("Cincinnati Reds", "CIN", "NL Central", "NL"),
-    114: ("Cleveland Guardians", "CLE", "AL Central", "AL"), 115: ("Colorado Rockies", "COL", "NL West", "NL"),
-    116: ("Detroit Tigers", "DET", "AL Central", "AL"), 117: ("Houston Astros", "HOU", "AL West", "AL"),
-    118: ("Kansas City Royals", "KC", "AL Central", "AL"), 119: ("Los Angeles Dodgers", "LAD", "NL West", "NL"),
-    120: ("Washington Nationals", "WSH", "NL East", "NL"), 121: ("New York Mets", "NYM", "NL East", "NL"),
-    133: ("Oakland Athletics", "OAK", "AL West", "AL"), 134: ("Pittsburgh Pirates", "PIT", "NL Central", "NL"),
-    135: ("San Diego Padres", "SD", "NL West", "NL"), 136: ("Seattle Mariners", "SEA", "AL West", "AL"),
-    137: ("San Francisco Giants", "SF", "NL West", "NL"), 138: ("St. Louis Cardinals", "STL", "NL Central", "NL"),
-    139: ("Tampa Bay Rays", "TB", "AL East", "AL"), 140: ("Texas Rangers", "TEX", "AL West", "AL"),
-    141: ("Toronto Blue Jays", "TOR", "AL East", "AL"), 142: ("Minnesota Twins", "MIN", "AL Central", "AL"),
-    143: ("Philadelphia Phillies", "PHI", "NL East", "NL"), 144: ("Atlanta Braves", "ATL", "NL East", "NL"),
-    145: ("Chicago White Sox", "CWS", "AL Central", "AL"), 146: ("Miami Marlins", "MIA", "NL East", "NL"),
-    147: ("New York Yankees", "NYY", "AL East", "AL"), 158: ("Milwaukee Brewers", "MIL", "NL Central", "NL"),
+    108: ("Los Angeles Angels", "LAA", "AL West", "AL"),
+    109: ("Arizona Diamondbacks", "ARI", "NL West", "NL"),
+    110: ("Baltimore Orioles", "BAL", "AL East", "AL"),
+    111: ("Boston Red Sox", "BOS", "AL East", "AL"),
+    112: ("Chicago Cubs", "CHC", "NL Central", "NL"),
+    113: ("Cincinnati Reds", "CIN", "NL Central", "NL"),
+    114: ("Cleveland Guardians", "CLE", "AL Central", "AL"),
+    115: ("Colorado Rockies", "COL", "NL West", "NL"),
+    116: ("Detroit Tigers", "DET", "AL Central", "AL"),
+    117: ("Houston Astros", "HOU", "AL West", "AL"),
+    118: ("Kansas City Royals", "KC", "AL Central", "AL"),
+    119: ("Los Angeles Dodgers", "LAD", "NL West", "NL"),
+    120: ("Washington Nationals", "WSH", "NL East", "NL"),
+    121: ("New York Mets", "NYM", "NL East", "NL"),
+    133: ("Oakland Athletics", "OAK", "AL West", "AL"),
+    134: ("Pittsburgh Pirates", "PIT", "NL Central", "NL"),
+    135: ("San Diego Padres", "SD", "NL West", "NL"),
+    136: ("Seattle Mariners", "SEA", "AL West", "AL"),
+    137: ("San Francisco Giants", "SF", "NL West", "NL"),
+    138: ("St. Louis Cardinals", "STL", "NL Central", "NL"),
+    139: ("Tampa Bay Rays", "TB", "AL East", "AL"),
+    140: ("Texas Rangers", "TEX", "AL West", "AL"),
+    141: ("Toronto Blue Jays", "TOR", "AL East", "AL"),
+    142: ("Minnesota Twins", "MIN", "AL Central", "AL"),
+    143: ("Philadelphia Phillies", "PHI", "NL East", "NL"),
+    144: ("Atlanta Braves", "ATL", "NL East", "NL"),
+    145: ("Chicago White Sox", "CWS", "AL Central", "AL"),
+    146: ("Miami Marlins", "MIA", "NL East", "NL"),
+    147: ("New York Yankees", "NYY", "AL East", "AL"),
+    158: ("Milwaukee Brewers", "MIL", "NL Central", "NL"),
 }
 
 TIER_LABELS = {"hard_seller": "Hard Seller", "soft_seller": "Soft Seller", "neutral": "Neutral", "soft_buyer": "Soft Buyer", "hard_buyer": "Hard Buyer"}
@@ -64,218 +100,496 @@ EST = ZoneInfo("America/New_York")
 # ==============================================================================
 # CACHE & ROSTER MANAGER
 # ==============================================================================
-def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
+def _ensure_cache_dir():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
 _ROSTER_CACHE = {}
+
 def fetch_team_statuses():
+    """Returns {team_id: {'active': {mlbid}, 'il': {mlbid}}}"""
     today = date.today().isoformat()
-    if _ROSTER_CACHE.get("date") == today and _ROSTER_CACHE.get("data"): return _ROSTER_CACHE["data"]
-    data = {}; il_codes = {"IL10", "IL60", "DL10", "DL15", "DL60"}
+    if _ROSTER_CACHE.get("date") == today and _ROSTER_CACHE.get("data"):
+        return _ROSTER_CACHE["data"]
+    
+    data = {}
+    il_codes = {"IL10", "IL60", "DL10", "DL15", "DL60", "7DL", "10DL", "60DL"}
     for tid in TEAM_INFO:
         try:
-            act = requests.get(f"{MLB_API_BASE}/teams/{tid}/roster", params={"rosterType": "active", "season": SEASON_YEAR}, timeout=10)
-            active_ids = {p["person"]["id"] for p in act.json().get("roster", [])} if act.status_code == 200 else set()
-            ros = requests.get(f"{MLB_API_BASE}/teams/{tid}/roster", params={"rosterType": "40Man", "season": SEASON_YEAR}, timeout=10)
-            il_ids = {p["person"]["id"] for p in ros.json().get("roster", []) if p.get("status", {}).get("code", "") in il_codes} if ros.status_code == 200 else set()
+            active_resp = requests.get(f"{MLB_API_BASE}/teams/{tid}/roster", params={"rosterType": "active", "season": SEASON_YEAR}, timeout=10)
+            active_ids = {p["person"]["id"] for p in active_resp.json().get("roster", [])} if active_resp.status_code == 200 else set()
+            
+            roster_resp = requests.get(f"{MLB_API_BASE}/teams/{tid}/roster", params={"rosterType": "40Man", "season": SEASON_YEAR}, timeout=10)
+            il_ids = set()
+            if roster_resp.status_code == 200:
+                for p in roster_resp.json().get("roster", []):
+                    if p.get("status", {}).get("code", "") in il_codes:
+                        il_ids.add(p["person"]["id"])
             data[tid] = {"active": active_ids, "il": il_ids}
-        except: data[tid] = {"active": set(), "il": set()}
-    _ROSTER_CACHE["data"] = data; _ROSTER_CACHE["date"] = today
+        except Exception:
+            data[tid] = {"active": set(), "il": set()}
+            
+    _ROSTER_CACHE["data"] = data
+    _ROSTER_CACHE["date"] = today
     return data
 
-def get_season_state():
+def get_season_state() -> str:
     today = date.today()
-    if today < date.fromisoformat(OPENING_DAY) or today > date.fromisoformat(WORLD_SERIES_END_APPROX): return "offseason"
-    elif today > date.fromisoformat(TRADE_DEADLINE): return "post_deadline"
-    elif today >= date.fromisoformat(DEADLINE_RAMP_START): return "deadline_ramp"
-    else: return "pre_deadline"
+    opening = date.fromisoformat(OPENING_DAY)
+    ws_end = date.fromisoformat(WORLD_SERIES_END_APPROX)
+    deadline = date.fromisoformat(TRADE_DEADLINE)
+    ramp_start = date.fromisoformat(DEADLINE_RAMP_START)
+    if today < opening or today > ws_end:
+        return "offseason"
+    elif today > deadline:
+        return "post_deadline"
+    elif today >= ramp_start:
+        return "deadline_ramp"
+    else:
+        return "pre_deadline"
 
-def get_deadline_ramp_factor():
-    today, rs, dl = date.today(), date.fromisoformat(DEADLINE_RAMP_START), date.fromisoformat(TRADE_DEADLINE)
-    if today < rs: return 0.0
-    if today >= dl: return 1.0
-    return round(min(max((today - rs).days / max((dl - rs).days, 1), 0.0), 1.0), 4)
+def get_deadline_ramp_factor() -> float:
+    today = date.today()
+    ramp_start = date.fromisoformat(DEADLINE_RAMP_START)
+    deadline = date.fromisoformat(TRADE_DEADLINE)
+    if today < ramp_start:
+        return 0.0
+    if today >= deadline:
+        return 1.0
+    total = (deadline - ramp_start).days
+    elapsed = (today - ramp_start).days
+    return round(min(max(elapsed / max(total, 1), 0.0), 1.0), 4)
 
-def get_last_updated():
+def get_last_updated() -> str:
     _ensure_cache_dir()
-    if not os.path.exists(CACHE_FILE): return "Never"
-    return datetime.fromtimestamp(os.path.getmtime(CACHE_FILE), tz=EST).strftime("%B %d, %Y at %I:%M %p EST")
+    if not os.path.exists(CACHE_FILE):
+        return "Never"
+    mtime = os.path.getmtime(CACHE_FILE)
+    dt = datetime.fromtimestamp(mtime, tz=EST)
+    return dt.strftime("%B %d, %Y at %I:%M %p EST")
 
-def is_cache_valid():
+def is_cache_valid() -> bool:
     _ensure_cache_dir()
-    if not os.path.exists(CACHE_FILE): return False
+    if not os.path.exists(CACHE_FILE):
+        return False
     mtime = os.path.getmtime(CACHE_FILE)
     now_est = datetime.now(EST)
-    if mtime < now_est.replace(hour=0, minute=0, second=0, microsecond=0).timestamp(): return False
+    midnight = now_est.replace(hour=0, minute=0, second=0, microsecond=0)
+    if mtime < midnight.timestamp():
+        return False
     try:
         with open(CACHE_FILE) as f:
-            if json.load(f).get("cache_version") != CACHE_VERSION: os.remove(CACHE_FILE); return False
-    except: return False
+            d = json.load(f)
+        if d.get("cache_version") != CACHE_VERSION:
+            os.remove(CACHE_FILE)
+            return False
+    except Exception:
+        return False
     return True
 
-def load_cache():
-    if not is_cache_valid(): return None
+def load_cache() -> dict | None:
+    if not is_cache_valid():
+        return None
     try:
-        with open(CACHE_FILE, "r") as f: return json.load(f)
-    except: return None
+        with open(CACHE_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
-def save_cache(payload):
+def save_cache(payload: dict):
     _ensure_cache_dir()
     try:
         payload["cache_version"] = CACHE_VERSION
-        with open(CACHE_FILE, "w") as f: json.dump(payload, f, default=str)
-    except Exception as e: print(f"Cache write failed: {e}")
+        with open(CACHE_FILE, "w") as f:
+            json.dump(payload, f, default=str)
+    except Exception as e:
+        print(f"Cache write failed: {e}")
 
 # ==============================================================================
-# DATA FETCHING & ENGINE
+# DATA FETCHING
 # ==============================================================================
-def fetch_standings():
-    resp = requests.get(f"{MLB_API_BASE}/standings", params={"leagueId": "103,104", "season": SEASON_YEAR, "standingsTypes": "regularSeason", "hydrate": "team,record"}, timeout=15)
-    resp.raise_for_status(); data = resp.json(); rows = []
-    for rec in data.get("records", []):
-        for tr in rec.get("teamRecords", []):
-            tid = tr["team"]["id"]
-            if tid not in TEAM_INFO: continue
-            nm, ab, div, lg = TEAM_INFO[tid]; w = tr.get("wins", 0); l = tr.get("losses", 0); gp = w + l
-            wp = w / gp if gp > 0 else 0.0
-            try: gb = float(tr.get("gamesBack", "0"))
-            except: gb = 0.0
-            rs, ra = tr.get("runsScored", 0) or 0, tr.get("runsAllowed", 0) or 0
-            rows.append({"team_id": tid, "name": nm, "abbr": ab, "division": div, "league": lg, "wins": w, "losses": l, "games_played": gp, "win_pct": round(wp, 4), "div_games_back": gb, "wc_games_back": 0.0, "runs_scored": rs, "runs_allowed": ra, "run_differential": rs - ra})
+def fetch_standings() -> pd.DataFrame:
+    url = f"{MLB_API_BASE}/standings"
+    params = {"leagueId": "103,104", "season": SEASON_YEAR, "standingsTypes": "regularSeason", "hydrate": "team,record"}
+    resp = requests.get(url, params=params, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    rows = []
+    for record in data.get("records", []):
+        for tr in record.get("teamRecords", []):
+            team_id = tr["team"]["id"]
+            if team_id not in TEAM_INFO:
+                continue
+            name, abbr, div, league = TEAM_INFO[team_id]
+            wins = tr.get("wins", 0)
+            losses = tr.get("losses", 0)
+            gp = wins + losses
+            wp = wins / gp if gp > 0 else 0.0
+            gb_raw = tr.get("gamesBack", "0")
+            try:
+                gb = float(gb_raw)
+            except:
+                gb = 0.0
+            rs = tr.get("runsScored", 0) or 0
+            ra = tr.get("runsAllowed", 0) or 0
+            rows.append({"team_id": team_id, "name": name, "abbr": abbr, "division": div, "league": league,
+                         "wins": wins, "losses": losses, "games_played": gp, "win_pct": round(wp, 4),
+                         "div_games_back": gb, "wc_games_back": 0.0, "runs_scored": rs, "runs_allowed": ra, "run_differential": rs - ra})
     df = pd.DataFrame(rows)
-    if df.empty: raise RuntimeError("Standings empty")
-    # Simple WC GB calc
-    for lg in ["AL", "NL"]:
-        lg_df = df[df["league"] == lg]
-        div_leaders = lg_df.groupby("division")["win_pct"].idxmax()
-        lg_df.loc[~lg_df.index.isin(div_leaders), "wc_games_back"] = lg_df.apply(lambda r: round(((lg_df["win_pct"].max() - r["win_pct"]) * r["games_played"]), 1) if r["team_id"] not in div_leaders.values else -5.0, axis=1)
-        df.loc[df["league"] == lg, "wc_games_back"] = lg_df["wc_games_back"]
-    return df.sort_values(["league", "division", "wins"], ascending=[True, True, False])
+    if df.empty:
+        raise RuntimeError("Standings empty — API may have changed.")
+    return _compute_wc_games_back(df).sort_values(["league", "division", "wins"], ascending=[True, True, False])
 
-def fetch_schedule():
-    today = date.today(); end = min(date.fromisoformat(WORLD_SERIES_END_APPROX), date(SEASON_YEAR, 9, 30))
-    if today > end: return pd.DataFrame()
-    games = []; cs = today
-    while cs <= end:
-        ce = date(cs.year, 12, 31) if cs.month == 12 else date(cs.year, cs.month + 1, 1) - timedelta(days=1)
-        ce = min(ce, end)
+def _compute_wc_games_back(df: pd.DataFrame) -> pd.DataFrame:
+    result_frames = []
+    for league in ["AL", "NL"]:
+        lg = df[df["league"] == league].copy()
+        div_leaders = lg.groupby("division")["win_pct"].idxmax()
+        lg["div_leader"] = False
+        lg.loc[div_leaders, "div_leader"] = True
+        wc_pool = lg[~lg["div_leader"]].sort_values("win_pct", ascending=False)
+        wc_cutoff = wc_pool.iloc[2]["win_pct"] if len(wc_pool) >= 3 else (wc_pool.iloc[-1]["win_pct"] if len(wc_pool) > 0 else 0.5)
+        def calc_wc_gb(row):
+            if row["div_leader"]:
+                return -5.0
+            gp = max(row["games_played"], 1)
+            gap = (wc_cutoff - row["win_pct"]) * gp
+            return round(gap, 1)
+        lg["wc_games_back"] = lg.apply(calc_wc_gb, axis=1)
+        result_frames.append(lg)
+    return pd.concat(result_frames, ignore_index=True)
+
+def fetch_schedule() -> pd.DataFrame:
+    today = date.today()
+    reg_season_end = date(SEASON_YEAR, 9, 30)
+    end_date = min(date.fromisoformat(WORLD_SERIES_END_APPROX), reg_season_end)
+    if today > end_date:
+        return pd.DataFrame(columns=["game_id", "game_date", "home_team_id", "away_team_id", "status"])
+    all_games = []
+    chunk_start = today
+    while chunk_start <= end_date:
+        if chunk_start.month == 12:
+            chunk_end = date(chunk_start.year, 12, 31)
+        else:
+            chunk_end = date(chunk_start.year, chunk_start.month + 1, 1) - timedelta(days=1)
+        chunk_end = min(chunk_end, end_date)
         try:
-            r = requests.get(f"{MLB_API_BASE}/schedule", params={"sportId": 1, "startDate": cs.isoformat(), "endDate": ce.isoformat(), "gameType": "R", "season": SEASON_YEAR}, timeout=20)
-            if r.status_code == 200:
-                for d in r.json().get("dates", []):
-                    for g in d.get("games", []):
-                        h, a = g.get("teams", {}).get("home", {}).get("team", {}).get("id"), g.get("teams", {}).get("away", {}).get("team", {}).get("id")
-                        if h and a: games.append({"game_id": g.get("gamePk"), "game_date": d.get("date"), "home_team_id": int(h), "away_team_id": int(a), "status": g.get("status", {}).get("abstractGameState", " ")})
-        except: pass
-        cs = ce + timedelta(days=1)
-    df = pd.DataFrame(games)
-    if not df.empty: df["game_date"] = pd.to_datetime(df["game_date"])
-    return df.drop_duplicates(subset="game_id")
+            resp = requests.get(f"{MLB_API_BASE}/schedule", params={
+                 "sportId": 1, "startDate": chunk_start.isoformat(),
+                 "endDate": chunk_end.isoformat(), "gameType": "R",
+                 "hydrate": "team", "season": SEASON_YEAR,
+            }, timeout=20)
+            resp.raise_for_status()
+            for date_entry in resp.json().get("dates", []):
+                for game in date_entry.get("games", []):
+                    status = " "
+                    status_obj = game.get("status")
+                    if isinstance(status_obj, dict):
+                        status = status_obj.get("abstractGameState", " ") or " "
+                    home_id = game.get("teams", {}).get("home", {}).get("team", {}).get("id")
+                    away_id = game.get("teams", {}).get("away", {}).get("team", {}).get("id")
+                    if home_id and away_id:
+                        all_games.append({
+                             "game_id": game.get("gamePk"),
+                             "game_date": date_entry.get("date"),
+                             "home_team_id": int(home_id),
+                             "away_team_id": int(away_id),
+                             "status": status,
+                        })
+        except Exception as e:
+            print(f"Schedule chunk failed {chunk_start}: {e}")
+        chunk_start = chunk_end + timedelta(days=1)
 
-def get_remaining_games(df):
-    if df.empty: return pd.DataFrame()
-    return df[df["game_date"] >= pd.Timestamp(date.today())].copy()
+    if not all_games:
+        return pd.DataFrame(columns=["game_id", "game_date", "home_team_id", "away_team_id", "status"])
 
-def compute_remaining_opponents(df):
-    if df.empty: return {}
-    opps = {}
-    for _, r in df.iterrows():
-        opps.setdefault(r["home_team_id"], []).append(r["away_team_id"])
-        opps.setdefault(r["away_team_id"], []).append(r["home_team_id"])
-    return opps
+    df = pd.DataFrame(all_games)
+    df["game_date"] = pd.to_datetime(df["game_date"])
+    if "status" not in df.columns:
+        df["status"] = " "
+    return df.drop_duplicates(subset="game_id").sort_values("game_date").reset_index(drop=True)
 
-LEAGUE_AVG_RPG = 4.50; LEAGUE_AVG_FIP = 4.10; LEAGUE_AVG_OPS = 0.730; LEAGUE_AVG_ERA = 4.20
-LEAGUE_AVG_XWOBA = 0.315; LEAGUE_AVG_XERA = 4.10; LEAGUE_AVG_WRC = 100.0
-LEAGUE_SP_IP_SHARE = 0.57; LEAGUE_RP_IP_SHARE = 0.43; TYPICAL_TEAM_WARP = 35.0
-PA_FULL_WEIGHT = 300; IP_FULL_WEIGHT = 100
+def get_remaining_games(schedule_df: pd.DataFrame) -> pd.DataFrame:
+    if schedule_df is None or schedule_df.empty:
+        return pd.DataFrame(columns=["game_id", "game_date", "home_team_id", "away_team_id", "status"])
+    if "status" not in schedule_df.columns:
+        schedule_df = schedule_df.copy()
+        schedule_df["status"] = " "
+    today = pd.Timestamp(date.today())
+    future = schedule_df[schedule_df["game_date"] >= today].copy()
+    completed = {"Final", "Game Over", "Completed Early", "Postponed"}
+    future = future[~future["status"].isin(completed)]
+    return future.reset_index(drop=True)
 
-PECOTA_TEAM_MAP = {"ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CHW":145, "CIN":113, "CLE":114, "COL":115, "DET":116, "HOU":117, "KC":118, "LAA":108, "LAD":119, "MIA":146, "MIL":158, "MIN":142, "NYM":121, "NYY":147, "PHI":143, "PIT":134, "OAK":133, "SD":135, "SEA":136, "SF":137, "STL":138, "TB":139, "TEX":140, "TOR":141, "WAS":120}
+def compute_remaining_opponents(schedule_df: pd.DataFrame) -> dict[int, list[int]]:
+    remaining = get_remaining_games(schedule_df)
+    if remaining.empty:
+        return {}
+    home = remaining["home_team_id"].astype(int).values
+    away = remaining["away_team_id"].astype(int).values
+    opponents: dict[int, list[int]] = {}
+    for h, a in zip(home, away):
+        opponents.setdefault(h, []).append(a)
+        opponents.setdefault(a, []).append(h)
+    return opponents
 
+# ==============================================================================
+# PROJECTION ENGINE
+# ==============================================================================
+LEAGUE_AVG_RPG = 4.50
+LEAGUE_AVG_FIP = 4.10
+LEAGUE_AVG_OPS = 0.730
+LEAGUE_AVG_ERA = 4.20
+LEAGUE_AVG_XWOBA = 0.315
+LEAGUE_AVG_XERA = 4.10
+LEAGUE_AVG_WRC = 100.0
+LEAGUE_SP_IP_SHARE = 0.57
+LEAGUE_RP_IP_SHARE = 0.43
+TYPICAL_TEAM_WARP = 35.0
+PA_FULL_WEIGHT = 300
+IP_FULL_WEIGHT = 100
+
+PECOTA_TEAM_MAP = {"ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CHW":145, "CIN":113,
+    "CLE":114, "COL":115, "DET":116, "HOU":117, "KC":118, "LAA":108, "LAD":119, "MIA":146,
+    "MIL":158, "MIN":142, "NYM":121, "NYY":147, "PHI":143, "PIT":134, "OAK":133, "SD":135,
+    "SEA":136, "SF":137, "STL":138, "TB":139, "TEX":140, "TOR":141, "WAS":120}
+
+# Your JSON data here (cleaned of trailing spaces)
 _PECOTA_HIT_JSON = '[{"mlbid":592450,"name":"Aaron Judge","team":"NYY","pos":"RF","age":34,"pa":672,"drc_plus":175,"ops":0.985,"warp":7.3},{"mlbid":660271,"name":"Shohei Ohtani","team":"LAD","pos":"DH","age":31,"pa":700,"drc_plus":156,"ops":0.931,"warp":6.3},{"mlbid":665742,"name":"Juan Soto","team":"NYM","pos":"LF","age":27,"pa":668,"drc_plus":155,"ops":0.899,"warp":6.2},{"mlbid":677951,"name":"Bobby Witt Jr.","team":"KC","pos":"SS","age":26,"pa":668,"drc_plus":136,"ops":0.831,"warp":5.2}]'
 _PECOTA_PIT_JSON = '[{"mlbid":669373,"name":"Tarik Skubal","team":"DET","age":29.0,"g":29,"gs":29,"ip":192.3,"era":2.42,"fip":2.76,"warp":6.0,"role":"SP"},{"mlbid":676979,"name":"Garrett Crochet","team":"BOS","age":27.0,"g":31,"gs":31,"ip":193.7,"era":3.08,"fip":3.05,"warp":4.5,"role":"SP"},{"mlbid":694973,"name":"Paul Skenes","team":"PIT","age":24.0,"g":29,"gs":29,"ip":177.7,"era":3.02,"fip":3.04,"warp":4.5,"role":"SP"},{"mlbid":519242,"name":"Chris Sale","team":"ATL","age":37.0,"g":28,"gs":28,"ip":165.0,"era":2.92,"fip":3.11,"warp":4.3,"role":"SP"},{"mlbid":650911,"name":"Cristopher Sanchez","team":"PHI","age":29.0,"g":29,"gs":29,"ip":183.7,"era":3.38,"fip":3.12,"warp":4.1,"role":"SP"},{"mlbid":554430,"name":"Zack Wheeler","team":"PHI","age":36.0,"g":21,"gs":21,"ip":105.0,"era":2.97,"fip":3.36,"warp":2.8,"role":"SP"},{"mlbid":605400,"name":"Aaron Nola","team":"PHI","age":33.0,"g":29,"gs":29,"ip":163.0,"era":4.11,"fip":4.01,"warp":2.3,"role":"SP"}]'
 
-_ph = None; _pp = None
+_ph = None
+_pp = None
+
 def _pecota():
     global _ph, _pp
     if _ph is None:
-        _ph = pd.DataFrame(json.loads(_PECOTA_HIT_JSON)); _ph.columns = _ph.columns.str.strip()
-        _ph["team_id"] = _ph["team"].map(PECOTA_TEAM_MAP); _ph = _ph.dropna(subset=["team_id"]); _ph["team_id"] = _ph["team_id"].astype(int)
+        _ph = pd.DataFrame(json.loads(_PECOTA_HIT_JSON))
+        # CRITICAL FIX: Strip spaces from all column names
+        _ph.columns = _ph.columns.str.strip()
+        _ph["team_id"] = _ph["team"].map(PECOTA_TEAM_MAP)
+        _ph = _ph.dropna(subset=["team_id"])
+        _ph["team_id"] = _ph["team_id"].astype(int)
     if _pp is None:
-        _pp = pd.DataFrame(json.loads(_PECOTA_PIT_JSON)); _pp.columns = _pp.columns.str.strip()
-        _pp["team_id"] = _pp["team"].map(PECOTA_TEAM_MAP); _pp = _pp.dropna(subset=["team_id"]); _pp["team_id"] = _pp["team_id"].astype(int)
+        _pp = pd.DataFrame(json.loads(_PECOTA_PIT_JSON))
+        # CRITICAL FIX: Strip spaces from all column names
+        _pp.columns = _pp.columns.str.strip()
+        _pp["team_id"] = _pp["team"].map(PECOTA_TEAM_MAP)
+        _pp = _pp.dropna(subset=["team_id"])
+        _pp["team_id"] = _pp["team_id"].astype(int)
     return _ph, _pp
 
-def fetch_team_projections(std=None):
-    all_ids = list(TEAM_INFO.keys()); det = {t:{"batters":[], "sp":[], "rp":[]} for t in all_ids}
-    ph, pp = _pecota(); team_statuses = fetch_team_statuses()
-    # Mock statcast/historical data fetch for stability if APIs fail
-    h25b, h25p, h24b, h24p = {}, {}, {}, {}
-    mlb_ops, mlb_era, cur_bat, cur_pit = {}, {}, {}, {}
+def _sc_weights(sample, threshold):
+    w = min(sample / threshold, 1.0)
+    return w, 1.0 - w
+
+def _fetch_statcast_hist(year, stat_type):
+    try:
+        import io
+        url = f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type={stat_type}&year={year}&position=&team=&min=q&csv=true"
+        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200 or len(r.content) < 500: return {}
+        df = pd.read_csv(io.StringIO(r.content.decode("utf-8")))
+        stat_col = "xwoba" if stat_type=="batter" else "xera"
+        sample_col = "pa" if stat_type=="batter" else "p_formatted_ip"
+        if stat_col not in df.columns or "team_id" not in df.columns: return {}
+        if sample_col not in df.columns: sample_col = "ip" if "ip" in df.columns else None
+        if sample_col is None: return {}
+        df[stat_col] = pd.to_numeric(df[stat_col], errors="coerce")
+        df[sample_col] = pd.to_numeric(df[sample_col], errors="coerce").fillna(0)
+        df = df.dropna(subset=[stat_col])
+        out = {}
+        for tid, g in df.groupby("team_id"):
+            if g[sample_col].sum() > 0:
+                lo, hi = (0.100, 0.600) if stat_type=="batter" else (1.5, 8.0)
+                out[int(tid)] = float(np.average(g[stat_col].clip(lo, hi), weights=g[sample_col].clip(1)))
+        return out
+    except Exception: return {}
+
+def _fetch_statcast_current(year):
+    import io
+    bat_out = {}
+    pit_out = {}
+    for stype, out, sc, samp in [("batter",bat_out,"xwoba","pa"),("pitcher",pit_out,"xera","p_formatted_ip")]:
+        try:
+            url = f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type={stype}&year={year}&position=&team=&min=1&csv=true"
+            r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code != 200 or len(r.content) < 500: continue
+            df = pd.read_csv(io.StringIO(r.content.decode("utf-8")))
+            if sc not in df.columns or "team_id" not in df.columns: continue
+            if samp not in df.columns: samp = "ip" if "ip" in df.columns else None
+            if samp is None: continue
+            df[sc] = pd.to_numeric(df[sc], errors="coerce")
+            df[samp] = pd.to_numeric(df[samp], errors="coerce").fillna(0)
+            df = df.dropna(subset=[sc])
+            lo, hi = (0.100, 0.600) if stype=="batter" else (1.5, 8.0)
+            for tid, g in df.groupby("team_id"):
+                total = float(g[samp].sum())
+                if total > 0: out[int(tid)] = {"stat": float(np.average(g[sc].clip(lo,hi), weights=g[samp].clip(1))), "sample": total}
+        except Exception: continue
+    return bat_out, pit_out
+
+def _fetch_mlb_ops_era(year):
+    bat = {}
+    pit = {}
+    for group, out, key in [("hitting",bat,"ops"),("pitching",pit,"era")]:
+        try:
+            r = requests.get(f"{MLB_API_BASE}/teams/stats", params={"stats":"season","group":group,"season":year,"sportId":1}, timeout=10)
+            if r.status_code != 200: continue
+            for sg in r.json().get("stats",[]):
+                for sp in sg.get("splits",[]):
+                    tid = sp.get("team",{}).get("id")
+                    val = sp.get("stat",{}).get(key)
+                    if tid and val:
+                        try: out[int(tid)] = float(val)
+                        except: pass
+        except: pass
+    return bat, pit
+
+def fetch_team_projections(standings_df=None):
+    all_ids = list(TEAM_INFO.keys())
+    det = {t:{"batters":[], "sp":[], "rp":[]} for t in all_ids}
+    ph, pp = _pecota()
+    exp = PYTHAG_EXPONENT
+    team_statuses = fetch_team_statuses()
     
-    team_pa = {}; team_ip = {}
-    if std is not None and not std.empty:
-        for _, row in std.iterrows():
-            gp = max(int(row.get("games_played",0)),1); tid = int(row["team_id"])
-            team_pa[tid] = gp * 38; team_ip[tid] = gp * 9.0
+    import concurrent.futures as cf
+    def _try(fn, *a):
+        try: return fn(*a)
+        except: return {}
+    with cf.ThreadPoolExecutor(max_workers=5) as ex:
+        f25b = ex.submit(_try, _fetch_statcast_hist, 2025, "batter")
+        f25p = ex.submit(_try, _fetch_statcast_hist, 2025, "pitcher")
+        f24b = ex.submit(_try, _fetch_statcast_hist, 2024, "batter")
+        f24p = ex.submit(_try, _fetch_statcast_hist, 2024, "pitcher")
+        fmlb = ex.submit(_try, _fetch_mlb_ops_era, SEASON_YEAR)
+        fcur = ex.submit(_fetch_statcast_current, SEASON_YEAR)
+        h25b = f25b.result(timeout=25) or {}
+        h25p = f25p.result(timeout=25) or {}
+        h24b = f24b.result(timeout=25) or {}
+        h24p = f24p.result(timeout=25) or {}
+        mlb_ops, mlb_era = fmlb.result(timeout=15) or ({},{})
+        cur_bat, cur_pit = fcur.result(timeout=25) or ({},{})
+        
+    team_pa = {}
+    team_ip = {}
+    if standings_df is not None and not standings_df.empty:
+        for _, row in standings_df.iterrows():
+            gp = max(int(row.get("games_played",0)),1)
+            tid = int(row["team_id"])
+            team_pa[tid] = gp * 38
+            team_ip[tid] = gp * 9.0
             
     rows = []
     for tid in all_ids:
-        active_ids = team_statuses[tid]["active"]; il_ids = team_statuses[tid]["il"]
+        active_ids = team_statuses[tid]["active"]
+        il_ids = team_statuses[tid]["il"]
+        
         lineup = ph[ph["team_id"]==tid].sort_values("pa",ascending=False).head(9)
         
-        hit_weights = []
-        for _, r in lineup.iterrows():
-            if r["mlbid"] in il_ids: hit_weights.append(max(r["pa"], 10.0))
-            elif r["mlbid"] in active_ids: hit_weights.append(max(r["pa"], 600.0))
-            else: hit_weights.append(max(r["pa"], 10.0))
-        pecota_ops = float(np.average(lineup["ops"].fillna(LEAGUE_AVG_OPS), weights=hit_weights)) if not lineup.empty else LEAGUE_AVG_OPS
+        # Roster-aware hitter weighting
+        if not lineup.empty:
+            hit_weights = []
+            for _, r in lineup.iterrows():
+                if r["mlbid"] in il_ids: hit_weights.append(max(r["pa"], 10.0))
+                elif r["mlbid"] in active_ids: hit_weights.append(max(r["pa"], 600.0))
+                else: hit_weights.append(max(r["pa"], 10.0))
+            pecota_ops = float(np.average(lineup["ops"].fillna(LEAGUE_AVG_OPS), weights=hit_weights))
+        else:
+            pecota_ops = LEAGUE_AVG_OPS
         pecota_ops = float(np.clip(pecota_ops, 0.620, 0.850))
         
         reg_sens = 0.15 if not lineup.empty and lineup["drc_plus"].mean() > 105 else 0.30
         cur_pa = float(team_pa.get(tid, 0))
-        w_cur = min(cur_pa / PA_FULL_WEIGHT, 1.0); w_pri = 1.0 - w_cur
-        xwoba = LEAGUE_AVG_XWOBA
+        w_cur, w_pri = _sc_weights(cur_pa, PA_FULL_WEIGHT)
+        cur_xwoba = LEAGUE_AVG_XWOBA
+        if isinstance(cur_bat, dict) and tid in cur_bat:
+            d = cur_bat[tid]
+            w = min(d.get("sample",0)/(PA_FULL_WEIGHT*9),1.0)
+            cur_xwoba = d["stat"] * w + LEAGUE_AVG_XWOBA * (1-w)
+        elif tid in mlb_ops:
+            cur_xwoba = float(mlb_ops[tid]) * 0.43
+            
+        xwoba = (w_cur * cur_xwoba + w_pri * 0.35 * h25b.get(tid,LEAGUE_AVG_XWOBA) +
+                 w_pri * 0.20 * h24b.get(tid,LEAGUE_AVG_XWOBA) + w_pri * 0.45 * LEAGUE_AVG_XWOBA)
+        
         team_ops = float(np.clip(pecota_ops * (1 + (xwoba/LEAGUE_AVG_XWOBA - 1) * reg_sens), 0.620, 0.850))
         proj_rpg = float(np.clip((team_ops/LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG, 2.5, 7.5))
         
-        tp = pp[pp["team_id"]==tid]; sp = tp[tp["role"]=="SP"].sort_values("ip",ascending=False); rp = tp[tp["role"]=="RP"].sort_values("ip",ascending=False)
+        tp = pp[pp["team_id"]==tid]
+        sp = tp[tp["role"]=="SP"].sort_values("ip",ascending=False)
+        rp = tp[tp["role"]=="RP"].sort_values("ip",ascending=False)
+        
         def _era(df, role):
             if df.empty or df["ip"].sum() == 0: return LEAGUE_AVG_ERA
             weights = []
             for _, r in df.iterrows():
                 if r["mlbid"] in il_ids: weights.append(max(r["ip"], 1.0))
-                elif r["mlbid"] in active_ids: weights.append(max(r["ip"], 185.0 if role=="SP" else 65.0))
+                elif r["mlbid"] in active_ids:
+                    weights.append(max(r["ip"], 185.0 if role=="SP" else 65.0))
                 else: weights.append(max(r["ip"], 1.0))
             blended = (df["fip"].fillna(LEAGUE_AVG_FIP)*0.7 + df["era"].fillna(LEAGUE_AVG_ERA)*0.3).clip(2.0, 7.5)
             return float(np.average(blended, weights=weights))
             
-        sp_pecota = float(np.clip(_era(sp, "SP"), 2.80, 5.50)); rp_pecota = float(np.clip(_era(rp, "RP"), 3.00, 5.50))
-        cur_ip = float(team_ip.get(tid, 0)); w_cur_ip = min(cur_ip / IP_FULL_WEIGHT, 1.0)
-        xera = LEAGUE_AVG_XERA; sc_adj = (xera/LEAGUE_AVG_XERA-1) * 0.30
-        sp_era = float(np.clip(sp_pecota * (1+sc_adj), 2.80, 5.50)); rp_era = float(np.clip(rp_pecota * (1+sc_adj), 3.00, 5.50))
+        sp_pecota = float(np.clip(_era(sp, "SP"), 2.80, 5.50))
+        rp_pecota = float(np.clip(_era(rp, "RP"), 3.00, 5.50))
+        cur_ip = float(team_ip.get(tid, 0))
+        w_cur_ip, w_pri_ip = _sc_weights(cur_ip, IP_FULL_WEIGHT)
+        cur_xera = LEAGUE_AVG_XERA
+        if isinstance(cur_pit, dict) and tid in cur_pit:
+            d = cur_pit[tid]
+            w = min(d.get("sample",0)/IP_FULL_WEIGHT,1.0)
+            cur_xera = d["stat"] * w + LEAGUE_AVG_XERA * (1-w)
+        elif tid in mlb_era:
+            cur_xera = float(mlb_era[tid])
+            
+        xera = (w_cur_ip * cur_xera + w_pri_ip * 0.35 * h25p.get(tid,LEAGUE_AVG_XERA) +
+                w_pri_ip * 0.20 * h24p.get(tid,LEAGUE_AVG_XERA) + w_pri_ip * 0.45 * LEAGUE_AVG_XERA)
+        sc_adj = (xera/LEAGUE_AVG_XERA-1) * 0.30
+        sp_era = float(np.clip(sp_pecota * (1+sc_adj), 2.80, 5.50))
+        rp_era = float(np.clip(rp_pecota * (1+sc_adj), 3.00, 5.50))
         proj_rapg = float(np.clip((sp_era/LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE + (rp_era/LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE, 2.5, 7.5))
-        exp = PYTHAG_EXPONENT
         proj_wp = proj_rpg**exp / (proj_rpg**exp + proj_rapg**exp)
         
-        il_warp = float(ph[ph["mlbid"].isin(il_ids)]["warp"].clip(lower=0).sum() + pp[pp["mlbid"].isin(il_ids)]["warp"].clip(lower=0).sum()) if il_ids else 0.0
+        il_warp = 0.0
+        try:
+            if il_ids:
+                il_warp = float(ph[ph["mlbid"].isin(il_ids)]["warp"].clip(lower=0).sum() + pp[pp["mlbid"].isin(il_ids)]["warp"].clip(lower=0).sum())
+        except: pass
         
         det[tid]["batters"] = [{"name":r["name"],"pa":int(r["pa"]),"ops":round(float(r["ops"]),3)} for _,r in lineup.iterrows()]
-        rows.append({"team_id":tid, "proj_runs_per_game":round(proj_rpg,3), "proj_ra_per_game":round(proj_rapg,3), "proj_win_pct":round(float(proj_wp),4), "il_warp":round(il_warp, 2), "proj_source": "PECOTA+Statcast"})
+        rows.append({"team_id":tid, "proj_runs_per_game":round(proj_rpg,3), "proj_ra_per_game":round(proj_rapg,3),
+                     "proj_win_pct":round(float(proj_wp),4), "il_warp":round(il_warp, 2), "proj_source": "PECOTA+Statcast"})
     return pd.DataFrame(rows), det
 
+# ==============================================================================
+# ENGINE
+# ==============================================================================
 def pythag(rs, ra):
     if rs <= 0 or ra <= 0: return 0.500
     return rs ** PYTHAG_EXPONENT / (rs ** PYTHAG_EXPONENT + ra ** PYTHAG_EXPONENT)
 
 def build_master(std, prj, det=None):
     df = std.copy()
-    df = df.merge(prj[["team_id", "proj_win_pct", "proj_runs_per_game", "proj_ra_per_game", "proj_source", "il_warp"]], on="team_id", how="left")
+    merge_cols = ["team_id", "proj_win_pct", "proj_runs_per_game", "proj_ra_per_game", "proj_source", "il_warp"]
+    df = df.merge(prj[merge_cols], on="team_id", how="left")
     df["pythag_win_pct"] = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
     gp = df["games_played"].clip(0, 162)
-    base_proj_w = (0.70 - (gp / 162.0) * 0.25).clip(0.45, 0.70)
+    proj_source = df["proj_source"].iloc[0] if "proj_source" in df.columns else "Unknown"
+    
+    # Sliding scale sample weighting
+    sample_w = gp.apply(lambda g: 0.0 if g < 20 else 1.0 if g >= 100 else 0.5 * (1 + np.tanh(3 * ((g - 20) / 80 - 0.5))))
+    
+    # Talent-first weighting
+    base_proj_w = (0.70 - (gp / 162.0) * 0.25).clip(0.45, 0.70) if proj_source in ("FanGraphs DC", "PECOTA+Statcast", "PECOTA 2026") else (0.55 - (gp / 162.0) * 0.15).clip(0.40, 0.55)
     base_pyth_w = 1.0 - base_proj_w
+    
     il_frac = (df["il_warp"] / TYPICAL_TEAM_WARP).clip(0.0, 0.50)
     adj_pyth_w = base_pyth_w * (1.0 - il_frac)
     adj_proj_w = 1.0 - adj_pyth_w
+    
     df["blended_win_pct"] = (df["proj_win_pct"]*adj_proj_w + df["pythag_win_pct"]*adj_pyth_w).clip(0.20, 0.80)
+    df["proj_weight_used"] = adj_proj_w.round(2)
+    df["pythag_weight_used"] = adj_pyth_w.round(2)
     df["games_remaining"] = (162 - gp).clip(0, 162)
     return df
 
@@ -293,7 +607,7 @@ def compute_buyer_seller(df):
     df["adjusted_score"] = pre * damp * dp
     df["base_adj"] = np.clip(-df["adjusted_score"] * 0.015, -0.12, 0.07)
     df["tier"] = df["adjusted_score"].apply(lambda s: "hard_seller" if s >=8 else "soft_seller" if s >=4 else "neutral" if s >=-3 else "soft_buyer" if s >=-8 else "hard_buyer")
-    df["tier_label"] = df["tier"].map({"hard_seller": "Hard Seller", "soft_seller": "Soft Seller", "neutral": "Neutral", "soft_buyer": "Soft Buyer", "hard_buyer": "Hard Buyer"})
+    df["tier_label"] = df["tier"].map(TIER_LABELS)
     return df
 
 def apply_ramp(df, ramp):
@@ -328,16 +642,22 @@ def log5(a, b): return (a - a*b) / (a + b - 2*a*b + 1e-9)
 
 def run_simulation(mdf, sch):
     rng = np.random.default_rng(RANDOM_SEED)
-    tids = mdf["team_id"].tolist(); n = len(tids); idx = {t:i for i,t in enumerate(tids)}
+    tids = mdf["team_id"].tolist()
+    n = len(tids)
+    idx = {t:i for i,t in enumerate(tids)}
+    info = mdf[["team_id", "division", "league"]].set_index("team_id")
     init = np.array([mdf.set_index("team_id")["wins"].get(t,0) for t in tids], dtype=np.float32)
     adj_wp = mdf.set_index("team_id")["adj_win_pct"].to_dict()
     rem = get_remaining_games(sch)
     if rem.empty: return {"proj_wins": {t: float(init[i]) for i,t in enumerate(tids)}}
-    h = rem["home_team_id"].values.astype(int); a = rem["away_team_id"].values.astype(int)
+    h = rem["home_team_id"].values.astype(int)
+    a = rem["away_team_id"].values.astype(int)
     valid = np.array([(x in idx and y in idx) for x,y in zip(h,a)])
     h, a = h[valid], a[valid]
     ap = np.array([log5(adj_wp.get(x,0.5), adj_wp.get(y,0.5)) for x,y in zip(h,a)], dtype=np.float32)
-    hi = np.array([idx[x] for x in h]); ai = np.array([idx[x] for x in a]); ng = len(h)
+    hi = np.array([idx[x] for x in h])
+    ai = np.array([idx[x] for x in a])
+    ng = len(h)
     f = np.full((N_SIMULATIONS, n), init, dtype=np.float32)
     if ng > 0:
         r = rng.random((N_SIMULATIONS, ng), dtype=np.float32)
@@ -351,11 +671,12 @@ def run_simulation(mdf, sch):
 # ==============================================================================
 def render_projections_tab(mdf, sim):
     st.markdown("## 2026 MLB Season Projections")
-    st.caption(f"Updated daily · {N_SIMULATIONS:,}-sim Monte Carlo · Roster-Aware · SOS-Adjusted")
+    st.caption(f"Updated daily · {N_SIMULATIONS:,}-sim Monte Carlo · Roster-Aware")
     rows = []
     for _, r in mdf.iterrows():
         t = r["team_id"]
-        rows.append({"Team": r["abbr"], "League": r["league"], "Division": r["division"], "W": int(r["wins"]), "L": int(r["losses"]), "Win%": f"{r['win_pct']:.3f}", "Pythag%": f"{r['pythag_win_pct']:.3f}", "GB (WC)": f"{r['wc_games_back']:.1f}" if r["wc_games_back"] >0 else "—", "Proj W": int(round(sim['proj_wins'].get(t, r['wins']))), "Proj L": int(round(162 - sim['proj_wins'].get(t, r['wins']))), "Status": r.get("tier_label", "Neutral"), "SoS": r.get("sos_label", "—")})
+        proj_w = int(round(sim['proj_wins'].get(t, r['wins'])))
+        rows.append({"Team": r["abbr"], "League": r["league"], "Division": r["division"], "W": int(r["wins"]), "L": int(r["losses"]), "Win%": f"{r['win_pct']:.3f}", "Pythag%": f"{r['pythag_win_pct']:.3f}", "GB (WC)": f"{r['wc_games_back']:.1f}" if r["wc_games_back"] >0 else "—", "Proj W": proj_w, "Proj L": 162 - proj_w, "Status": r.get("tier_label", "Neutral"), "tier": r.get("tier", "neutral"), "SoS": r.get("sos_label", "—")})
     df = pd.DataFrame(rows)
     c1, c2 = st.columns(2)
     lf = c1.radio("League", ["All", "AL", "NL"], horizontal=True)
