@@ -104,7 +104,6 @@ def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
 _ROSTER_CACHE = {}
 
 def fetch_team_statuses() -> dict[int, dict[str, set[int]]]:
-    """Returns {team_id: {'active': {mlbid}, 'il': {mlbid}}}"""
     today = date.today().isoformat()
     if _ROSTER_CACHE.get("date") == today and _ROSTER_CACHE.get("data"):
         return _ROSTER_CACHE["data"]
@@ -300,7 +299,6 @@ PECOTA_TEAM_MAP = {"ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CHW":
     "MIL":158, "MIN":142, "NYM":121, "NYY":147, "PHI":143, "PIT":134, "OAK":133, "SD":135,
     "SEA":136, "SF":137, "STL":138, "TB":139, "TEX":140, "TOR":141, "WAS":120}
 
-# JSON strings preserved. Keep your full strings in the actual file.
 _PECOTA_HIT_JSON = '[{"mlbid":592450,"name":"Aaron Judge","team":"NYY","pos":"RF","age":34,"pa":672,"drc_plus":175,"ops":0.985,"warp":7.3},{"mlbid":660271,"name":"Shohei Ohtani","team":"LAD","pos":"DH","age":31,"pa":700,"drc_plus":156,"ops":0.931,"warp":6.3},{"mlbid":665742,"name":"Juan Soto","team":"NYM","pos":"LF","age":27,"pa":668,"drc_plus":155,"ops":0.899,"warp":6.2},{"mlbid":677951,"name":"Bobby Witt Jr.","team":"KC","pos":"SS","age":26,"pa":668,"drc_plus":136,"ops":0.831,"warp":5.2}]'
 _PECOTA_PIT_JSON = '[{"mlbid":669373,"name":"Tarik Skubal","team":"DET","age":29.0,"g":29,"gs":29,"ip":192.3,"era":2.42,"fip":2.76,"warp":6.0,"role":"SP"},{"mlbid":676979,"name":"Garrett Crochet","team":"BOS","age":27.0,"g":31,"gs":31,"ip":193.7,"era":3.08,"fip":3.05,"warp":4.5,"role":"SP"},{"mlbid":694973,"name":"Paul Skenes","team":"PIT","age":24.0,"g":29,"gs":29,"ip":177.7,"era":3.02,"fip":3.04,"warp":4.5,"role":"SP"},{"mlbid":519242,"name":"Chris Sale","team":"ATL","age":37.0,"g":28,"gs":28,"ip":165.0,"era":2.92,"fip":3.11,"warp":4.3,"role":"SP"}]'
 
@@ -420,18 +418,14 @@ def fetch_team_projections(standings_df=None):
         
         lineup = ph[ph["team_id"]==tid].sort_values("pa",ascending=False).head(9)
         
-        # Roster-aware hitter weighting
         if not lineup.empty:
             hit_weights = []
             for _, row in lineup.iterrows():
                 mlbid = row.get("mlbid")
                 actual_pa = row["pa"]
-                if mlbid in il_ids:
-                    hit_weights.append(max(actual_pa, 10.0))
-                elif mlbid in active_ids:
-                    hit_weights.append(max(actual_pa, 600.0))
-                else:
-                    hit_weights.append(max(actual_pa, 10.0))
+                if mlbid in il_ids: hit_weights.append(max(actual_pa, 10.0))
+                elif mlbid in active_ids: hit_weights.append(max(actual_pa, 600.0))
+                else: hit_weights.append(max(actual_pa, 10.0))
             pecota_ops = float(np.average(lineup["ops"].fillna(LEAGUE_AVG_OPS), weights=hit_weights))
         else:
             pecota_ops = LEAGUE_AVG_OPS
@@ -460,13 +454,11 @@ def fetch_team_projections(standings_df=None):
             for _, row in df.iterrows():
                 mlbid = row.get("mlbid")
                 actual_ip = row["ip"]
-                if mlbid in il_ids:
-                    weights.append(max(actual_ip, 1.0))
+                if mlbid in il_ids: weights.append(max(actual_ip, 1.0))
                 elif mlbid in active_ids:
                     baseline = 185.0 if role == "SP" else 65.0
                     weights.append(max(actual_ip, baseline))
-                else:
-                    weights.append(max(actual_ip, 1.0))
+                else: weights.append(max(actual_ip, 1.0))
             blended = (df["fip"].fillna(LEAGUE_AVG_FIP)*0.7 + df["era"].fillna(LEAGUE_AVG_ERA)*0.3).clip(2.0, 7.5)
             return float(np.average(blended, weights=weights))
             
@@ -518,10 +510,7 @@ def build_master(standings_df, statcast_df, player_detail=None) -> pd.DataFrame:
     gp = df["games_played"].clip(0, 162)
     proj_source = df["proj_source"].iloc[0] if "proj_source" in df.columns else "Unknown"
     
-    # Sliding scale for current record trust
     sample_w = gp.apply(lambda g: 0.0 if g < 20 else 1.0 if g >= 100 else 0.5 * (1 + np.tanh(3 * ((g - 20) / 80 - 0.5))))
-    
-    # Talent-first weighting
     base_proj_w = (0.70 - (gp / 162.0) * 0.25).clip(0.45, 0.70) if proj_source in ("FanGraphs DC", "PECOTA+Statcast", "PECOTA 2026") else (0.55 - (gp / 162.0) * 0.15).clip(0.40, 0.55)
     base_pyth_w = 1.0 - base_proj_w
     
