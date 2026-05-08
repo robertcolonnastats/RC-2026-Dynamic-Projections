@@ -7,7 +7,6 @@ import os
 import json
 import warnings
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import numpy as np
 import pandas as pd
@@ -30,11 +29,6 @@ st.markdown("""
 .stTabs [data-baseweb="tab"] { padding: 8px 20px; border-radius: 6px 6px 0 0; font-weight: 500; }
 </style>
 """, unsafe_allow_html=True)
-
-if st.button("Clear Projection Cache"):
-    st.cache_data.clear()
-    st.cache_resource.clear()
-    st.success("Cache cleared. Refresh the page.")
 
 # ==============================================================================
 # CONSTANTS
@@ -470,7 +464,7 @@ def _fetch_mlb_team_ops_era(year: int) -> tuple:
     return bat, pit
 
 
-# @st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def _load_statcast_cache() -> dict:
     """Fetch all Statcast data in parallel. Cached for 1 hour."""
     import concurrent.futures as _cf
@@ -930,7 +924,7 @@ def render_projections_tab(mdf, sim):
         dd = df[df["Division"]==d].sort_values("Proj W", ascending=False)
         st.markdown(f"### {d}")
         dd["Status"] = dd.apply(lambda r: f"{TIER_EMOJI.get(r['tier'],'⚪')} {r['Status']}", axis=1)
-        st.dataframe(dd, hide_index=True, width="stretch")
+        st.dataframe(dd, hide_index=True, use_container_width=True)
 
 def render_deadline_tab(mdf, sim):
     st.markdown("## Trade Deadline Impact")
@@ -944,7 +938,7 @@ def render_deadline_tab(mdf, sim):
     colors = [TIER_COLORS.get(t, "#7f7f7f") for t in comp["tier"]]
     fig = go.Figure(go.Bar(x=comp["Team"], y=(comp["PO Delta"]*100).round(1), marker_color=colors, text=(comp["PO Delta"]*100).round(1).apply(lambda v: f"{v:+.1f}%"), textposition="outside"))
     fig.update_layout(title="Playoff Odds Change", plot_bgcolor="rgba(0,0,0,0)", height=400); fig.add_hline(y=0, line_dash="dash")
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
     disp = comp[["Team","Status","PO Delta","WS Delta"]].copy()
     disp["Status"] = comp.apply(lambda r: f"{TIER_EMOJI.get(r['tier'],'⚪')} {r['Status']}", axis=1)
     disp["PO Delta"] = (comp["PO Delta"]*100).round(1).apply(lambda v: f"{v:+.1f}pp")
@@ -1029,7 +1023,7 @@ def render_team_tab(mdf, sim):
     fig.update_layout(xaxis_title="Final Wins", height=300,
                       plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
                       yaxis=dict(showticklabels=False), showlegend=False)
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
     st.markdown("### PECOTA 2026 Projected Roster")
@@ -1039,17 +1033,17 @@ def render_team_tab(mdf, sim):
     with rc1:
         st.markdown("**Lineup**")
         bat = det.get("batters",[])
-        if bat: st.dataframe(pd.DataFrame(bat), hide_index=True, width="stretch")
+        if bat: st.dataframe(pd.DataFrame(bat), hide_index=True, use_container_width=True)
         else:   st.caption("No data")
     with rc2:
         st.markdown("**Rotation**")
         sp = det.get("sp",[])
-        if sp: st.dataframe(pd.DataFrame(sp), hide_index=True, width="stretch")
+        if sp: st.dataframe(pd.DataFrame(sp), hide_index=True, use_container_width=True)
         else:  st.caption("No data")
     with rc3:
         st.markdown("**Bullpen**")
         rp = det.get("rp",[])
-        if rp: st.dataframe(pd.DataFrame(rp), hide_index=True, width="stretch")
+        if rp: st.dataframe(pd.DataFrame(rp), hide_index=True, use_container_width=True)
         else:  st.caption("No data")
 
 def render_methodology_tab():
@@ -1199,7 +1193,7 @@ def render_team_tab(mdf, sim):
     fig.update_layout(xaxis_title="Final Wins", height=300,
                       plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
                       yaxis=dict(showticklabels=False), showlegend=False)
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
     st.markdown("### PECOTA 2026 Projected Roster")
@@ -1209,17 +1203,17 @@ def render_team_tab(mdf, sim):
     with rc1:
         st.markdown("**Lineup**")
         bat = det.get("batters",[])
-        if bat: st.dataframe(pd.DataFrame(bat), hide_index=True, width="stretch")
+        if bat: st.dataframe(pd.DataFrame(bat), hide_index=True, use_container_width=True)
         else:   st.caption("No data")
     with rc2:
         st.markdown("**Rotation**")
         sp = det.get("sp",[])
-        if sp: st.dataframe(pd.DataFrame(sp), hide_index=True, width="stretch")
+        if sp: st.dataframe(pd.DataFrame(sp), hide_index=True, use_container_width=True)
         else:  st.caption("No data")
     with rc3:
         st.markdown("**Bullpen**")
         rp = det.get("rp",[])
-        if rp: st.dataframe(pd.DataFrame(rp), hide_index=True, width="stretch")
+        if rp: st.dataframe(pd.DataFrame(rp), hide_index=True, use_container_width=True)
         else:  st.caption("No data")
 
 def render_methodology_tab():
