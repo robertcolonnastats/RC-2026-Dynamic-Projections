@@ -33,7 +33,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Constants ────────────────────────────────────────────────────────────────
 SEASON_YEAR              = 2026
 OPENING_DAY              = "2026-03-27"
 WORLD_SERIES_END_APPROX  = "2026-11-01"
@@ -105,8 +104,8 @@ TIER_COLORS = {"hard_seller": "#d62728", "soft_seller": "#ff7f0e", "neutral": "#
 TIER_EMOJI = {"hard_seller": "🔴", "soft_seller": "🟠", "neutral": "⚪", "soft_buyer": "🟢", "hard_buyer": "🔵"}
 EST = ZoneInfo("America/New_York")
 
-# ── Cache Manager ─────────────────────────────────────────────────────────────
 def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
+
 def get_season_state() -> str:
     today = date.today()
     if today < date.fromisoformat(OPENING_DAY) or today > date.fromisoformat(WORLD_SERIES_END_APPROX): return "offseason"
@@ -147,7 +146,6 @@ def save_cache(payload: dict):
         with open(CACHE_FILE, "w") as f: json.dump(payload, f, default=str)
     except Exception as e: print(f"Cache write failed: {e}")
 
-# ── Data Fetching ─────────────────────────────────────────────────────────────
 def fetch_standings() -> pd.DataFrame:
     resp = requests.get(f"{MLB_API_BASE}/standings", params={"leagueId": "103,104", "season": SEASON_YEAR, "standingsTypes": "regularSeason", "hydrate": "team,record"}, timeout=15)
     resp.raise_for_status()
@@ -207,11 +205,8 @@ def compute_remaining_opponents(df: pd.DataFrame) -> dict[int, list[int]]:
         opps.setdefault(h, []).append(a); opps.setdefault(a, []).append(h)
     return opps
 
-# ── Projection Engine ─────────────────────────────────────────────────────────
 LEAGUE_AVG_RPG, LEAGUE_AVG_FIP, LEAGUE_AVG_WRC = 4.50, 4.10, 100.0
 LEAGUE_SP_IP_SHARE, LEAGUE_RP_IP_SHARE = 0.57, 0.43
-FG_TEAM_MAP = {"Angels": 108, "Diamondbacks": 109, "Orioles": 110, "Red Sox": 111, "Cubs": 112, "Reds": 113, "Guardians": 114, "Rockies": 115, "Tigers": 116, "Astros": 117, "Royals": 118, "Dodgers": 119, "Nationals": 120, "Mets": 121, "Athletics": 133, "Pirates": 134, "Padres": 135, "Mariners": 136, "Giants": 137, "Cardinals": 138, "Rays": 139, "Rangers": 140, "Blue Jays": 141, "Twins": 142, "Phillies": 143, "Braves": 144, "White Sox": 145, "Marlins": 146, "Yankees": 147, "Brewers": 158}
-FG_ABBR_MAP = {"LAA": 108, "ARI": 109, "BAL": 110, "BOS": 111, "CHC": 112, "CIN": 113, "CLE": 114, "COL": 115, "DET": 116, "HOU": 117, "KCR": 118, "LAD": 119, "WSN": 120, "NYM": 121, "OAK": 133, "PIT": 134, "SDP": 135, "SEA": 136, "SFG": 137, "STL": 138, "TBR": 139, "TEX": 140, "TOR": 141, "MIN": 142, "PHI": 143, "ATL": 144, "CHW": 145, "MIA": 146, "NYY": 147, "MIL": 158, "KC": 118, "SD": 135, "SF": 137, "TB": 139, "WSH": 120, "CWS": 145}
 
 def _regressed_win_pct(rs_g, ra_g, gp):
     prior = 200
@@ -250,18 +245,18 @@ def _team_id_from_fg_row(row: pd.Series) -> int | None:
     for c in ["Team", "team", "Tm", "Abbr"]:
         if c in row.index:
             abbr = str(row[c]).strip().upper().replace(".", "")
-            if abbr in FG_ABBR_MAP: return FG_ABBR_MAP[abbr]
-    for c in ["TeamName", "Team Name"]:
-        if c in row.index:
-            for k,v in FG_TEAM_MAP.items():
-                if k.lower() in str(row[c]).lower(): return v
+            if abbr in {"LAA": 108, "ARI": 109, "BAL": 110, "BOS": 111, "CHC": 112, "CIN": 113, "CLE": 114, "COL": 115, "DET": 116, "HOU": 117, "KCR": 118, "LAD": 119, "WSN": 120, "NYM": 121, "OAK": 133, "PIT": 134, "SDP": 135, "SEA": 136, "SFG": 137, "STL": 138, "TBR": 139, "TEX": 140, "TOR": 141, "MIN": 142, "PHI": 143, "ATL": 144, "CHW": 145, "MIA": 146, "NYY": 147, "MIL": 158, "KC": 118, "SD": 135, "SF": 137, "TB": 139, "WSH": 120, "CWS": 145}: 
+                return {"LAA": 108, "ARI": 109, "BAL": 110, "BOS": 111, "CHC": 112, "CIN": 113, "CLE": 114, "COL": 115, "DET": 116, "HOU": 117, "KCR": 118, "LAD": 119, "WSN": 120, "NYM": 121, "OAK": 133, "PIT": 134, "SDP": 135, "SEA": 136, "SFG": 137, "STL": 138, "TBR": 139, "TEX": 140, "TOR": 141, "MIN": 142, "PHI": 143, "ATL": 144, "CHW": 145, "MIA": 146, "NYY": 147, "MIL": 158}[abbr]
     return None
 
 def _build_fg_dc_projections(bat_df, pit_df):
     all_ids = list(TEAM_INFO.keys())
     detail = {t: {"batters":[], "sp":[], "rp":[]} for t in all_ids}
     tw, ts, tr = {}, {}, {}
-    wrc_c, pa_c, nm_c, war_c = next((c for c in bat_df.columns if c in ["wRC+", "wrc+", "WRC+"]), None), next((c for c in bat_df.columns if c in ["PA", "pa"]), None), next((c for c in bat_df.columns if c in ["PlayerName", "Name"]), None), next((c for c in bat_df.columns if c in ["WAR", "war"]), None)
+    wrc_c = next((c for c in bat_df.columns if c in ["wRC+", "wrc+", "WRC+"]), None)
+    pa_c = next((c for c in bat_df.columns if c in ["PA", "pa"]), None)
+    nm_c = next((c for c in bat_df.columns if c in ["PlayerName", "Name"]), None)
+    war_c = next((c for c in bat_df.columns if c in ["WAR", "war"]), None)
     if wrc_c and pa_c:
         bat_df["_tid"] = bat_df.apply(_team_id_from_fg_row, axis=1).dropna().astype(int)
         bat_df[wrc_c] = pd.to_numeric(bat_df[wrc_c], errors="coerce").fillna(100)
@@ -272,7 +267,12 @@ def _build_fg_dc_projections(bat_df, pit_df):
             tw[t] = float(np.average(sub[wrc_c], weights=sub[pa_c].clip(1)))
             for _,p in sub.nlargest(9, pa_c).iterrows():
                 detail[t]["batters"].append({"name": str(p.get(nm_c,"?")), "pa": int(p[pa_c]), "wrc_plus": round(float(p[wrc_c]),1), "war": round(float(p[war_c]),1) if war_c and pd.notna(p.get(war_c)) else None})
-    ip_c, gs_c, fip_c, era_c, pn_c, pw_c = next((c for c in pit_df.columns if c in ["IP", "ip"]), None), next((c for c in pit_df.columns if c in ["GS", "gs"]), None), next((c for c in pit_df.columns if c in ["FIP", "fip"]), None), next((c for c in pit_df.columns if c in ["ERA", "era"]), None), next((c for c in pit_df.columns if c in ["PlayerName", "Name"]), None), next((c for c in pit_df.columns if c in ["WAR", "war"]), None)
+    ip_c = next((c for c in pit_df.columns if c in ["IP", "ip"]), None)
+    gs_c = next((c for c in pit_df.columns if c in ["GS", "gs"]), None)
+    fip_c = next((c for c in pit_df.columns if c in ["FIP", "fip"]), None)
+    era_c = next((c for c in pit_df.columns if c in ["ERA", "era"]), None)
+    pn_c = next((c for c in pit_df.columns if c in ["PlayerName", "Name"]), None)
+    pw_c = next((c for c in pit_df.columns if c in ["WAR", "war"]), None)
     if ip_c and fip_c:
         pit_df["_tid"] = pit_df.apply(_team_id_from_fg_row, axis=1).dropna().astype(int)
         pit_df[ip_c] = pd.to_numeric(pit_df[ip_c], errors="coerce").fillna(0)
@@ -332,7 +332,6 @@ def fetch_team_projections(standings_df=None):
     df["proj_source"] = "League Average"
     return df, detail
 
-# ── Injury Data ───────────────────────────────────────────────────────────────
 POSITION_WAR_PROXY = {"C": 2.5, "1B": 1.8, "2B": 2.5, "3B": 2.8, "SS": 3.2, "LF": 2.0, "CF": 2.8, "RF": 2.2, "DH": 1.5, "SP": 3.0, "RP": 0.8, "P": 2.0}
 DEADLINE = date.fromisoformat(TRADE_DEADLINE)
 
@@ -376,7 +375,6 @@ def fetch_all_team_injuries(team_ids):
             return {futs[f]: f.result() for f in cf.as_completed(futs, timeout=15)}
     except: return {t: 0.0 for t in team_ids}
 
-# ── Engine ────────────────────────────────────────────────────────────────────
 def pythag(rs, ra):
     if rs<=0 or ra<=0: return 0.5
     return rs**PYTHAG_EXPONENT / (rs**PYTHAG_EXPONENT + ra**PYTHAG_EXPONENT)
@@ -515,24 +513,36 @@ def run_simulation(df, sched):
     aw = ws(ar, adj); bw = ws(br, base)
     return {"division_odds": {t: float(ad[i]) for i,t in enumerate(tids)}, "playoff_odds": {t: float(ap[i]) for i,t in enumerate(tids)}, "ws_odds": {t: float(aw[i]) for i,t in enumerate(tids)}, "proj_wins": {t: float(ar.mean(0)[i]) for i,t in enumerate(tids)}, "proj_wins_std": {t: float(ar.std(0)[i]) for i,t in enumerate(tids)}, "pre_deadline_division_odds": {t: float(bd[i]) for i,t in enumerate(tids)}, "pre_deadline_playoff_odds": {t: float(bp[i]) for i,t in enumerate(tids)}, "pre_deadline_ws_odds": {t: float(bw[i]) for i,t in enumerate(tids)}}
 
-# ── UI Tabs ───────────────────────────────────────────────────────────────────
-def render_projections_tab(df, sim):
+def render_projections_tab(master_df, sim_results):
     st.markdown("## 2026 MLB Season Projections")
-    src = df["proj_source"].iloc[0] if "proj_source" in df.columns else "Unknown"
+    src = master_df["proj_source"].iloc[0] if "proj_source" in master_df.columns else "Unknown"
     st.caption(f"Updated daily at midnight EST · 10,000-sim Monte Carlo · Source: {src}")
     rows = []
-    for _,r in df.iterrows():
-        rows.append({"Team": r["abbr"], "W": r["wins"], "L": r["losses"], "Win%": f"{r['win_pct']:.3f}", "Pythag%": f"{r['pythag_win_pct']:.3f}", "GB(WC)": f"{r['wc_games_back']:.1f}" if r["wc_games_back"]>0 else "—", "Proj W": round(sim["proj_wins"].get(r["team_id"], r["wins"]), 1), "Proj L": round(162-sim["proj_wins"].get(r["team_id"], r["wins"]), 1), "Proj Rec": f"{int(round(sim['proj_wins'].get(r['team_id'], r['wins'])))}-{int(round(162-sim['proj_wins'].get(r['team_id'], r['wins'])))}", "Div%": f"{sim['division_odds'].get(r["team_id'],0):.1%}", "Playoff%": f"{sim['playoff_odds'].get(r["team_id'],0):.1%}", "WS%": f"{sim['ws_odds'].get(r["team_id'],0):.2%}", "Status": r.get("tier_label","Neutral"), "tier": r.get("tier","neutral"), "SoS": r.get("sos_label","—")})
+    for _, r in master_df.iterrows():
+        tid = r["team_id"]
+        rows.append({
+            "Team": r["abbr"], "W": r["wins"], "L": r["losses"],
+            "Win%": f"{r['win_pct']:.3f}", "Pythag%": f"{r['pythag_win_pct']:.3f}",
+            "GB(WC)": f"{r['wc_games_back']:.1f}" if r["wc_games_back"]>0 else "—",
+            "Proj W": round(sim_results["proj_wins"].get(tid, r["wins"]), 1),
+            "Proj L": round(162 - sim_results["proj_wins"].get(tid, r["wins"]), 1),
+            "Proj Rec": f"{int(round(sim_results['proj_wins'].get(tid, r['wins'])))}-{int(round(162 - sim_results['proj_wins'].get(tid, r['wins'])))}",
+            "Div%": f"{sim_results['division_odds'].get(tid, 0):.1%}",
+            "Playoff%": f"{sim_results['playoff_odds'].get(tid, 0):.1%}",
+            "WS%": f"{sim_results['ws_odds'].get(tid, 0):.2%}",
+            "Status": r.get("tier_label", "Neutral"), "tier": r.get("tier", "neutral"),
+            "SoS": r.get("sos_label", "—")
+        })
     disp = pd.DataFrame(rows)
     c1, c2 = st.columns(2)
     lf = c1.radio("League", ["All","AL","NL"], horizontal=True, key="proj_league")
-    if lf!="All": disp = disp[disp["Team"].isin([r["abbr"] for _,r in df[df["league"]==lf].iterrows()])]
+    if lf!="All": disp = disp[disp["Team"].isin([r["abbr"] for _,r in master_df[master_df["league"]==lf].iterrows()])]
     alld = sorted(disp["Status"].unique())
     dfilt = c2.selectbox("Division", ["All Divisions"] + alld, key="proj_div")
     if dfilt!="All Divisions": disp = disp[disp["Status"]==dfilt]
     st.markdown("---")
-    for div in sorted(df["division"].unique()):
-        sub = disp[disp["Team"].isin([r["abbr"] for _,r in df[df["division"]==div].iterrows()])].sort_values("Proj W", ascending=False)
+    for div in sorted(master_df["division"].unique()):
+        sub = disp[disp["Team"].isin([r["abbr"] for _,r in master_df[master_df["division"]==div].iterrows()])].sort_values("Proj W", ascending=False)
         st.markdown(f"### {div}")
         sub["Status"] = sub.apply(lambda r: f"{TIER_EMOJI.get(r['tier'],'⚪')} {r['Status']}", axis=1)
         st.dataframe(sub[["Team","W","L","Win%","Pythag%","GB(WC)","Proj Rec","Div%","Playoff%","WS%","Status","SoS"]], width="stretch", hide_index=True)
@@ -540,7 +550,7 @@ def render_projections_tab(df, sim):
     cols = st.columns(5)
     for c, (e,l,d) in zip(cols, [("🔴","Hard Seller","−12%"), ("🟠","Soft Seller","−6%"), ("⚪","Neutral","0%"), ("🟢","Soft Buyer","+4%"), ("🔵","Hard Buyer","+7%")]): c.markdown(f"**{e} {l}**\n{d} win adj")
 
-def render_deadline_tab(df, sim):
+def render_deadline_tab(master_df, sim_results):
     st.markdown("## Trade Deadline Impact")
     state = get_season_state()
     ramp = get_deadline_ramp_factor()
@@ -548,9 +558,9 @@ def render_deadline_tab(df, sim):
     elif state=="deadline_ramp": st.warning(f"📅 Ramp is **{int(ramp*100)}% active**.")
     else: st.success("✅ Deadline passed. Locked.")
     rows = []
-    for _,r in df.iterrows():
+    for _,r in master_df.iterrows():
         tid = r["team_id"]
-        rows.append({"team_id": tid, "Team": r["abbr"], "tier": r.get("tier","neutral"), "Status": r.get("tier_label","Neutral"), "Win Adj": f"{r.get('ramped_adj',0):+.1%}", "Pre PO": sim.get("pre_deadline_playoff_odds",{}).get(tid,0), "Post PO": sim.get("playoff_odds",{}).get(tid,0), "Pre WS": sim.get("pre_deadline_ws_odds",{}).get(tid,0), "Post WS": sim.get("ws_odds",{}).get(tid,0), "Pre Div": sim.get("pre_deadline_division_odds",{}).get(tid,0), "Post Div": sim.get("division_odds",{}).get(tid,0)})
+        rows.append({"team_id": tid, "Team": r["abbr"], "tier": r.get("tier","neutral"), "Status": r.get("tier_label","Neutral"), "Win Adj": f"{r.get('ramped_adj',0):+.1%}", "Pre PO": sim_results.get("pre_deadline_playoff_odds",{}).get(tid,0), "Post PO": sim_results.get("playoff_odds",{}).get(tid,0), "Pre WS": sim_results.get("pre_deadline_ws_odds",{}).get(tid,0), "Post WS": sim_results.get("ws_odds",{}).get(tid,0), "Pre Div": sim_results.get("pre_deadline_division_odds",{}).get(tid,0), "Post Div": sim_results.get("division_odds",{}).get(tid,0)})
     comp = pd.DataFrame(rows)
     comp["PO Delta"] = comp["Post PO"] - comp["Pre PO"]
     comp["WS Delta"] = comp["Post WS"] - comp["Pre WS"]
@@ -566,25 +576,25 @@ def render_deadline_tab(df, sim):
     disp["PO Δ"] = (comp["PO Delta"]*100).round(1).apply(lambda v:f"{v:+.1f}pp")
     st.dataframe(disp, width="stretch", hide_index=True)
 
-def render_team_tab(df, sim):
+def render_team_tab(master_df, sim_results):
     st.markdown("## Team Detail")
-    opts = sorted([(r["name"], r["team_id"]) for _,r in df.iterrows()])
+    opts = sorted([(r["name"], r["team_id"]) for _,r in master_df.iterrows()])
     if "selected_team_idx" not in st.session_state: st.session_state.selected_team_idx = 0
     sel = st.selectbox("Select a team", [o[0] for o in opts], index=st.session_state.selected_team_idx, key="team_sel")
     st.session_state.selected_team_idx = [o[0] for o in opts].index(sel)
     tid = next(o[1] for o in opts if o[0]==sel)
-    row = df[df["team_id"]==tid].iloc[0]
+    row = master_df[master_df["team_id"]==tid].iloc[0]
     c1, c2, c3 = st.columns([2,1,1])
     c1.markdown(f"## {row['name']} ({row['abbr']})\n{row['division']} · {TIER_EMOJI.get(row.get('tier','neutral'),'⚪')} **{row.get('tier_label','Neutral')}**")
     c2.metric("Record", f"{row['wins']}–{row['losses']}")
     c3.metric("Win%", f"{row['win_pct']:.3f}")
     st.markdown("---")
     m1, m2, m3, m4, m5 = st.columns(5)
-    pw = sim["proj_wins"].get(tid, row["wins"])
-    m1.metric("Proj Wins", f"{pw:.1f}", f"±{sim['proj_wins_std'].get(tid,0):.1f}")
-    m2.metric("Div%", f"{sim['division_odds'].get(tid,0):.1%}")
-    m3.metric("Playoff%", f"{sim['playoff_odds'].get(tid,0):.1%}")
-    m4.metric("WS%", f"{sim['ws_odds'].get(tid,0):.2%}")
+    pw = sim_results["proj_wins"].get(tid, row["wins"])
+    m1.metric("Proj Wins", f"{pw:.1f}", f"±{sim_results['proj_wins_std'].get(tid,0):.1f}")
+    m2.metric("Div%", f"{sim_results['division_odds'].get(tid,0):.1%}")
+    m3.metric("Playoff%", f"{sim_results['playoff_odds'].get(tid,0):.1%}")
+    m4.metric("WS%", f"{sim_results['ws_odds'].get(tid,0):.2%}")
     m5.metric("SoS", row.get("sos_label","—"))
     st.markdown("---")
     d1, d2 = st.columns(2)
@@ -615,9 +625,9 @@ def render_team_tab(df, sim):
 def render_methodology_tab():
     st.markdown("## Methodology")
     st.caption(f"Data last updated: {get_last_updated()}")
-    st.markdown("""This model was built around a core insight missing from most public projection systems: teams that sell at the trade deadline get meaningfully worse after July 31.""")
+    st.markdown("This model was built around a core insight missing from most public projection systems: teams that sell at the trade deadline get meaningfully worse after July 31.")
     with st.expander("📊 Overview & Philosophy", expanded=True):
-        st.markdown("""Most projection systems generate a rest-of-season win% and simulate from there, assuming today's roster is August's roster. For sellers that's wrong. This model builds true-talent estimates, identifies likely buyers and sellers algorithmically, adjusts win rates post-deadline, ramps those adjustments gradually across July, and runs 10,000 game-level simulations where every win has a corresponding loss — zero-sum guaranteed.""")
+        st.markdown("Most projection systems generate a rest-of-season win% and simulate from there, assuming today's roster is August's roster. For sellers that's wrong. This model builds true-talent estimates, identifies likely buyers and sellers algorithmically, adjusts win rates post-deadline, ramps those adjustments gradually across July, and runs 10,000 game-level simulations where every win has a corresponding loss — zero-sum guaranteed.")
     with st.expander("📡 Data Sources"):
         st.markdown("MLB Stats API — standings, schedule, runs scored/allowed (free, real-time, official)\nFanGraphs Depth Charts / Steamer / ZiPS via pybaseball — fallback chain ensures data availability\nRefreshes automatically at midnight EST.")
     with st.expander("🔮 Team Projections"):
@@ -632,7 +642,6 @@ def render_methodology_tab():
     with st.expander("⚠️ Limitations"):
         st.markdown("No real-time trade parser — classification updates via standings, not transaction wire\nInjuries not modeled dynamically in fallback\nPlayoff bracket is simplified\nHome field advantage not modeled\nProspects received in trades are treated as replacement level")
 
-# ── Main ──────────────────────────────────────────────────────────────────────
 def load_all_data():
     cached = load_cache()
     if cached and cached.get("master") and cached.get("sim_results"):
@@ -664,22 +673,20 @@ def load_all_data():
     return master, sim, sched
 
 def main():
-    # Header with logo
+    # Header with logo and disclaimer
     col_logo, col_title = st.columns([1, 10])
     with col_logo:
-        st.image("logo.png", width=60)  # Place your logo.png in the same directory
+        try: st.image("logo.png", width=60)
+        except: st.markdown("⚾")
     with col_title:
         st.title(f"⚾ MLB {SEASON_YEAR} Projections")
     
-    # Disclaimer
     st.markdown("""
     <div class="disclaimer">
     <strong>⚠️ Daily Update Notice:</strong> This website updates automatically each day between midnight and 12:30 AM EST. 
     During this window, data may be temporarily unavailable or show mixed states. Please check back after 12:30 AM for complete updated projections.
     </div>
     """, unsafe_allow_html=True)
-    
-    st.caption(f"Source: {m['proj_source'].iloc[0] if 'm' in locals() else 'Loading...'} · Updated: {get_last_updated()}")
     
     if "master_df" not in st.session_state or not st.session_state.get("data_loaded"):
         try:
@@ -694,6 +701,7 @@ def main():
         m, s, sch = st.session_state["master_df"], st.session_state["sim_results"], st.session_state["schedule_df"]
     if m.empty: st.warning("No data"); st.stop()
     
+    st.caption(f"Source: {m['proj_source'].iloc[0]} · Updated: {get_last_updated()}")
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Projections", "🔄 Deadline Impact", "🔍 Team Detail", "📖 Methodology"])
     with tab1: render_projections_tab(m, s)
     with tab2: render_deadline_tab(m, s)
