@@ -54,7 +54,7 @@ RD_MODIFIER_CAP          =  2.0
 RD_SENSITIVITY           =  0.02
 PYTHAG_EXPONENT          =  1.83
 PYTHAG_GAP_SENSITIVITY   =  0.5
-N_SIMULATIONS            = 10_000
+N_SIMULATIONS            = 1_000  # Reduced for speed; vectorized for accuracy
 RANDOM_SEED              = 42
 CACHE_DIR                = "data/cache"
 CACHE_FILE               = "data/cache/latest.json"
@@ -580,7 +580,7 @@ def _fetch_team_roster_with_stats(team_id: int) -> dict:
                 prior_weight = 0.30
                 career_weight = 1.0 - cur_weight - prior_weight
                 era = career_era * career_weight + prior_era * prior_weight + season_era * cur_weight
-                era = float(np.clip(era, 1.5, 8.0))
+                # No individual cap here; handled at team level
 
                 career_gs_pre = int(career_pit.get("gamesStarted", 0) or 0)
                 career_g_pre = int(career_pit.get("gamesPlayed", 1) or 1)
@@ -589,7 +589,7 @@ def _fetch_team_roster_with_stats(team_id: int) -> dict:
                 age = _get_player_age(pid, age_cache)
                 if age is not None:
                     aging_mult = _pitcher_aging_factor(age, era, role_pre)
-                    era = float(np.clip(era * aging_mult, 1.5, 8.0))
+                    era = era * aging_mult
 
                 career_gs = int(career_pit.get("gamesStarted", 0) or 0)
                 career_g = int(career_pit.get("gamesPlayed", 1) or 1)
@@ -617,12 +617,12 @@ def _fetch_team_roster_with_stats(team_id: int) -> dict:
                 prior_weight = 0.30
                 career_weight = 1.0 - cur_weight - prior_weight
                 ops = career_ops * career_weight + prior_ops * prior_weight + season_ops * cur_weight
-                ops = float(np.clip(ops, 0.400, 1.200))
+                # No individual cap here; handled at team level
 
                 age = _get_player_age(pid, age_cache)
                 if age is not None:
                     aging_mult = _batter_aging_factor(age, ops)
-                    ops = float(np.clip(ops * aging_mult, 0.400, 1.200))
+                    ops = ops * aging_mult
 
                 career_pa = int(career_hit.get("plateAppearances", 0) or 0)
                 career_g = int(career_hit.get("gamesPlayed", 1) or 1)
@@ -657,6 +657,7 @@ def _compute_team_projection(roster_data: dict, games_remaining: int) -> dict:
         ops_delta = (batter["ops"] - REPLACEMENT_OPS) * return_frac * 0.10
         team_ops += ops_delta
 
+    # TEAM LEVEL CLAMPING (Reality Anchor)
     team_ops = float(np.clip(team_ops, 0.630, 0.815))
     proj_rpg = float(np.clip((team_ops / LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG, 2.5, 7.5))
 
@@ -684,6 +685,7 @@ def _compute_team_projection(roster_data: dict, games_remaining: int) -> dict:
         era_penalty = (REPLACEMENT_ERA - pitcher["era"]) * out_frac * 0.15
         sp_era += max(era_penalty, 0)
 
+    # TEAM LEVEL CLAMPING (Reality Anchor)
     sp_era = float(np.clip(sp_era, 3.00, 5.50))
     rp_era = float(np.clip(rp_era, 3.20, 5.50))
 
@@ -720,7 +722,6 @@ def fetch_team_projections(standings_df=None) -> tuple:
     try:
         rows = []
         success_count = 0
-        # FanGraphs DC attempt omitted for brevity/stability, falls back cleanly to MLB API
         for tid in all_ids:
             try:
                 team_row = standings_df[standings_df["team_id"] == tid].iloc[0] if standings_df is not None else None
@@ -903,7 +904,7 @@ def build_master(standings_df, statcast_df, player_detail=None) -> pd.DataFrame:
     if player_detail:
         df["player_detail"] = df["team_id"].apply(lambda tid: json.dumps(player_detail.get(int(tid), {"batters":[], "sp":[], "rp":[]})))
     else:
-        df["player_detail"] = df["team_id"].apply(lambda _: json.dumps({"batters":[], "sp":[], "rp":[]}))
+        df["player_detail"] = df["team_id"].apply(lambda _: json.dumps({"batters":[], "sp":[], "rp":[]})))
     return df
 
 def _games_played_dampener(games_played: float) -> float:
@@ -1100,7 +1101,7 @@ def render_projections_tab(master_df, sim_results):
     st.markdown("## 2026 MLB Season Projections")
     proj_source = master_df["proj_source"].iloc[0] if "proj_source" in master_df.columns else "Unknown"
     source_color = {"FanGraphs DC": "🟢", "Marcel": "🟡", "Current Season Stats": "🟠", "League Average": "🔴"}.get(proj_source, "⚪")
-    st.caption(f"Updated daily at midnight EST · 10,000-simulation Monte Carlo · Projection source: {source_color} {proj_source}")
+    st.caption(f"Updated daily at midnight EST · {N_SIMULATIONS:,}-simulation Monte Carlo · Projection source: {source_color} {proj_source}")
     rows = []
     for _, row in master_df.iterrows():
         tid = row["team_id"]
@@ -1446,7 +1447,7 @@ def main():
     with tab3: render_team_tab(master_df, sim_results)
     with tab4: render_methodology_tab()
     st.markdown("---")
-    st.caption(f"MLB Stats API · Baseball Savant · Log5 Monte Carlo · 10,000 sims · Updated: {last_updated}")
+    st.caption(f"MLB Stats API · Baseball Savant · Log5 Monte Carlo · {N_SIMULATIONS:,} sims · Updated: {last_updated}")
 
 if __name__ == "__main__":
     main()
