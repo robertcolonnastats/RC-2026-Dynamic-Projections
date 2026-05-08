@@ -36,8 +36,8 @@ SEASON_YEAR = 2026
 OPENING_DAY = "2026-03-27"
 WORLD_SERIES_END_APPROX = "2026-11-01"
 TRADE_DEADLINE = "2026-07-31"
-DEADLINE_RAMP_START = "2026-05-20"  # Dynamic ramp begins May 20
-SOS_SENSITIVITY = 0.15              # Win% shift per .100 deviation from .500 SOS
+DEADLINE_RAMP_START = "2026-05-20"
+SOS_SENSITIVITY = 0.15
 HARD_SELLER_GB = 8.0
 SOFT_SELLER_GB = 4.0
 NEUTRAL_BAND = 3.0
@@ -53,10 +53,17 @@ PYTHAG_EXPONENT = 1.83
 PYTHAG_GAP_SENSITIVITY = 0.5
 N_SIMULATIONS = 1_000
 RANDOM_SEED = 42
-CACHE_DIR = "/tmp/rc_mlb_2026_v13"
-CACHE_FILE = "/tmp/rc_mlb_2026_v13/latest.json"
-CACHE_VERSION = "v13-full-patch"
+CACHE_DIR = "/tmp/rc_mlb_2026_v14"
+CACHE_FILE = "/tmp/rc_mlb_2026_v14/latest.json"
+CACHE_VERSION = "v14-talent-sliding"
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
+
+# Sample-size weighting parameters
+MIN_GAMES_FOR_WEIGHT = 20   # Below this, current record gets near-zero weight
+MAX_GAMES_FOR_WEIGHT = 100  # Above this, current record gets full weight
+TALENT_WEIGHT_START = 0.75  # Start with 75% weight on talent projections
+TALENT_WEIGHT_FADE = 0.20   # Fade talent weight by this much over season
+MIN_TALENT_WEIGHT = 0.50    # Never let talent weight drop below this
 
 TEAM_INFO = {
     108: ("Los Angeles Angels", "LAA", "AL West", "AL"),
@@ -265,6 +272,7 @@ LEAGUE_AVG_RPG = 4.50; LEAGUE_AVG_FIP = 4.10; LEAGUE_AVG_OPS = 0.730; LEAGUE_AVG
 LEAGUE_AVG_XWOBA = 0.315; LEAGUE_AVG_XERA = 4.10; LEAGUE_AVG_WRC = 100.0
 LEAGUE_SP_IP_SHARE = 0.57; LEAGUE_RP_IP_SHARE = 0.43; TYPICAL_TEAM_WARP = 35.0
 PA_FULL_WEIGHT = 300; IP_FULL_WEIGHT = 100
+MAX_SINGLE_PLAYER_WARP_IMPACT = 0.15  # Cap how much one player can move team projection
 
 PECOTA_TEAM_MAP = {"ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CHW":145, "CIN":113,
     "CLE":114, "COL":115, "DET":116, "HOU":117, "KC":118, "LAA":108, "LAD":119, "MIA":146,
@@ -360,7 +368,9 @@ def _fetch_il_warp(team_id, ph, pp):
         if r.status_code != 200: return 0.0
         il_ids = {int(e["person"]["id"]) for e in r.json().get("roster",[]) if e.get("status",{}).get("code"," ") in ("IL10","IL60","DL10","DL15","DL60","7DL","10DL","60DL")}
         if not il_ids: return 0.0
-        return round(float(ph[ph["mlbid"].isin(il_ids)]["warp"].clip(lower=0).sum() + pp[pp["mlbid"].isin(il_ids)]["warp"].clip(lower=0).sum()), 2)
+        total_warp = ph[ph["mlbid"].isin(il_ids)]["warp"].clip(lower=0).sum() + pp[pp["mlbid"].isin(il_ids)]["warp"].clip(lower=0).sum()
+        # Cap single-player impact
+        return round(float(min(total_warp, MAX_SINGLE_PLAYER_WARP_IMPACT * TYPICAL_TEAM_WARP)), 2)
     except: return 0.0
 
 def fetch_team_projections(standings_df=None):
@@ -392,10 +402,21 @@ def fetch_team_projections(standings_df=None):
     rows = []
     for tid in all_ids:
         lineup = ph[ph["team_id"]==tid].sort_values("pa",ascending=False).head(9)
-        pecota_ops = float(np.average(lineup["ops"].fillna(LEAGUE_AVG_OPS), weights=lineup["pa"].clip(1))) if not lineup.empty and lineup["pa"].sum() >0 else LEAGUE_AVG_OPS
+        # Cap single-player influence on team OPS
+        if not lineup.empty:
+            top_warp = lineup["warp"].max()
+            if top_warp > 6.0:  # Elite player
+                # Reduce their weight in team average
+                weights = lineup["pa"].clip(1)
+                weights = weights * (1 - 0.3 * (lineup["warp"] / top_warp).clip(0, 1))
+                pecota_ops = float(np.average(lineup["ops"].fillna(LEAGUE_AVG_OPS), weights=weights))
+            else:
+                pecota_ops = float(np.average(lineup["ops"].fillna(LEAGUE_AVG_OPS), weights=lineup["pa"].clip(1)))
+        else:
+            pecota_ops = LEAGUE_AVG_OPS
         pecota_ops = float(np.clip(pecota_ops, 0.620, 0.850))
         
-        # Dynamic regression sensitivity (INSIDE the loop, AFTER lineup is created)
+        # Dynamic regression sensitivity
         reg_sens = 0.15 if not lineup.empty and lineup["drc_plus"].mean() > 105 else 0.30
         
         cur_pa = float(team_pa.get(tid, 0))
@@ -413,6 +434,10 @@ def fetch_team_projections(standings_df=None):
         tp = pp[pp["team_id"]==tid]; sp = tp[tp["role"]=="SP"].sort_values("ip",ascending=False); rp = tp[tp["role"]=="RP"].sort_values("ip",ascending=False)
         def _era(df):
             if df.empty or df["ip"].sum()==0: return LEAGUE_AVG_ERA
+            # Cap single-pitcher influence
+            if not df.empty and df["warp"].max() > 4.0:
+                weights = df["ip"].clip(1) * (1 - 0.2 * (df["warp"] / df["warp"].max()).clip(0, 1))
+                return float(np.average((df["fip"].fillna(LEAGUE_AVG_FIP)*0.7+df["era"].fillna(LEAGUE_AVG_ERA)*0.3).clip(2,7.5), weights=weights))
             return float(np.average((df["fip"].fillna(LEAGUE_AVG_FIP)*0.7+df["era"].fillna(LEAGUE_AVG_ERA)*0.3).clip(2,7.5), weights=df["ip"].clip(1)))
         sp_pecota = float(np.clip(_era(sp), 2.80, 5.50)); rp_pecota = float(np.clip(_era(rp), 3.00, 5.50))
         cur_ip = float(team_ip.get(tid, 0)); w_cur_ip, w_pri_ip = _sc_weights(cur_ip, IP_FULL_WEIGHT)
@@ -485,6 +510,16 @@ def pythag(rs, ra):
     if rs <= 0 or ra <= 0: return 0.500
     return rs ** PYTHAG_EXPONENT / (rs ** PYTHAG_EXPONENT + ra ** PYTHAG_EXPONENT)
 
+def sample_weight(games_played, min_games=MIN_GAMES_FOR_WEIGHT, max_games=MAX_GAMES_FOR_WEIGHT):
+    """S-curve weight from 0 to 1 based on sample size"""
+    if games_played < min_games:
+        return 0.0
+    elif games_played >= max_games:
+        return 1.0
+    else:
+        progress = (games_played - min_games) / (max_games - min_games)
+        return 0.5 * (1 + np.tanh(3 * (progress - 0.5)))
+
 def build_master(standings_df, statcast_df, player_detail=None) -> pd.DataFrame:
     df = standings_df.copy()
     merge_cols = ["team_id", "proj_win_pct", "proj_runs_per_game", "proj_ra_per_game"]
@@ -495,16 +530,30 @@ def build_master(standings_df, statcast_df, player_detail=None) -> pd.DataFrame:
     df["pythag_win_pct"] = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
     gp = df["games_played"].clip(0, 162)
     proj_source = df["proj_source"].iloc[0] if "proj_source" in df.columns else "Unknown"
-    base_proj_w = (0.65 - (gp / 162.0) * 0.25).clip(0.40, 0.65) if proj_source in ("FanGraphs DC", "PECOTA+Statcast", "PECOTA 2026") else (0.55 - (gp / 162.0) * 0.15).clip(0.40, 0.55)
-    base_pyth_w = 1.0 - base_proj_w
+    
+    # ✅ SLIDING SCALE: Sample-size adjusted weights
+    sample_w = gp.apply(lambda g: sample_weight(g))
+    
+    # ✅ INCREASED TALENT WEIGHTING: Higher start, slower fade
+    if proj_source in ("FanGraphs DC", "PECOTA+Statcast", "PECOTA 2026"):
+        base_proj_w = (TALENT_WEIGHT_START - (gp / 162.0) * TALENT_WEIGHT_FADE).clip(MIN_TALENT_WEIGHT, TALENT_WEIGHT_START)
+    else:
+        base_proj_w = (0.60 - (gp / 162.0) * 0.15).clip(0.45, 0.60)
+    
+    # Blend projection weight with sample-size trust in current performance
+    proj_weight = base_proj_w + (1.0 - base_proj_w) * (1.0 - sample_w)
+    pythag_weight = (1.0 - base_proj_w) * sample_w
+    
+    # Injury adjustment still applies
     il_frac = (df["il_warp"] / TYPICAL_TEAM_WARP).clip(0.0, 0.50) if "il_warp" in df.columns else pd.Series(0.0, index=df.index)
-    adj_pyth_w = base_pyth_w * (1.0 - il_frac)
+    adj_pyth_w = pythag_weight * (1.0 - il_frac)
     adj_proj_w = 1.0 - adj_pyth_w
-    proj_weight = adj_proj_w; pythag_weight = adj_pyth_w
+    
     df["blended_win_pct"] = (df["proj_win_pct"]*adj_proj_w + df["pythag_win_pct"]*adj_pyth_w).clip(0.20, 0.80)
-    df["proj_weight_used"] = proj_weight.round(2) if hasattr(proj_weight, 'round') else proj_weight
-    df["pythag_weight_used"] = pythag_weight.round(2) if hasattr(pythag_weight, 'round') else pythag_weight
+    df["proj_weight_used"] = proj_weight.round(2)
+    df["pythag_weight_used"] = pythag_weight.round(2)
     df["games_remaining"] = (162 - df["games_played"]).clip(0, 162)
+    df["sample_weight"] = sample_w.round(2)  # For debugging/display
     return df
 
 def compute_buyer_seller(df: pd.DataFrame, injury_adjustments=None) -> pd.DataFrame:
@@ -650,7 +699,7 @@ def run_simulation(master_df, schedule_df):
 # ==============================================================================
 def render_projections_tab(mdf, sim):
     st.markdown("## 2026 MLB Season Projections")
-    st.caption(f"Updated daily · {N_SIMULATIONS:,}-sim Monte Carlo · SOS-Adjusted")
+    st.caption(f"Updated daily · {N_SIMULATIONS:,}-sim Monte Carlo · SOS-Adjusted · Sliding Scale Weighting")
     rows = []
     for _, r in mdf.iterrows():
         t = r["team_id"]
@@ -714,6 +763,7 @@ def render_team_tab(mdf, sim):
         st.metric("Run Differential", f"{int(r['run_differential']):+d}")
         st.metric("Pythag Win %", f"{r.get('pythag_win_pct',0):.3f}")
         st.metric("Blended Win %", f"{r.get('blended_win_pct',0):.3f}")
+        st.metric("Sample Weight", f"{r.get('sample_weight',0):.2f}")
     with c2:
         st.metric("Proj RPG / RAPG", f"{r.get('proj_runs_per_game',0):.2f} / {r.get('proj_ra_per_game',0):.2f}")
         st.metric("IL WARP Impact", f"{r.get('il_warp',0):.1f}")
@@ -737,11 +787,19 @@ def render_methodology_tab():
         - **IL Tracking**: Maps players to position-specific WARP proxies, calculating pre/post-deadline impact.
         """)
     with st.expander("🔮 Projection Engine"):
-        st.markdown("""
+        st.markdown(f"""
         1. **Team OPS/ERA Blend**: PECOTA baseline regressed with Statcast xwOBA/xERA using sample-weighted formulas. High-upside lineups (drc+ > 105) use lighter regression (0.15 vs 0.30) to preserve upside.
-        2. **Pythagorean Expectation**: `Win% = RS^1.83 / (RS^1.83 + RA^1.83)` converted from projected runs.
-        3. **Dynamic Weighting**: Early season leans heavily on projections (~65%). Late season trusts actual results more (~40%).
-        4. **Injury Adjustment**: High IL WARP reduces trust in current record, shifting weight toward underlying projections.
+        2. **Single-Player Caps**: No single player can move team projection by more than {MAX_SINGLE_PLAYER_WARP_IMPACT*100:.0f}% of typical team WARP to prevent ace-driven inflation.
+        3. **Pythagorean Expectation**: `Win% = RS^1.83 / (RS^1.83 + RA^1.83)` converted from projected runs.
+        4. **Dynamic Weighting**: Early season leans heavily on projections (~{TALENT_WEIGHT_START*100:.0f}%). Late season trusts actual results more (~{MIN_TALENT_WEIGHT*100:.0f}% minimum talent weight).
+        5. **Injury Adjustment**: High IL WARP reduces trust in current record, shifting weight toward underlying projections.
+        """)
+    with st.expander("📈 Sliding Scale Sample Weighting"):
+        st.markdown(f"""
+        - **Current Record Weight**: Scales from 0% at <{MIN_GAMES_FOR_WEIGHT} games to 100% at >{MAX_GAMES_FOR_WEIGHT} games via smooth S-curve.
+        - **Pythag/Run Differential**: Same sample-size weighting applied—early noise is downweighted, late stability is upweighted.
+        - **Formula**: `weight = 0.5 * (1 + tanh(3 * ((gp - {MIN_GAMES_FOR_WEIGHT}) / ({MAX_GAMES_FOR_WEIGHT} - {MIN_GAMES_FOR_WEIGHT}) - 0.5)))`
+        - **Effect**: A team at 30 games gets ~15% weight on current performance; at 80 games gets ~85% weight.
         """)
     with st.expander("🔄 Continuous Buyer/Seller Logic & Dynamic Ramp"):
         st.markdown("""
@@ -763,8 +821,8 @@ def render_methodology_tab():
         """)
     with st.expander("⚙️ Key Constants"):
         st.dataframe(pd.DataFrame({
-            "Parameter": ["Pythag Exponent", "SOS Sensitivity", "Ramp Start", "Trade Deadline", "Simulations", "Luck Regression Factor", "Clamp Bounds"],
-            "Value": [PYTHAG_EXPONENT, SOS_SENSITIVITY, DEADLINE_RAMP_START, TRADE_DEADLINE, N_SIMULATIONS, 0.40, "Win% [0.20, 0.80]"]
+            "Parameter": ["Pythag Exponent", "SOS Sensitivity", "Ramp Start", "Trade Deadline", "Simulations", "Luck Regression Factor", "Min Games for Weight", "Max Games for Weight", "Talent Weight Start", "Min Talent Weight", "Clamp Bounds"],
+            "Value": [PYTHAG_EXPONENT, SOS_SENSITIVITY, DEADLINE_RAMP_START, TRADE_DEADLINE, N_SIMULATIONS, 0.40, MIN_GAMES_FOR_WEIGHT, MAX_GAMES_FOR_WEIGHT, f"{TALENT_WEIGHT_START:.2f}", f"{MIN_TALENT_WEIGHT:.2f}", "Win% [0.20, 0.80]"]
         }), hide_index=True)
 
 # ==============================================================================
