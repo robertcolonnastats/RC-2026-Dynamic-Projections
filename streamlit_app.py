@@ -420,7 +420,8 @@ def _pitcher_aging_factor(age: int, era: float, role: str = "SP") -> float:
             else: return 1.28
 
 def _get_player_age(player_id: int, age_cache: dict | None = None) -> int | None:
-    if age_cache and player_id in age_cache: return age_cache[player_id]
+    if age_cache and player_id in age_cache:
+        return age_cache[player_id]
     try:
         url = f"{MLB_API_BASE}/people/{player_id}"
         resp = requests.get(url, timeout=5)
@@ -457,9 +458,11 @@ def _fetch_team_player_stats(team_id: int, season: int) -> dict:
     for group in ["hitting", "pitching"]:
         try:
             url = f"{MLB_API_BASE}/teams/{team_id}/stats"
-            resp = requests.get(url, params={"stats": "season", "group": group, "season": season, "sportId": 1}, timeout=10)
+            params = {"stats": "season", "group": group, "season": season, "sportId": 1}
+            resp = requests.get(url, params=params, timeout=10)
             if resp.status_code != 200: continue
-            for stat_group in resp.json().get("stats", []):
+            data = resp.json()
+            for stat_group in data.get("stats", []):
                 for split in stat_group.get("splits", []):
                     player = split.get("player", {})
                     pid = player.get("id", 0)
@@ -474,7 +477,9 @@ def _fetch_career_stats_batch(player_ids: list[int]) -> dict:
     results = {}
     def fetch_one(pid):
         try:
-            resp = requests.get(f"{MLB_API_BASE}/people/{pid}/stats", params={"stats": "career", "group": "hitting,pitching"}, timeout=6)
+            url = f"{MLB_API_BASE}/people/{pid}/stats"
+            params = {"stats": "career", "group": "hitting,pitching"}
+            resp = requests.get(url, params=params, timeout=6)
             if resp.status_code != 200: return pid, {}
             data = resp.json()
             pdata = {"hitting": {}, "pitching": {}}
@@ -541,7 +546,9 @@ def _fetch_team_roster_with_stats(team_id: int) -> dict:
                 
                 role_pre = "SP" if int(stats["pitching_career"].get("gamesStarted", 0)) / max(int(stats["pitching_career"].get("gamesPlayed", 1)), 1) >= 0.4 else "RP"
                 age = _get_player_age(pid, age_cache)
-                if age: era *= _pitcher_aging_factor(age, era, role_pre)
+                if age:
+                    aging_mult = _pitcher_aging_factor(age, era, role_pre)
+                    era *= aging_mult # Removed individual clipping per instructions
                 
                 role = "SP" if int(stats["pitching_career"].get("gamesStarted", 0)) / max(int(stats["pitching_career"].get("gamesPlayed", 1)), 1) >= 0.4 else "RP"
                 entry = {"name": name, "era": era, "proj_ip": 170 if role == "SP" else 65, "role": role, "days_remaining": days_remaining}
@@ -557,7 +564,9 @@ def _fetch_team_roster_with_stats(team_id: int) -> dict:
                 ops = career_ops * (1.0 - cur_w - 0.30) + prior_ops * 0.30 + season_ops * cur_w
                 
                 age = _get_player_age(pid, age_cache)
-                if age: ops *= _batter_aging_factor(age, ops)
+                if age:
+                    aging_mult = _batter_aging_factor(age, ops)
+                    ops *= aging_mult # Removed individual clipping per instructions
                 
                 career_pa = int(stats["hitting_career"].get("plateAppearances", 0) or 0)
                 career_g = int(stats["hitting_career"].get("gamesPlayed", 1) or 1)
@@ -572,28 +581,49 @@ def _compute_team_projection(roster_data: dict, games_remaining: int) -> dict:
     gr = max(games_remaining, 1)
     active_batters = sorted(roster_data.get("active_batters", []), key=lambda x: x.get("proj_pa", 0), reverse=True)[:9]
     il_batters = roster_data.get("il_batters", [])
-    team_ops = sum(b["ops"] * b["proj_pa"] for b in active_batters) / max(sum(b["proj_pa"] for b in active_batters), 1) if active_batters else LEAGUE_AVG_OPS
+    
+    # Batting
+    if active_batters:
+        total_pa = sum(b["proj_pa"] for b in active_batters)
+        team_ops = sum(b["ops"] * b["proj_pa"] for b in active_batters) / max(total_pa, 1)
+    else:
+        team_ops = LEAGUE_AVG_OPS
 
     for batter in il_batters:
         days_out = min(batter.get("days_remaining", 20), gr)
         if gr - days_out > 0:
-            team_ops += (batter["ops"] - REPLACEMENT_OPS) * (gr - days_out) / gr * 0.10
+            return_frac = (gr - days_out) / gr
+            ops_delta = (batter["ops"] - REPLACEMENT_OPS) * return_frac * 0.10
+            team_ops += ops_delta
             
+    # TEAM LEVEL CLAMPING (Reality Anchor) - replaces individual clamping
     team_ops = float(np.clip(team_ops, 0.630, 0.815))
     proj_rpg = float(np.clip((team_ops / LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG, 2.5, 7.5))
 
+    # Pitching
     sp_active = [p for p in roster_data.get("active_pitchers", []) if p.get("role") == "SP"]
     rp_active = [p for p in roster_data.get("active_pitchers", []) if p.get("role") == "RP"]
-    sp_era = sum(p["era"] * p["proj_ip"] for p in sp_active) / max(sum(p["proj_ip"] for p in sp_active), 1) if sp_active else LEAGUE_AVG_ERA
-    rp_era = sum(p["era"] * p["proj_ip"] for p in rp_active) / max(sum(p["proj_ip"] for p in rp_active), 1) if rp_active else LEAGUE_AVG_ERA
+    
+    if sp_active:
+        total_sp_ip = sum(p["proj_ip"] for p in sp_active)
+        sp_era = sum(p["era"] * p["proj_ip"] for p in sp_active) / max(total_sp_ip, 1)
+    else: sp_era = LEAGUE_AVG_ERA
+
+    if rp_active:
+        total_rp_ip = sum(p["proj_ip"] for p in rp_active)
+        rp_era = sum(p["era"] * p["proj_ip"] for p in rp_active) / max(total_rp_ip, 1)
+    else: rp_era = LEAGUE_AVG_ERA
 
     for p in roster_data.get("il_pitchers", []):
         if p.get("role") == "SP":
             days_out = min(p.get("days_remaining", 30), gr)
-            if days_out > 0: sp_era += (REPLACEMENT_ERA - p["era"]) * (days_out / gr) * 0.15
+            if days_out > 0: 
+                sp_era += (REPLACEMENT_ERA - p["era"]) * (days_out / gr) * 0.15
 
+    # TEAM LEVEL CLAMPING (Reality Anchor) - replaces individual clamping
     sp_era = float(np.clip(sp_era, 3.00, 5.50))
     rp_era = float(np.clip(rp_era, 3.20, 5.50))
+
     proj_rapg = float(np.clip((sp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE + (rp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE, 2.5, 7.5))
     proj_wp = proj_rpg ** PYTHAG_EXPONENT / (proj_rpg ** PYTHAG_EXPONENT + proj_rapg ** PYTHAG_EXPONENT)
 
@@ -721,7 +751,7 @@ def build_master(standings_df, statcast_df, player_detail=None) -> pd.DataFrame:
     if player_detail:
         df["player_detail"] = df["team_id"].apply(lambda t: json.dumps(player_detail.get(int(t), {"batters":[], "sp":[], "rp":[]})))
     else:
-        df["player_detail"] = df["team_id"].apply(lambda _: json.dumps({"batters":[], "sp":[], "rp":[]}))
+        df["player_detail"] = df["team_id"].apply(lambda _: json.dumps({"batters":[], "sp":[], "rp":[]})))
     return df
 
 def compute_buyer_seller(df: pd.DataFrame, injury_adjustments=None) -> pd.DataFrame:
@@ -798,6 +828,7 @@ def run_simulation(master_df, schedule_df):
     ai = np.array([idx[x] for x in a])
     ng = len(h)
 
+    # ⚡ VECTORIZED SIMULATION (C-level accumulation)
     def sim(p):
         f = np.full((N_SIMULATIONS, n), init, dtype=np.float32)
         if ng == 0: return f
@@ -867,7 +898,9 @@ def render_projections_tab(mdf, sim):
     rows = []
     for _, r in mdf.iterrows():
         t = r["team_id"]
-        rows.append({"Team": r["abbr"], "W": int(r["wins"]), "L": int(r["losses"]), "Win%": f"{r['win_pct']:.3f}", "Pythag%": f"{r.get('pythag_win_pct',0):.3f}",
+        # Added missing League/Division columns to fix KeyError
+        rows.append({"Team": r["abbr"], "League": r["league"], "Division": r["division"],
+                     "W": int(r["wins"]), "L": int(r["losses"]), "Win%": f"{r['win_pct']:.3f}", "Pythag%": f"{r.get('pythag_win_pct',0):.3f}",
                      "GB (WC)": f"{r['wc_games_back']:.1f}" if r["wc_games_back"]>0 else "—", "Proj Rec": f"{int(round(sim['proj_wins'].get(t,r['wins'])))}-{int(round(162-sim['proj_wins'].get(t,r['wins'])))}",
                      "Div%": f"{sim['division_odds'].get(t,0):.1%}", "Playoff%": f"{sim['playoff_odds'].get(t,0):.1%}", "WS%": f"{sim['ws_odds'].get(t,0):.2%}",
                      "Status": r.get("tier_label","Neutral"), "tier": r.get("tier","neutral"), "SoS": r.get("sos_label","—")})
@@ -875,7 +908,10 @@ def render_projections_tab(mdf, sim):
     c1,c2 = st.columns(2)
     lf = c1.radio("League", ["All","AL","NL"], horizontal=True)
     df = df[df["League"]==lf] if lf!="All" else df
-    df = df[df["Division"]==c2.selectbox("Division", ["All Divisions"]+sorted(df["Division"].unique()))] if c2.selectbox("Division", ["All Divisions"]+sorted(df["Division"].unique()))!="All Divisions" else df
+    divs = ["All Divisions"]+sorted(df["Division"].unique())
+    sel_div = c2.selectbox("Division", divs)
+    df = df[df["Division"]==sel_div] if sel_div!="All Divisions" else df
+    
     st.markdown("---")
     for d in sorted(df["Division"].unique()):
         dd = df[df["Division"]==d].sort_values("Proj Rec", ascending=False)
@@ -929,7 +965,7 @@ def render_team_tab(mdf, sim):
 
 def render_methodology_tab():
     st.markdown("## Methodology")
-    st.caption(f"Last updated: {get_last_updated()}")
+    st.caption(f"Data last updated: {get_last_updated()}")
     st.markdown("This model identifies likely buyers and sellers algorithmically, adjusts win rates post-deadline, and runs Monte Carlo simulations.")
     with st.expander("📊 Overview"): st.markdown("Most systems assume today's roster is August's roster. For sellers that's wrong. This model adjusts for the deadline ramp.")
     with st.expander("🔮 Projections"): st.markdown(f"Weighted blend of current/prior/career stats. OPS clamped to .630–.815, ERA to 3.00–5.50 at team level.")
@@ -986,11 +1022,12 @@ def main():
     
     m = st.session_state["master_df"]; s = st.session_state["sim_results"]; sc = st.session_state["schedule_df"]
     if m.empty: st.warning("No data"); st.stop()
-    st.tabs(["📊 Projections", "🔄 Deadline", "🔍 Detail", "📖 Methodology"])
-    with st.tabs(["📊 Projections", "🔄 Deadline", "🔍 Detail", "📖 Methodology"])[0]: render_projections_tab(m, s)
-    with st.tabs(["📊 Projections", "🔄 Deadline", "🔍 Detail", "📖 Methodology"])[1]: render_deadline_tab(m, s)
-    with st.tabs(["📊 Projections", "🔄 Deadline", "🔍 Detail", "📖 Methodology"])[2]: render_team_tab(m, s)
-    with st.tabs(["📊 Projections", "🔄 Deadline", "🔍 Detail", "📖 Methodology"])[3]: render_methodology_tab()
+    
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Projections", "🔄 Deadline", "🔍 Detail", "📖 Methodology"])
+    with tab1: render_projections_tab(m, s)
+    with tab2: render_deadline_tab(m, s)
+    with tab3: render_team_tab(m, s)
+    with tab4: render_methodology_tab()
 
 if __name__ == "__main__":
     main()
