@@ -302,19 +302,51 @@ PECOTA_TEAM_MAP = {"ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CHW":
 _PECOTA_HIT_JSON = '[{"mlbid":592450,"name":"Aaron Judge","team":"NYY","pos":"RF","age":34,"pa":672,"drc_plus":175,"ops":0.985,"warp":7.3},{"mlbid":660271,"name":"Shohei Ohtani","team":"LAD","pos":"DH","age":31,"pa":700,"drc_plus":156,"ops":0.931,"warp":6.3},{"mlbid":665742,"name":"Juan Soto","team":"NYM","pos":"LF","age":27,"pa":668,"drc_plus":155,"ops":0.899,"warp":6.2},{"mlbid":677951,"name":"Bobby Witt Jr.","team":"KC","pos":"SS","age":26,"pa":668,"drc_plus":136,"ops":0.831,"warp":5.2}]'
 _PECOTA_PIT_JSON = '[{"mlbid":669373,"name":"Tarik Skubal","team":"DET","age":29.0,"g":29,"gs":29,"ip":192.3,"era":2.42,"fip":2.76,"warp":6.0,"role":"SP"},{"mlbid":676979,"name":"Garrett Crochet","team":"BOS","age":27.0,"g":31,"gs":31,"ip":193.7,"era":3.08,"fip":3.05,"warp":4.5,"role":"SP"},{"mlbid":694973,"name":"Paul Skenes","team":"PIT","age":24.0,"g":29,"gs":29,"ip":177.7,"era":3.02,"fip":3.04,"warp":4.5,"role":"SP"},{"mlbid":519242,"name":"Chris Sale","team":"ATL","age":37.0,"g":28,"gs":28,"ip":165.0,"era":2.92,"fip":3.11,"warp":4.3,"role":"SP"}]'
 
-_ph = None; _pp = None
+_ph = None
+_pp = None
+
 def _pecota():
     global _ph, _pp
+    
+    # Load Hitters
     if _ph is None:
-        _ph = pd.DataFrame(json.loads(_PECOTA_HIT_JSON))
-        _ph.columns = _ph.columns.str.strip()
-        _ph["team_id"] = _ph["team"].map(PECOTA_TEAM_MAP)
-        _ph = _ph.dropna(subset=["team_id"]); _ph["team_id"] = _ph["team_id"].astype(int)
+        try:
+            # Load JSON
+            raw_data = json.loads(_PECOTA_HIT_JSON)
+            _ph = pd.DataFrame(raw_data)
+            
+            # 🚨 CRITICAL FIX: Remove all invisible trailing spaces from column names
+            # This fixes the silent failures that cause 69-76 win projections
+            _ph.columns = _ph.columns.str.strip()
+            
+            # Map Team IDs using the cleaned column name
+            if "team" in _ph.columns:
+                _ph["team_id"] = _ph["team"].map(PECOTA_TEAM_MAP)
+            _ph = _ph.dropna(subset=["team_id"])
+            _ph["team_id"] = _ph["team_id"].astype(int)
+            print("✅ Loaded PECOTA Hitters successfully.")
+        except Exception as e:
+            print(f"❌ Failed to load PECOTA Hitters: {e}")
+            _ph = pd.DataFrame() # Return empty to prevent crashes later
+
+    # Load Pitchers
     if _pp is None:
-        _pp = pd.DataFrame(json.loads(_PECOTA_PIT_JSON))
-        _pp.columns = _pp.columns.str.strip()
-        _pp["team_id"] = _pp["team"].map(PECOTA_TEAM_MAP)
-        _pp = _pp.dropna(subset=["team_id"]); _pp["team_id"] = _pp["team_id"].astype(int)
+        try:
+            raw_data = json.loads(_PECOTA_PIT_JSON)
+            _pp = pd.DataFrame(raw_data)
+            
+            # 🚨 CRITICAL FIX: Remove spaces from column names
+            _pp.columns = _pp.columns.str.strip()
+            
+            if "team" in _pp.columns:
+                _pp["team_id"] = _pp["team"].map(PECOTA_TEAM_MAP)
+            _pp = _pp.dropna(subset=["team_id"])
+            _pp["team_id"] = _pp["team_id"].astype(int)
+            print("✅ Loaded PECOTA Pitchers successfully.")
+        except Exception as e:
+            print(f"❌ Failed to load PECOTA Pitchers: {e}")
+            _pp = pd.DataFrame()
+
     return _ph, _pp
 
 def _sc_weights(sample, threshold):
