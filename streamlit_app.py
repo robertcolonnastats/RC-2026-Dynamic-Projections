@@ -321,15 +321,23 @@ def compute_remaining_opponents(schedule_df: pd.DataFrame) -> dict[int, list[int
     return opponents
 
 # ==============================================================================
-# PROJECTION ENGINE — PECOTA 2026 (no aging curve — PECOTA already accounts for age)
+# PROJECTION ENGINE
 # ==============================================================================
-LEAGUE_AVG_RPG    = 4.50
-LEAGUE_AVG_FIP    = 4.10
-LEAGUE_AVG_OPS    = 0.730
-LEAGUE_AVG_ERA    = 4.20
-LEAGUE_AVG_WRC    = 100.0
+# Three signals: PECOTA 2026 (embedded) + Statcast xwOBA/xERA (historical+current)
+# + MLB Stats API live OPS/ERA. Sample size drives Statcast weight, not date.
+# ==============================================================================
+LEAGUE_AVG_RPG     = 4.50
+LEAGUE_AVG_FIP     = 4.10
+LEAGUE_AVG_OPS     = 0.730
+LEAGUE_AVG_ERA     = 4.20
+LEAGUE_AVG_XWOBA   = 0.315
+LEAGUE_AVG_XERA    = 4.10
+LEAGUE_AVG_WRC     = 100.0
 LEAGUE_SP_IP_SHARE = 0.57
 LEAGUE_RP_IP_SHARE = 0.43
+TYPICAL_TEAM_WARP  = 35.0
+PA_FULL_WEIGHT     = 300
+IP_FULL_WEIGHT     = 100
 
 PECOTA_TEAM_MAP = {
     "ARI":109,"ATL":144,"BAL":110,"BOS":111,"CHC":112,"CHW":145,"CIN":113,
@@ -345,123 +353,304 @@ _ph = None; _pp = None
 
 def _pecota():
     global _ph, _pp
-    import json as _j
     if _ph is None:
-        _ph = pd.DataFrame(_j.loads(_PECOTA_HIT_JSON))
+        _ph = pd.DataFrame(json.loads(_PECOTA_HIT_JSON))
         _ph["team_id"] = _ph["team"].map(PECOTA_TEAM_MAP)
         _ph = _ph.dropna(subset=["team_id"]); _ph["team_id"] = _ph["team_id"].astype(int)
     if _pp is None:
-        _pp = pd.DataFrame(_j.loads(_PECOTA_PIT_JSON))
+        _pp = pd.DataFrame(json.loads(_PECOTA_PIT_JSON))
         _pp["team_id"] = _pp["team"].map(PECOTA_TEAM_MAP)
         _pp = _pp.dropna(subset=["team_id"]); _pp["team_id"] = _pp["team_id"].astype(int)
     return _ph, _pp
 
-def _fetch_il_warp(team_id: int, pecota_hit_df, pecota_pit_df) -> float:
-    """
-    Fetch current IL players for a team via MLB Stats API.
-    Cross-reference with PECOTA mlbid to get their projected WARP.
-    Returns total WARP currently on the IL for this team.
-    """
+
+def _sc_weights(sample: float, threshold: float) -> tuple:
+    """Weight for current season Statcast based on sample size, not date."""
+    w = min(sample / threshold, 1.0)
+    return w, 1.0 - w  # (current, prior)
+
+
+def _fetch_statcast_hist(year: int, stat_type: str) -> dict:
+    """Fetch full-season Statcast leaderboard. Returns {team_id: stat_value}."""
     try:
-        resp = requests.get(
-            f"{MLB_API_BASE}/teams/{team_id}/roster",
-            params={"rosterType": "40Man", "season": SEASON_YEAR, "hydrate": "person"},
-            timeout=8
-        )
-        if resp.status_code != 200:
-            return 0.0
-        roster = resp.json().get("roster", [])
-        il_ids = set()
-        for entry in roster:
-            code = entry.get("status", {}).get("code", "")
-            if code in ("IL10","IL60","DL10","DL15","DL60","7DL","10DL","60DL"):
-                pid = entry.get("person", {}).get("id")
-                if pid:
-                    il_ids.add(int(pid))
-        if not il_ids:
-            return 0.0
-        # Cross-reference with PECOTA
-        total_warp = 0.0
-        for df in [pecota_hit_df, pecota_pit_df]:
-            matched = df[df["mlbid"].isin(il_ids)]
-            total_warp += float(matched["warp"].clip(lower=0).sum())
-        return round(total_warp, 2)
+        import io
+        url = (f"https://baseballsavant.mlb.com/leaderboard/expected_statistics"
+               f"?type={stat_type}&year={year}&position=&team=&min=q&csv=true")
+        r = requests.get(url, timeout=20, headers={"User-Agent":"Mozilla/5.0"})
+        if r.status_code != 200 or len(r.content) < 500:
+            return {}
+        df = pd.read_csv(io.StringIO(r.content.decode("utf-8")))
+        stat_col   = "xwoba" if stat_type == "batter" else "xera"
+        sample_col = "pa"    if stat_type == "batter" else "p_formatted_ip"
+        if stat_col not in df.columns or "team_id" not in df.columns:
+            return {}
+        if sample_col not in df.columns:
+            sample_col = "ip" if "ip" in df.columns else None
+        if sample_col is None:
+            return {}
+        df[stat_col]   = pd.to_numeric(df[stat_col],   errors="coerce")
+        df[sample_col] = pd.to_numeric(df[sample_col], errors="coerce").fillna(0)
+        df = df.dropna(subset=[stat_col])
+        out = {}
+        for tid, g in df.groupby("team_id"):
+            if g[sample_col].sum() > 0:
+                out[int(tid)] = float(np.average(g[stat_col].clip(
+                    0.100 if stat_type=="batter" else 1.5,
+                    0.600 if stat_type=="batter" else 8.0
+                ), weights=g[sample_col].clip(1)))
+        return out
     except Exception:
-        return 0.0
+        return {}
 
 
-def _regressed_win_pct(rs_per_g, ra_per_g, gp):
-    exp = PYTHAG_EXPONENT; P = 200; tot = gp + P
-    rs = float(np.clip((rs_per_g*gp + LEAGUE_AVG_RPG*P)/tot, 2.5, 7.5))
-    ra = float(np.clip((ra_per_g*gp + LEAGUE_AVG_RPG*P)/tot, 2.5, 7.5))
-    return rs**exp / (rs**exp + ra**exp)
+def _fetch_statcast_current(year: int) -> tuple:
+    """
+    Fetch current season Statcast (min=1 PA/IP).
+    Returns ({team_id: {stat, sample}}, {team_id: {stat, sample}})
+    for batters and pitchers respectively.
+    """
+    import io
+    bat_out = {}; pit_out = {}
+    for stat_type, out, stat_col, sample_col in [
+        ("batter",  bat_out, "xwoba", "pa"),
+        ("pitcher", pit_out, "xera",  "p_formatted_ip"),
+    ]:
+        try:
+            url = (f"https://baseballsavant.mlb.com/leaderboard/expected_statistics"
+                   f"?type={stat_type}&year={year}&position=&team=&min=1&csv=true")
+            r = requests.get(url, timeout=20, headers={"User-Agent":"Mozilla/5.0"})
+            if r.status_code != 200 or len(r.content) < 500:
+                continue
+            df = pd.read_csv(io.StringIO(r.content.decode("utf-8")))
+            if stat_col not in df.columns or "team_id" not in df.columns:
+                continue
+            if sample_col not in df.columns:
+                sample_col = "ip" if "ip" in df.columns else None
+            if sample_col is None:
+                continue
+            df[stat_col]   = pd.to_numeric(df[stat_col],   errors="coerce")
+            df[sample_col] = pd.to_numeric(df[sample_col], errors="coerce").fillna(0)
+            df = df.dropna(subset=[stat_col])
+            for tid, g in df.groupby("team_id"):
+                total = float(g[sample_col].sum())
+                if total > 0:
+                    avg = float(np.average(g[stat_col].clip(
+                        0.100 if stat_type=="batter" else 1.5,
+                        0.600 if stat_type=="batter" else 8.0
+                    ), weights=g[sample_col].clip(1)))
+                    out[int(tid)] = {"stat": avg, "sample": total}
+        except Exception:
+            continue
+    return bat_out, pit_out
+
+
+def _fetch_mlb_team_ops_era(year: int) -> tuple:
+    """MLB Stats API team OPS/ERA — reliable fallback for current season."""
+    bat = {}; pit = {}
+    for group, out, key in [("hitting",bat,"ops"),("pitching",pit,"era")]:
+        try:
+            r = requests.get(f"{MLB_API_BASE}/teams/stats",
+                params={"stats":"season","group":group,"season":year,"sportId":1},
+                timeout=10)
+            if r.status_code != 200: continue
+            for sg in r.json().get("stats",[]):
+                for sp in sg.get("splits",[]):
+                    tid = sp.get("team",{}).get("id")
+                    val = sp.get("stat",{}).get(key)
+                    if tid and val:
+                        try: out[int(tid)] = float(val)
+                        except Exception: pass
+        except Exception: pass
+    return bat, pit
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_statcast_cache() -> dict:
+    """Fetch all Statcast data in parallel. Cached for 1 hour."""
+    import concurrent.futures as _cf
+    def _try(fn, *a):
+        try: return fn(*a)
+        except Exception: return {} if not isinstance(fn().__class__, tuple) else ({},{})
+    with _cf.ThreadPoolExecutor(max_workers=5) as ex:
+        f25b = ex.submit(_fetch_statcast_hist, 2025, "batter")
+        f25p = ex.submit(_fetch_statcast_hist, 2025, "pitcher")
+        f24b = ex.submit(_fetch_statcast_hist, 2024, "batter")
+        f24p = ex.submit(_fetch_statcast_hist, 2024, "pitcher")
+        fcur = ex.submit(_fetch_statcast_current, SEASON_YEAR)
+        fmlb = ex.submit(_fetch_mlb_team_ops_era, SEASON_YEAR)
+        results = {}
+        for k, f in [("h25b",f25b),("h25p",f25p),("h24b",f24b),("h24p",f24p),("cur",fcur),("mlb",fmlb)]:
+            try: results[k] = f.result(timeout=25)
+            except Exception: results[k] = {} if k not in ("cur","mlb") else ({},{})
+    return results
+
+
+def _fetch_il_warp_for_team(team_id: int, ph, pp) -> float:
+    """Cross-reference IL roster with PECOTA mlbid → total missing WARP."""
+    try:
+        resp = requests.get(f"{MLB_API_BASE}/teams/{team_id}/roster",
+            params={"rosterType":"40Man","season":SEASON_YEAR,"hydrate":"person"}, timeout=8)
+        if resp.status_code != 200: return 0.0
+        il_ids = {int(e["person"]["id"]) for e in resp.json().get("roster",[])
+                  if e.get("status",{}).get("code","") in
+                  ("IL10","IL60","DL10","DL15","DL60","7DL","10DL","60DL")}
+        if not il_ids: return 0.0
+        return round(float(
+            ph[ph["mlbid"].isin(il_ids)]["warp"].clip(lower=0).sum() +
+            pp[pp["mlbid"].isin(il_ids)]["warp"].clip(lower=0).sum()
+        ), 2)
+    except Exception: return 0.0
+
+
+def _regressed_win_pct(rs_g, ra_g, gp):
+    e=PYTHAG_EXPONENT; P=200; t=gp+P
+    rs=float(np.clip((rs_g*gp+LEAGUE_AVG_RPG*P)/t,2.5,7.5))
+    ra=float(np.clip((ra_g*gp+LEAGUE_AVG_RPG*P)/t,2.5,7.5))
+    return rs**e/(rs**e+ra**e)
+
 
 def fetch_team_projections(standings_df=None) -> tuple:
-    """PECOTA 2026 depth charts (no aging curve — PECOTA already prices in age)."""
+    """
+    PECOTA + Statcast three-signal projection.
+    Sample-size weighting for Statcast — PA/IP driven, not calendar date.
+    IL WARP cross-referenced for Pythagorean adjustment downstream.
+    """
     all_ids = list(TEAM_INFO.keys())
-    player_detail = {t:{"batters":[],"sp":[],"rp":[]} for t in all_ids}
-    hit_df, pit_df = _pecota()
-    exp = PYTHAG_EXPONENT
+    det     = {t:{"batters":[],"sp":[],"rp":[]} for t in all_ids}
+    ph, pp  = _pecota()
+    exp     = PYTHAG_EXPONENT
+
+    # Load Statcast (cached)
+    try: sc = _load_statcast_cache()
+    except Exception: sc = {}
+
+    cur_bat_sc, cur_pit_sc = sc.get("cur", ({},{})) if isinstance(sc.get("cur"), tuple) else ({},{})
+    h25b = sc.get("h25b",{}); h25p = sc.get("h25p",{})
+    h24b = sc.get("h24b",{}); h24p = sc.get("h24p",{})
+    mlb_ops, mlb_era = sc.get("mlb", ({},{})) if isinstance(sc.get("mlb"), tuple) else ({},{})
+
+    # Estimate team PA/IP from standings
+    team_pa = {}; team_ip = {}
+    if standings_df is not None and not standings_df.empty:
+        for _, row in standings_df.iterrows():
+            gp = max(int(row.get("games_played",0)),1)
+            tid = int(row["team_id"])
+            team_pa[tid] = gp * 38   # ~38 PA/game for 9-man lineup
+            team_ip[tid] = gp * 9.0  # 9 IP/game
+
     rows = []
     for tid in all_ids:
-        # Batting
-        tb = hit_df[hit_df["team_id"]==tid].sort_values("pa", ascending=False)
-        lineup = tb.head(9)
+        # ── Offense ───────────────────────────────────────────────────────────
+        lineup = ph[ph["team_id"]==tid].sort_values("pa",ascending=False).head(9)
         if not lineup.empty and lineup["pa"].sum()>0:
-            team_ops = float(np.average(lineup["ops"].fillna(LEAGUE_AVG_OPS), weights=lineup["pa"].clip(1)))
+            pecota_ops = float(np.average(lineup["ops"].fillna(LEAGUE_AVG_OPS), weights=lineup["pa"].clip(1)))
         else:
-            team_ops = LEAGUE_AVG_OPS
-        team_ops = float(np.clip(team_ops, 0.620, 0.850))
-        proj_rpg  = float(np.clip((team_ops/LEAGUE_AVG_OPS)*LEAGUE_AVG_RPG, 2.5, 7.5))
+            pecota_ops = LEAGUE_AVG_OPS
+        pecota_ops = float(np.clip(pecota_ops, 0.620, 0.850))
 
-        player_detail[tid]["batters"] = [
+        cur_pa    = float(team_pa.get(tid, 0))
+        w_cur, w_prior = _sc_weights(cur_pa, PA_FULL_WEIGHT)
+
+        # Current xwOBA (sample-weighted)
+        cur_xwoba = LEAGUE_AVG_XWOBA
+        if isinstance(cur_bat_sc, dict) and tid in cur_bat_sc:
+            d = cur_bat_sc[tid]
+            raw_sample = d.get("sample", 0)
+            # Extra guard: weight by individual player sample within the team
+            w_this = min(raw_sample / (PA_FULL_WEIGHT * 9), 1.0)  # 9 players * 300 PA
+            cur_xwoba = d["stat"] * w_this + LEAGUE_AVG_XWOBA * (1 - w_this)
+        elif tid in mlb_ops:
+            cur_xwoba = float(mlb_ops[tid]) * 0.43  # OPS → xwOBA rough proxy
+
+        xwoba_signal = (
+            w_cur   * cur_xwoba +
+            w_prior * 0.35 * h25b.get(tid, LEAGUE_AVG_XWOBA) +
+            w_prior * 0.20 * h24b.get(tid, LEAGUE_AVG_XWOBA) +
+            w_prior * 0.45 * LEAGUE_AVG_XWOBA
+        )
+        # Adjust PECOTA OPS by Statcast quality signal (30% influence)
+        sc_bat_adj   = (xwoba_signal / LEAGUE_AVG_XWOBA - 1.0) * 0.30
+        team_ops     = float(np.clip(pecota_ops * (1.0 + sc_bat_adj), 0.620, 0.850))
+        proj_rpg     = float(np.clip((team_ops / LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG, 2.5, 7.5))
+
+        # ── Pitching ─────────────────────────────────────────────────────────
+        tp = pp[pp["team_id"]==tid]
+        sp = tp[tp["role"]=="SP"].sort_values("ip",ascending=False)
+        rp = tp[tp["role"]=="RP"].sort_values("ip",ascending=False)
+
+        def _era_blend(df):
+            if df.empty or df["ip"].sum()==0: return LEAGUE_AVG_ERA
+            return float(np.average(
+                (df["fip"].fillna(LEAGUE_AVG_FIP)*0.70 + df["era"].fillna(LEAGUE_AVG_ERA)*0.30).clip(2,7.5),
+                weights=df["ip"].clip(1)))
+
+        sp_pecota = float(np.clip(_era_blend(sp), 2.80, 5.50))
+        rp_pecota = float(np.clip(_era_blend(rp), 3.00, 5.50))
+
+        cur_ip    = float(team_ip.get(tid, 0))
+        w_cur_ip, w_prior_ip = _sc_weights(cur_ip, IP_FULL_WEIGHT)
+
+        cur_xera = LEAGUE_AVG_XERA
+        if isinstance(cur_pit_sc, dict) and tid in cur_pit_sc:
+            d = cur_pit_sc[tid]
+            raw_ip = d.get("sample", 0)
+            w_this = min(raw_ip / IP_FULL_WEIGHT, 1.0)
+            cur_xera = d["stat"] * w_this + LEAGUE_AVG_XERA * (1 - w_this)
+        elif tid in mlb_era:
+            cur_xera = float(mlb_era[tid])
+
+        xera_signal = (
+            w_cur_ip   * cur_xera +
+            w_prior_ip * 0.35 * h25p.get(tid, LEAGUE_AVG_XERA) +
+            w_prior_ip * 0.20 * h24p.get(tid, LEAGUE_AVG_XERA) +
+            w_prior_ip * 0.45 * LEAGUE_AVG_XERA
+        )
+        sc_pit_adj = (xera_signal / LEAGUE_AVG_XERA - 1.0) * 0.30
+        sp_era     = float(np.clip(sp_pecota * (1.0 + sc_pit_adj), 2.80, 5.50))
+        rp_era     = float(np.clip(rp_pecota * (1.0 + sc_pit_adj), 3.00, 5.50))
+        proj_rapg  = float(np.clip(
+            (sp_era/LEAGUE_AVG_ERA)*LEAGUE_AVG_RPG*LEAGUE_SP_IP_SHARE +
+            (rp_era/LEAGUE_AVG_ERA)*LEAGUE_AVG_RPG*LEAGUE_RP_IP_SHARE, 2.5, 7.5))
+
+        proj_wp = proj_rpg**exp / (proj_rpg**exp + proj_rapg**exp)
+
+        # ── IL WARP ───────────────────────────────────────────────────────────
+        il_warp = _fetch_il_warp_for_team(tid, ph, pp)
+
+        # ── Player detail ─────────────────────────────────────────────────────
+        det[tid]["batters"] = [
             {"name":row["name"],"pos":str(row.get("pos","")),"pa":int(row["pa"]),
               "drc+":int(row.get("drc_plus",100)),"ops":round(float(row["ops"]),3),
               "warp":round(float(row.get("warp",0)),1)}
             for _,row in lineup.iterrows()
         ]
-
-        # Pitching
-        tp = pit_df[pit_df["team_id"]==tid]
-        sp = tp[tp["role"]=="SP"].sort_values("ip", ascending=False)
-        rp = tp[tp["role"]=="RP"].sort_values("ip", ascending=False)
-
-        def _era(df):
-            if df.empty or df["ip"].sum()==0: return LEAGUE_AVG_ERA
-            b = df["fip"].fillna(LEAGUE_AVG_FIP)*0.70 + df["era"].fillna(LEAGUE_AVG_ERA)*0.30
-            return float(np.average(b.clip(2,7.5), weights=df["ip"].clip(1)))
-
-        sp_era = float(np.clip(_era(sp), 2.80, 5.50))
-        rp_era = float(np.clip(_era(rp), 3.00, 5.50))
-        proj_rapg = float(np.clip(
-            (sp_era/LEAGUE_AVG_ERA)*LEAGUE_AVG_RPG*LEAGUE_SP_IP_SHARE +
-            (rp_era/LEAGUE_AVG_ERA)*LEAGUE_AVG_RPG*LEAGUE_RP_IP_SHARE, 2.5, 7.5))
-
-        player_detail[tid]["sp"] = [
+        det[tid]["sp"] = [
             {"name":row["name"],"gs":int(row["gs"]),"ip":round(float(row["ip"]),1),
               "era":round(float(row["era"]),2),"fip":round(float(row["fip"]),2),
               "warp":round(float(row.get("warp",0)),1)}
             for _,row in sp.head(6).iterrows()
         ]
-        player_detail[tid]["rp"] = [
+        det[tid]["rp"] = [
             {"name":row["name"],"ip":round(float(row["ip"]),1),
               "era":round(float(row["era"]),2),"fip":round(float(row["fip"]),2),
               "warp":round(float(row.get("warp",0)),1)}
             for _,row in rp.head(8).iterrows()
         ]
 
-        proj_wp = proj_rpg**exp / (proj_rpg**exp + proj_rapg**exp)
-        # Fetch IL WARP for this team
-        il_warp = _fetch_il_warp(tid, hit_df, pit_df)
-        rows.append({"team_id":tid,"proj_runs_per_game":round(proj_rpg,3),
-                      "proj_ra_per_game":round(proj_rapg,3),"proj_win_pct":round(float(proj_wp),4),
-                      "proj_sp_fip":round(sp_era,2),"proj_rp_fip":round(rp_era,2),
-                      "proj_wrc_plus":round((team_ops/LEAGUE_AVG_OPS)*100,1),
-                      "il_warp":il_warp})
+        rows.append({
+            "team_id":            tid,
+            "proj_runs_per_game": round(proj_rpg,  3),
+            "proj_ra_per_game":   round(proj_rapg, 3),
+            "proj_win_pct":       round(float(proj_wp), 4),
+            "proj_sp_fip":        round(sp_era, 2),
+            "proj_rp_fip":        round(rp_era, 2),
+            "proj_wrc_plus":      round((team_ops/LEAGUE_AVG_OPS)*100, 1),
+            "il_warp":            il_warp,
+        })
 
     proj_df = pd.DataFrame(rows)
-    proj_df["proj_source"] = "PECOTA 2026"
-    return proj_df, player_detail
+    proj_df["proj_source"] = "PECOTA+Statcast"
+    return proj_df, det
 
 
 # ==============================================================================
@@ -527,29 +716,31 @@ def build_master(standings_df, statcast_df, player_detail=None) -> pd.DataFrame:
     gp = df["games_played"].clip(0, 162)
     proj_source = df["proj_source"].iloc[0] if "proj_source" in df.columns else "Unknown"
     
-    if proj_source in ("FanGraphs DC", "PECOTA 2026"):
+    # PECOTA+Statcast is our best signal — 65% weight early, shifting to 40% late
+    if proj_source in ("FanGraphs DC", "PECOTA+Statcast", "PECOTA 2026"):
         base_proj_w = (0.65 - (gp / 162.0) * 0.25).clip(0.40, 0.65)
     else:
         base_proj_w = (0.55 - (gp / 162.0) * 0.15).clip(0.40, 0.55)
 
-    base_pythag_w = 1.0 - base_proj_w
+    base_pyth_w = 1.0 - base_proj_w
 
-    # IL WARP adjustment: teams with significant injured talent have a depressed
-    # Pythagorean that doesn't reflect true talent. Reduce Pythagorean weight
-    # proportional to how much WARP is sitting on the IL.
-    # il_warp_pct column is set by compute_buyer_seller using PECOTA cross-reference.
-    TYPICAL_TEAM_WARP = 35.0
+    # IL WARP adjustment: injured stars depress Pythagorean unfairly.
+    # Reduce Pythagorean weight proportional to missing WARP.
+    # Each % of team WARP missing → same % reduction in Pythagorean weight.
+    # Capped at 50% reduction (can't fully ignore actual results).
     if "il_warp" in df.columns:
         il_frac = (df["il_warp"] / TYPICAL_TEAM_WARP).clip(0.0, 0.50)
     else:
         il_frac = pd.Series(0.0, index=df.index)
 
-    adj_pythag_w = base_pythag_w * (1.0 - il_frac)
-    adj_proj_w   = 1.0 - adj_pythag_w
+    adj_pyth_w = base_pyth_w * (1.0 - il_frac)
+    adj_proj_w = 1.0 - adj_pyth_w
 
+    df["blended_win_pct"] = (
+        df["proj_win_pct"] * adj_proj_w + df["pythag_win_pct"] * adj_pyth_w
+    ).clip(0.20, 0.80)
     proj_weight   = adj_proj_w
-    pythag_weight = adj_pythag_w
-    df["blended_win_pct"] = (df["proj_win_pct"] * adj_proj_w + df["pythag_win_pct"] * adj_pythag_w).clip(0.20, 0.80)
+    pythag_weight = adj_pyth_w
     
     df["proj_weight_used"] = proj_weight.round(2) if hasattr(proj_weight, 'round') else proj_weight
     df["pythag_weight_used"] = pythag_weight.round(2) if hasattr(pythag_weight, 'round') else pythag_weight
@@ -756,71 +947,66 @@ def render_deadline_tab(mdf, sim):
 
 def render_team_tab(mdf, sim):
     opts = sorted([(r["name"], r["team_id"]) for _, r in mdf.iterrows()])
-    sel = st.selectbox("Select Team", [o[0] for o in opts], key="team_sel")
-    tid = next(o[1] for o in opts if o[0]==sel)
-    r = mdf[mdf["team_id"]==tid].iloc[0]
+    sel  = st.selectbox("Select Team", [o[0] for o in opts], key="team_sel")
+    tid  = next(o[1] for o in opts if o[0]==sel)
+    r    = mdf[mdf["team_id"]==tid].iloc[0]
     tier = r.get("tier","neutral")
-    st.markdown(f"## {r['name']} ({r['abbr']}) · {TIER_EMOJI.get(tier,'⚪')} {r.get('tier_label','')}")
-    st.caption(f"{r['division']} · Projection source: {r.get('proj_source','Unknown')}")
 
-    pw = sim["proj_wins"].get(tid, r["wins"]); ps = sim["proj_wins_std"].get(tid, 0)
-    proj_l = int(round(162 - pw))
-    proj_w = int(round(pw))
+    st.markdown(f"## {r['name']} ({r['abbr']})")
+    st.caption(f"{r['division']} · {TIER_EMOJI.get(tier,'⚪')} {r.get('tier_label','Neutral')} · Source: {r.get('proj_source','Unknown')}")
+
+    pw   = sim["proj_wins"].get(tid, r["wins"])
+    ps   = sim["proj_wins_std"].get(tid, 0)
+    pw_i = int(round(pw)); pl_i = int(round(162-pw))
 
     st.markdown("### Season Projections")
     m1,m2,m3,m4,m5,m6 = st.columns(6)
-    m1.metric("Record", f"{int(r['wins'])}-{int(r['losses'])}")
-    m2.metric("Proj Rec", f"{proj_w}-{proj_l}", f"±{ps:.1f}W")
-    m3.metric("Div%", f"{sim['division_odds'].get(tid,0):.1%}")
+    m1.metric("Record",   f"{int(r['wins'])}-{int(r['losses'])}")
+    m2.metric("Proj Rec", f"{pw_i}-{pl_i}", f"±{ps:.1f}W")
+    m3.metric("Div%",     f"{sim['division_odds'].get(tid,0):.1%}")
     m4.metric("Playoff%", f"{sim['playoff_odds'].get(tid,0):.1%}")
-    m5.metric("WS%", f"{sim['ws_odds'].get(tid,0):.2%}")
-    m6.metric("SoS", r.get("sos_label","—"))
+    m5.metric("WS%",      f"{sim['ws_odds'].get(tid,0):.2%}")
+    m6.metric("SoS",      r.get("sos_label","—"))
 
-    # Deadline impact
     pre_po  = sim.get("pre_deadline_playoff_odds",{}).get(tid,0)
     post_po = sim.get("playoff_odds",{}).get(tid,0)
     pre_ws  = sim.get("pre_deadline_ws_odds",{}).get(tid,0)
     post_ws = sim.get("ws_odds",{}).get(tid,0)
-    pre_div = sim.get("pre_deadline_division_odds",{}).get(tid,0)
-    post_div= sim.get("division_odds",{}).get(tid,0)
+    pre_dv  = sim.get("pre_deadline_division_odds",{}).get(tid,0)
+    post_dv = sim.get("division_odds",{}).get(tid,0)
 
     st.markdown("### Deadline Impact")
     d1,d2,d3 = st.columns(3)
-    d1.metric("Division Odds", f"{post_div:.1%}", f"{post_div-pre_div:+.1%} vs pre-DL")
-    d2.metric("Playoff Odds",  f"{post_po:.1%}",  f"{post_po-pre_po:+.1%} vs pre-DL")
-    d3.metric("WS Odds",       f"{post_ws:.2%}",  f"{post_ws-pre_ws:+.2%} vs pre-DL")
+    d1.metric("Division Odds", f"{post_dv:.1%}", f"{post_dv-pre_dv:+.1%} vs pre-DL")
+    d2.metric("Playoff Odds",  f"{post_po:.1%}", f"{post_po-pre_po:+.1%} vs pre-DL")
+    d3.metric("WS Odds",       f"{post_ws:.2%}", f"{post_ws-pre_ws:+.2%} vs pre-DL")
 
     st.markdown("---")
     st.markdown("### Classification Drivers")
-    c1, c2 = st.columns(2)
-    with c1:
+    ci1, ci2 = st.columns(2)
+    with ci1:
         st.markdown("**Inputs**")
-        wc_gb  = r.get("wc_games_back", 0)
-        rd162  = r.get("rd_per_162", 0)
-        luck   = r.get("luck_wins", 0)
-        pw_u   = r.get("proj_weight_used", 0.65)
-        pyth_u = r.get("pythag_weight_used", 0.35)
         for k,v in [
-            ("WC Games Back",         f"{wc_gb:.1f}"),
-            ("Run Diff/162",          f"{rd162:+.0f}"),
-            ("Actual Win%",           f"{r.get('win_pct',0):.3f}"),
-            ("Pythagorean Win%",      f"{r.get('pythag_win_pct',0):.3f}"),
-            ("Player Proj Win%",      f"{r.get('proj_win_pct',0):.3f}"),
-            ("Blended Win%",          f"{r.get('blended_win_pct',0):.3f}"),
-            ("Luck (wins +/-)",       f"{luck:+.1f}"),
-            ("Proj weight (roster)",  f"{pw_u:.0%}"),
-            ("Pythag weight (record)",f"{pyth_u:.0%}"),
+            ("WC Games Back",          f"{r.get('wc_games_back',0):.1f}"),
+            ("Run Diff/162",           f"{r.get('rd_per_162',0):+.0f}"),
+            ("Actual Win%",            f"{r.get('win_pct',0):.3f}"),
+            ("Pythagorean Win%",       f"{r.get('pythag_win_pct',0):.3f}"),
+            ("Player Proj Win%",       f"{r.get('proj_win_pct',0):.3f}"),
+            ("Blended Win%",           f"{r.get('blended_win_pct',0):.3f}"),
+            ("Luck (wins +/-)",        f"{r.get('luck_wins',0):+.1f}"),
+            ("IL WARP (missing)",      f"{r.get('il_warp',0):.1f}"),
+            ("Proj weight (PECOTA)",   f"{r.get('proj_weight_used',0.65):.0%}"),
+            ("Pythag weight (record)", f"{r.get('pythag_weight_used',0.35):.0%}"),
         ]:
             st.markdown(f"- **{k}:** {v}")
-    with c2:
+    with ci2:
         st.markdown("**Score**")
-        dampener_pct = int(r.get("dampener", 1.0) * 100)
+        dampener_pct = int(r.get("dampener",1.0)*100)
         for k,v in [
             ("Pre-Dampened Score",    f"{r.get('pre_dampened_score',0):.2f}"),
             ("Games Played Dampener", f"{dampener_pct}% of full score"),
             ("Adjusted Score",        f"{r.get('adjusted_score',0):.2f}"),
             ("Injury Adj (GB units)", f"{r.get('injury_score_adj',0):+.2f}"),
-            ("IL WARP (talent missing)", f"{r.get('il_warp',0):.1f} WARP"),
             ("Base Win Adj",          f"{r.get('base_adj',0):+.1%}"),
             ("Full Adj (post-DL)",    f"{r.get('final_adj',0):+.1%}"),
             ("Ramped Adj (today)",    f"{r.get('ramped_adj',0):+.1%}"),
@@ -829,9 +1015,9 @@ def render_team_tab(mdf, sim):
 
     st.markdown("---")
     st.markdown("### Projected Win Distribution")
-    std = max(ps, 3.0); x = np.linspace(pw-4*std, pw+4*std, 200)
-    y = np.exp(-0.5*((x-pw)/std)**2)/(std*np.sqrt(2*np.pi))
-    fig = go.Figure(go.Scatter(x=x, y=y, fill="tozeroy", line=dict(color="#636efa")))
+    std_ = max(ps, 3.0); x = np.linspace(pw-4*std_, pw+4*std_, 200)
+    y    = np.exp(-0.5*((x-pw)/std_)**2)/(std_*np.sqrt(2*np.pi))
+    fig  = go.Figure(go.Scatter(x=x, y=y, fill="tozeroy", line=dict(color="#636efa")))
     fig.add_vline(x=pw, line_dash="dash", line_color="#ef553b",
                   annotation_text=f"Proj: {pw:.1f}W", annotation_position="top right")
     fig.update_layout(xaxis_title="Final Wins", height=300,
@@ -839,7 +1025,6 @@ def render_team_tab(mdf, sim):
                       yaxis=dict(showticklabels=False), showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # Roster tables
     st.markdown("---")
     st.markdown("### PECOTA 2026 Projected Roster")
     try: det = json.loads(r.get("player_detail","{}"))
@@ -849,24 +1034,194 @@ def render_team_tab(mdf, sim):
         st.markdown("**Lineup**")
         bat = det.get("batters",[])
         if bat: st.dataframe(pd.DataFrame(bat), hide_index=True, use_container_width=True)
-        else: st.caption("No data")
+        else:   st.caption("No data")
     with rc2:
         st.markdown("**Rotation**")
         sp = det.get("sp",[])
         if sp: st.dataframe(pd.DataFrame(sp), hide_index=True, use_container_width=True)
-        else: st.caption("No data")
+        else:  st.caption("No data")
     with rc3:
         st.markdown("**Bullpen**")
         rp = det.get("rp",[])
         if rp: st.dataframe(pd.DataFrame(rp), hide_index=True, use_container_width=True)
-        else: st.caption("No data")
+        else:  st.caption("No data")
+
+def render_methodology_tab():
+    st.markdown("## Methodology")
+    st.caption(f"Data last updated: {get_last_updated()}")
+    st.markdown("""
+This model was built in response to a fundamental gap in existing projection systems: **none of them account for what happens to a team's win probability when they sell at the trade deadline.** Most systems project a fixed roster forward, even when that roster will look very different in August.
+""")
+    with st.expander("📊 Overview — What Makes This Model Different"):
+        st.markdown("""
+**The core insight:** Teams underperforming due to injuries are being systematically undervalued. Teams projected as good-but-struggling should be treated as buyers — their playoff odds should reflect the talent they *have*, not just what's on the field right now.
+
+**Signal stack (three independent sources):**
+1. **PECOTA 2026** — preseason depth chart projections (50th percentile, Baseball Prospectus)
+2. **MLB Stats API** — live RS/RA, standings, IL roster (same source as the standings data)
+3. **Baseball Savant Statcast** — xwOBA and xERA for 2024, 2025, and current 2026 season
+""")
+    with st.expander("🔮 Projection Engine — PECOTA + Statcast Blend"):
+        st.markdown("""
+**Step 1 — PECOTA baseline:** Top 9 hitters by projected PA; PA-weighted OPS gives offensive quality. Pitchers with GS ≥ 10 are starters. Pitching quality = 70% FIP + 30% ERA, IP-weighted. **No aging curve applied** — PECOTA already prices in age and development.
+
+**Step 2 — Statcast adjustment (sample-size weighted):**
+- Historical: 2025 xwOBA/xERA (35% weight) + 2024 xwOBA/xERA (20% weight)
+- Current season: weight scales with **PA/IP accumulated, not calendar date**
+  - 0 PA → 0% current weight; 150 PA → 50%; 300+ PA → 100%
+  - A called-up rookie with 40 PA gets 13% current weight — not overjuiced by date alone
+- Statcast adjusts the PECOTA baseline up or down based on contact quality
+
+**Step 3 — Pythagorean blend (IL-adjusted):**
+- PECOTA+Statcast starts at 65% weight early season → shifts to 40% by September
+- **IL WARP adjustment:** missing stars depress Pythagorean unfairly. IL roster cross-referenced with PECOTA mlbid to get missing WARP. For every 1% of typical team WARP (≈35 total) on IL, Pythagorean weight drops 1% (capped at 50% reduction).
+- Example: Mets with ~7.6 WARP on IL → 22% reduction in Pythagorean weight → PECOTA carries more weight
+""")
+    with st.expander("📈 Buyer/Seller Classification"):
+        st.markdown(f"""
+**Score inputs:** WC Games Back (primary) + Run diff/162 (dampened pre-50 GP) + Luck wins (dampened pre-40 GP) + Injury adjustment
+
+**Dampeners:** 50% at ≤30 GP → 75% at 31-55 GP → 90% at 56-81 GP → 100% at 82+ GP. Deadline proximity: 40% confidence Apr 1 → 100% by June 15.
+
+**Tiers and win% adjustments (fully ramped):**
+- Hard Seller (score ≥ 8.0): −12%
+- Soft Seller (4.0–7.9): −6%
+- Neutral (−3.0 to 3.9): 0%
+- Soft Buyer (−8.0 to −3.1): +4%
+- Hard Buyer (< −8.0): +7%
+""")
+    with st.expander("🗓️ July Trade Deadline Ramp"):
+        st.markdown(f"""
+Deadline adjustments ramp linearly from **0% on July 1 → 100% on July 31**.
+
+**Today ({date.today().strftime("%B %d, %Y")}):** ramp = {get_deadline_ramp_factor():.0%}
+
+Before July 1, no win% penalty or bonus is applied to projected records. The Deadline Impact tab shows what *would* happen if each team acts per their classification. The post-deadline math: a soft seller replacing 200 innings of 3.3 ERA with 200 innings of 4.5 ERA costs roughly 1.5 wins, which is reflected in the −6% soft seller penalty over the remaining ~90 games.
+""")
+    with st.expander("🎲 Monte Carlo Simulation"):
+        st.markdown(f"""
+**{N_SIMULATIONS:,} simulations** using vectorized numpy for speed.
+
+Each sim: Log5 win probability per game → simulate all remaining games → track division/wild card standings → determine playoff qualifiers → simulate bracket for WS odds.
+
+**Two parallel simulations:**
+- Post-deadline (with adjustments): main projection
+- Pre-deadline (without adjustments): counterfactual for Deadline Impact tab
+
+**Zero-sum constraint:** total wins = total games played. This prevents the systematic over-projection where Vegas lines or naive models sum to 2,440+ wins instead of 2,430.
+""")
+    with st.expander("📋 Strength of Schedule"):
+        st.markdown("SoS = average adj_win_pct of remaining opponents. Labeled Easy/Average/Hard relative to all 30 teams. Schedule fetched from MLB Stats API, capped at September 30.")
+
+
+
+def render_team_tab(mdf, sim):
+    opts = sorted([(r["name"], r["team_id"]) for _, r in mdf.iterrows()])
+    sel  = st.selectbox("Select Team", [o[0] for o in opts], key="team_sel")
+    tid  = next(o[1] for o in opts if o[0]==sel)
+    r    = mdf[mdf["team_id"]==tid].iloc[0]
+    tier = r.get("tier","neutral")
+
+    st.markdown(f"## {r['name']} ({r['abbr']})")
+    st.caption(f"{r['division']} · {TIER_EMOJI.get(tier,'⚪')} {r.get('tier_label','Neutral')} · Source: {r.get('proj_source','Unknown')}")
+
+    pw   = sim["proj_wins"].get(tid, r["wins"])
+    ps   = sim["proj_wins_std"].get(tid, 0)
+    pw_i = int(round(pw)); pl_i = int(round(162-pw))
+
+    st.markdown("### Season Projections")
+    m1,m2,m3,m4,m5,m6 = st.columns(6)
+    m1.metric("Record",   f"{int(r['wins'])}-{int(r['losses'])}")
+    m2.metric("Proj Rec", f"{pw_i}-{pl_i}", f"±{ps:.1f}W")
+    m3.metric("Div%",     f"{sim['division_odds'].get(tid,0):.1%}")
+    m4.metric("Playoff%", f"{sim['playoff_odds'].get(tid,0):.1%}")
+    m5.metric("WS%",      f"{sim['ws_odds'].get(tid,0):.2%}")
+    m6.metric("SoS",      r.get("sos_label","—"))
+
+    pre_po  = sim.get("pre_deadline_playoff_odds",{}).get(tid,0)
+    post_po = sim.get("playoff_odds",{}).get(tid,0)
+    pre_ws  = sim.get("pre_deadline_ws_odds",{}).get(tid,0)
+    post_ws = sim.get("ws_odds",{}).get(tid,0)
+    pre_dv  = sim.get("pre_deadline_division_odds",{}).get(tid,0)
+    post_dv = sim.get("division_odds",{}).get(tid,0)
+
+    st.markdown("### Deadline Impact")
+    d1,d2,d3 = st.columns(3)
+    d1.metric("Division Odds", f"{post_dv:.1%}", f"{post_dv-pre_dv:+.1%} vs pre-DL")
+    d2.metric("Playoff Odds",  f"{post_po:.1%}", f"{post_po-pre_po:+.1%} vs pre-DL")
+    d3.metric("WS Odds",       f"{post_ws:.2%}", f"{post_ws-pre_ws:+.2%} vs pre-DL")
+
+    st.markdown("---")
+    st.markdown("### Classification Drivers")
+    ci1, ci2 = st.columns(2)
+    with ci1:
+        st.markdown("**Inputs**")
+        for k,v in [
+            ("WC Games Back",          f"{r.get('wc_games_back',0):.1f}"),
+            ("Run Diff/162",           f"{r.get('rd_per_162',0):+.0f}"),
+            ("Actual Win%",            f"{r.get('win_pct',0):.3f}"),
+            ("Pythagorean Win%",       f"{r.get('pythag_win_pct',0):.3f}"),
+            ("Player Proj Win%",       f"{r.get('proj_win_pct',0):.3f}"),
+            ("Blended Win%",           f"{r.get('blended_win_pct',0):.3f}"),
+            ("Luck (wins +/-)",        f"{r.get('luck_wins',0):+.1f}"),
+            ("IL WARP (missing)",      f"{r.get('il_warp',0):.1f}"),
+            ("Proj weight (PECOTA)",   f"{r.get('proj_weight_used',0.65):.0%}"),
+            ("Pythag weight (record)", f"{r.get('pythag_weight_used',0.35):.0%}"),
+        ]:
+            st.markdown(f"- **{k}:** {v}")
+    with ci2:
+        st.markdown("**Score**")
+        dampener_pct = int(r.get("dampener",1.0)*100)
+        for k,v in [
+            ("Pre-Dampened Score",    f"{r.get('pre_dampened_score',0):.2f}"),
+            ("Games Played Dampener", f"{dampener_pct}% of full score"),
+            ("Adjusted Score",        f"{r.get('adjusted_score',0):.2f}"),
+            ("Injury Adj (GB units)", f"{r.get('injury_score_adj',0):+.2f}"),
+            ("Base Win Adj",          f"{r.get('base_adj',0):+.1%}"),
+            ("Full Adj (post-DL)",    f"{r.get('final_adj',0):+.1%}"),
+            ("Ramped Adj (today)",    f"{r.get('ramped_adj',0):+.1%}"),
+        ]:
+            st.markdown(f"- **{k}:** {v}")
+
+    st.markdown("---")
+    st.markdown("### Projected Win Distribution")
+    std_ = max(ps, 3.0); x = np.linspace(pw-4*std_, pw+4*std_, 200)
+    y    = np.exp(-0.5*((x-pw)/std_)**2)/(std_*np.sqrt(2*np.pi))
+    fig  = go.Figure(go.Scatter(x=x, y=y, fill="tozeroy", line=dict(color="#636efa")))
+    fig.add_vline(x=pw, line_dash="dash", line_color="#ef553b",
+                  annotation_text=f"Proj: {pw:.1f}W", annotation_position="top right")
+    fig.update_layout(xaxis_title="Final Wins", height=300,
+                      plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                      yaxis=dict(showticklabels=False), showlegend=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("### PECOTA 2026 Projected Roster")
+    try: det = json.loads(r.get("player_detail","{}"))
+    except: det = {"batters":[],"sp":[],"rp":[]}
+    rc1, rc2, rc3 = st.columns(3)
+    with rc1:
+        st.markdown("**Lineup**")
+        bat = det.get("batters",[])
+        if bat: st.dataframe(pd.DataFrame(bat), hide_index=True, use_container_width=True)
+        else:   st.caption("No data")
+    with rc2:
+        st.markdown("**Rotation**")
+        sp = det.get("sp",[])
+        if sp: st.dataframe(pd.DataFrame(sp), hide_index=True, use_container_width=True)
+        else:  st.caption("No data")
+    with rc3:
+        st.markdown("**Bullpen**")
+        rp = det.get("rp",[])
+        if rp: st.dataframe(pd.DataFrame(rp), hide_index=True, use_container_width=True)
+        else:  st.caption("No data")
 
 def render_methodology_tab():
     st.markdown("## Methodology")
     st.caption(f"Data last updated: {get_last_updated()}")
     st.markdown("This model identifies likely buyers and sellers algorithmically, adjusts win rates post-deadline, and runs Monte Carlo simulations.")
     with st.expander("📊 Overview"): st.markdown("Most systems assume today's roster is August's roster. For sellers that's wrong. This model adjusts for the deadline ramp.")
-    with st.expander("🔮 Projections"): st.markdown("**PECOTA 2026** depth chart projections (50th percentile, dc_fl=True) are the base. No additional aging curve is applied — PECOTA already prices in player age and development. SP vs RP split based on projected GS (≥10 = SP). Team OPS blended from top-9 lineup by projected PA. Pitching uses 70% FIP + 30% ERA. PECOTA projection blended 65% with Pythagorean win% early season, shifting toward actual results as games played increases.")
+    with st.expander("🔮 Projections"): st.markdown(f"Weighted blend of current/prior/career stats. OPS clamped to .630–.815, ERA to 3.00–5.50 at team level.")
     with st.expander("🎲 Simulation"): st.markdown(f"{N_SIMULATIONS:,} zero-sum game-level simulations using Log5 probabilities.")
 
 # ==============================================================================
@@ -885,9 +1240,25 @@ def load_all_data():
     up(30, "Fetching schedule")
     try: sch = fetch_schedule()
     except: sch = pd.DataFrame(columns=["game_id","game_date","home_team_id","away_team_id","status"])
-    up(50, "Building projections")
-    try: prj, pdet = fetch_team_projections(std)
-    except: prj = pd.DataFrame(); pdet = {}
+    up(50, "Building projections (PECOTA + Statcast)")
+    try:
+        prj, pdet = fetch_team_projections(std)
+        if prj.empty:
+            raise ValueError("Projection returned empty DataFrame")
+    except Exception as _proj_e:
+        st.warning(f"Projection partially failed: {_proj_e} — using regression fallback")
+        # Regression fallback: always works, uses current RS/RA
+        rows = []
+        for _, row in std.iterrows():
+            gp  = max(int(row.get("games_played",0)),1)
+            rsg = row.get("runs_scored",0)/gp; rag = row.get("runs_allowed",0)/gp
+            wp  = _regressed_win_pct(rsg, rag, gp)
+            rows.append({"team_id":int(row["team_id"]),"proj_win_pct":round(wp,4),
+                         "proj_runs_per_game":LEAGUE_AVG_RPG,"proj_ra_per_game":LEAGUE_AVG_RPG,
+                         "proj_sp_fip":LEAGUE_AVG_FIP,"proj_rp_fip":LEAGUE_AVG_FIP,
+                         "proj_wrc_plus":LEAGUE_AVG_WRC,"il_warp":0.0})
+        prj  = pd.DataFrame(rows); prj["proj_source"] = "Regression"
+        pdet = {t:{"batters":[],"sp":[],"rp":[]} for t in TEAM_INFO}
     up(70, "Calculating adjustments")
     inj = {t: compute_injury_adjustment(t) for t in TEAM_INFO}
     mst = build_master(std, prj, pdet)
@@ -911,13 +1282,11 @@ def main():
         st.warning("⏳ Data refreshes automatically between 12:00 AM and 12:30 AM EST each night. Projections may be temporarily unavailable.")
     
     import os
-    logo_col, title_col, _ = st.columns([1, 4, 2])
-    if os.path.exists("rc_logo.png"):
-        logo_col.image("rc_logo.png", width=90)
-    else:
-        logo_col.markdown("⚾")
-    title_col.markdown(f"# MLB {SEASON_YEAR} Season Projections")
-    title_col.caption("Deadline-aware · PECOTA 2026 + Live Statcast")
+    lc, tc, _ = st.columns([1,4,2])
+    if os.path.exists("rc_logo.png"): lc.image("rc_logo.png", width=90)
+    else: lc.markdown("⚾")
+    tc.markdown(f"# MLB {SEASON_YEAR} Season Projections")
+    tc.caption("Deadline-aware · PECOTA 2026 + Statcast + MLB Live")
     st.markdown("---")
 
     if "master_df" not in st.session_state or not st.session_state.get("loaded"):
