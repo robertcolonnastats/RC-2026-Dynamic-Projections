@@ -414,63 +414,66 @@ def _regressed_win_pct(rs_per_g: float, ra_per_g: float, games_played: int) -> t
     return reg_rs, reg_ra, float(wp)
 
 
-def _fg_session() -> requests.Session:
-    """
-    Build a requests session that mimics a real browser visit to FanGraphs.
-    FanGraphs uses Cloudflare bot detection — we need to:
-    1. Hit the main page first to get cookies
-    2. Use realistic browser headers
-    3. Include the cookies in the API call
-    """
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "X-Requested-With": "XMLHttpRequest",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        "Referer": "https://www.fangraphs.com/projections",
-        "Origin": "https://www.fangraphs.com",
-    })
-    # Prime the session with a real page visit to get cookies
-    try:
-        session.get("https://www.fangraphs.com/projections", timeout=10)
-    except Exception:
-        pass
-    return session
-
-
 def _fetch_fg_dc(stats: str) -> pd.DataFrame | None:
     """
     Fetch FanGraphs Depth Charts projections for batting or pitching.
-    Tries multiple projection types in order: fangraphsdc, steamer, zips
+    
+    FanGraphs uses Cloudflare Bot Management which checks TLS fingerprints.
+    Standard Python requests are blocked because their TLS handshake (JA3)
+    differs from Chrome. We use curl_cffi to impersonate Chrome at the TLS
+    level, which passes Cloudflare's bot detection.
+    
+    Falls back through: fangraphsdc → steamer → zips
     """
     proj_types = ["fangraphsdc", "steamer", "zips"]
-    session = _fg_session()
-
+    
+    # Try curl_cffi first (Chrome TLS impersonation - bypasses Cloudflare)
+    try:
+        from curl_cffi import requests as cf_requests
+        for proj_type in proj_types:
+            try:
+                r = cf_requests.get(
+                    "https://www.fangraphs.com/api/projections",
+                    params={
+                        "type": proj_type, "stats": stats,
+                        "pos": "all", "team": 0, "players": 0, "lg": "all",
+                    },
+                    impersonate="chrome120",
+                    timeout=20,
+                )
+                print(f"FG curl_cffi {proj_type} {stats}: status={r.status_code}, size={len(r.content)}")
+                if r.status_code != 200 or not r.content:
+                    continue
+                data = r.json()
+                if not isinstance(data, list) or len(data) < 100:
+                    continue
+                df = pd.DataFrame(data)
+                df.columns = [c.strip() for c in df.columns]
+                df["_proj_type"] = proj_type
+                return df
+            except Exception as e:
+                print(f"FG curl_cffi {proj_type} {stats}: {e}")
+                continue
+    except ImportError:
+        print("curl_cffi not available, trying standard requests")
+    
+    # Fallback: standard requests (likely blocked by Cloudflare but worth trying)
     for proj_type in proj_types:
         try:
-            r = session.get(
+            r = requests.get(
                 "https://www.fangraphs.com/api/projections",
                 params={
-                    "type": proj_type,
-                    "stats": stats,
-                    "pos": "all",
-                    "team": 0,
-                    "players": 0,
-                    "lg": "all",
+                    "type": proj_type, "stats": stats,
+                    "pos": "all", "team": 0, "players": 0, "lg": "all",
+                },
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept": "application/json",
+                    "Referer": "https://www.fangraphs.com/projections",
                 },
                 timeout=20,
             )
-            print(f"FG {proj_type} {stats}: status={r.status_code}, size={len(r.content)}")
+            print(f"FG requests {proj_type} {stats}: status={r.status_code}")
             if r.status_code != 200 or not r.content:
                 continue
             data = r.json()
@@ -478,11 +481,10 @@ def _fetch_fg_dc(stats: str) -> pd.DataFrame | None:
                 continue
             df = pd.DataFrame(data)
             df.columns = [c.strip() for c in df.columns]
-            df["_proj_type"] = proj_type
             return df
         except Exception as e:
-            print(f"FG {proj_type} {stats} exception: {e}")
-            continue
+            print(f"FG requests {proj_type} {stats}: {e}")
+    
     return None
 
 
