@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from zoneinfo import ZoneInfo
 warnings.filterwarnings("ignore")
 
@@ -1243,7 +1243,6 @@ def load_all_data():
 
 def main():
     state = get_season_state()
-    from datetime import datetime
     now_est = datetime.now(EST)
     if now_est.hour == 0 and now_est.minute <= 30:
         # Removed "App is updating." text
