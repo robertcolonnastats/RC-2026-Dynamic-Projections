@@ -55,7 +55,7 @@ N_SIMULATIONS = 1_000
 RANDOM_SEED = 42
 CACHE_DIR = "/tmp/rc_mlb_2026_v15"
 CACHE_FILE = "/tmp/rc_mlb_2026_v15/latest.json"
-CACHE_VERSION = "v15-roster-aware"
+CACHE_VERSION = "v15-roster-aware-fixed"
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
 TEAM_INFO = {
@@ -101,7 +101,6 @@ EST = ZoneInfo("America/New_York")
 # ==============================================================================
 def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
 
-# In-memory roster cache to avoid hitting API on every rerun
 _ROSTER_CACHE = {}
 
 def fetch_team_statuses() -> dict[int, dict[str, set[int]]]:
@@ -301,7 +300,7 @@ PECOTA_TEAM_MAP = {"ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CHW":
     "MIL":158, "MIN":142, "NYM":121, "NYY":147, "PHI":143, "PIT":134, "OAK":133, "SD":135,
     "SEA":136, "SF":137, "STL":138, "TB":139, "TEX":140, "TOR":141, "WAS":120}
 
-# JSON truncated for display. Keep your full strings in the actual file.
+# JSON strings preserved. Keep your full strings in the actual file.
 _PECOTA_HIT_JSON = '[{"mlbid":592450,"name":"Aaron Judge","team":"NYY","pos":"RF","age":34,"pa":672,"drc_plus":175,"ops":0.985,"warp":7.3},{"mlbid":660271,"name":"Shohei Ohtani","team":"LAD","pos":"DH","age":31,"pa":700,"drc_plus":156,"ops":0.931,"warp":6.3},{"mlbid":665742,"name":"Juan Soto","team":"NYM","pos":"LF","age":27,"pa":668,"drc_plus":155,"ops":0.899,"warp":6.2},{"mlbid":677951,"name":"Bobby Witt Jr.","team":"KC","pos":"SS","age":26,"pa":668,"drc_plus":136,"ops":0.831,"warp":5.2}]'
 _PECOTA_PIT_JSON = '[{"mlbid":669373,"name":"Tarik Skubal","team":"DET","age":29.0,"g":29,"gs":29,"ip":192.3,"era":2.42,"fip":2.76,"warp":6.0,"role":"SP"},{"mlbid":676979,"name":"Garrett Crochet","team":"BOS","age":27.0,"g":31,"gs":31,"ip":193.7,"era":3.08,"fip":3.05,"warp":4.5,"role":"SP"},{"mlbid":694973,"name":"Paul Skenes","team":"PIT","age":24.0,"g":29,"gs":29,"ip":177.7,"era":3.02,"fip":3.04,"warp":4.5,"role":"SP"},{"mlbid":519242,"name":"Chris Sale","team":"ATL","age":37.0,"g":28,"gs":28,"ip":165.0,"era":2.92,"fip":3.11,"warp":4.3,"role":"SP"}]'
 
@@ -388,8 +387,6 @@ def fetch_team_projections(standings_df=None):
     all_ids = list(TEAM_INFO.keys())
     det = {t:{"batters":[], "sp":[], "rp":[]} for t in all_ids}
     ph, pp = _pecota(); exp = PYTHAG_EXPONENT
-    
-    # Fetch live roster statuses once
     team_statuses = fetch_team_statuses()
     
     import concurrent.futures as cf
@@ -432,7 +429,7 @@ def fetch_team_projections(standings_df=None):
                 if mlbid in il_ids:
                     hit_weights.append(max(actual_pa, 10.0))
                 elif mlbid in active_ids:
-                    hit_weights.append(max(actual_pa, 600.0))  # Full baseline
+                    hit_weights.append(max(actual_pa, 600.0))
                 else:
                     hit_weights.append(max(actual_pa, 10.0))
             pecota_ops = float(np.average(lineup["ops"].fillna(LEAGUE_AVG_OPS), weights=hit_weights))
@@ -488,10 +485,8 @@ def fetch_team_projections(standings_df=None):
         proj_rapg = float(np.clip((sp_era/LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE + (rp_era/LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE, 2.5, 7.5))
         proj_wp = proj_rpg**exp / (proj_rpg**exp + proj_rapg**exp)
         
-        # Simplified IL WARP calculation
         il_warp = 0.0
         try:
-            # Quick fallback to static check if API fails
             if il_ids:
                 il_warp = float(ph[ph["mlbid"].isin(il_ids)]["warp"].clip(lower=0).sum() + pp[pp["mlbid"].isin(il_ids)]["warp"].clip(lower=0).sum())
         except: pass
@@ -523,15 +518,22 @@ def build_master(standings_df, statcast_df, player_detail=None) -> pd.DataFrame:
     gp = df["games_played"].clip(0, 162)
     proj_source = df["proj_source"].iloc[0] if "proj_source" in df.columns else "Unknown"
     
+    # Sliding scale for current record trust
+    sample_w = gp.apply(lambda g: 0.0 if g < 20 else 1.0 if g >= 100 else 0.5 * (1 + np.tanh(3 * ((g - 20) / 80 - 0.5))))
+    
+    # Talent-first weighting
     base_proj_w = (0.70 - (gp / 162.0) * 0.25).clip(0.45, 0.70) if proj_source in ("FanGraphs DC", "PECOTA+Statcast", "PECOTA 2026") else (0.55 - (gp / 162.0) * 0.15).clip(0.40, 0.55)
     base_pyth_w = 1.0 - base_proj_w
+    
     il_frac = (df["il_warp"] / TYPICAL_TEAM_WARP).clip(0.0, 0.50) if "il_warp" in df.columns else pd.Series(0.0, index=df.index)
     adj_pyth_w = base_pyth_w * (1.0 - il_frac)
     adj_proj_w = 1.0 - adj_pyth_w
+    
     df["blended_win_pct"] = (df["proj_win_pct"]*adj_proj_w + df["pythag_win_pct"]*adj_pyth_w).clip(0.20, 0.80)
     df["proj_weight_used"] = adj_proj_w.round(2)
     df["pythag_weight_used"] = adj_pyth_w.round(2)
     df["games_remaining"] = (162 - df["games_played"]).clip(0, 162)
+    df["sample_weight"] = sample_w.round(2)
     return df
 
 def compute_buyer_seller(df: pd.DataFrame, injury_adjustments=None) -> pd.DataFrame:
