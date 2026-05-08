@@ -1287,6 +1287,28 @@ def load_all_data():
     return mst, sim, sch
 
 def main():
+    # ── Force-clear stale cache at startup (runs before load_cache) ───────────
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r") as _f:
+                _cached = json.load(_f)
+            if _cached.get("cache_version") != CACHE_VERSION:
+                os.remove(CACHE_FILE)
+                print(f"Stale cache removed (was {_cached.get('cache_version')!r}, need {CACHE_VERSION!r})")
+        except Exception:
+            try: os.remove(CACHE_FILE)
+            except Exception: pass
+
+    # ── URL param: append ?bust=1 to force fresh load anytime ─────────────────
+    try:
+        if st.query_params.get("bust"):
+            if os.path.exists(CACHE_FILE):
+                os.remove(CACHE_FILE)
+            st.query_params.clear()
+            st.rerun()
+    except Exception:
+        pass
+
     state = get_season_state()
     from datetime import datetime
     now_est = datetime.now(EST)
