@@ -356,6 +356,40 @@ def _pecota():
         _pp = _pp.dropna(subset=["team_id"]); _pp["team_id"] = _pp["team_id"].astype(int)
     return _ph, _pp
 
+def _fetch_il_warp(team_id: int, pecota_hit_df, pecota_pit_df) -> float:
+    """
+    Fetch current IL players for a team via MLB Stats API.
+    Cross-reference with PECOTA mlbid to get their projected WARP.
+    Returns total WARP currently on the IL for this team.
+    """
+    try:
+        resp = requests.get(
+            f"{MLB_API_BASE}/teams/{team_id}/roster",
+            params={"rosterType": "40Man", "season": SEASON_YEAR, "hydrate": "person"},
+            timeout=8
+        )
+        if resp.status_code != 200:
+            return 0.0
+        roster = resp.json().get("roster", [])
+        il_ids = set()
+        for entry in roster:
+            code = entry.get("status", {}).get("code", "")
+            if code in ("IL10","IL60","DL10","DL15","DL60","7DL","10DL","60DL"):
+                pid = entry.get("person", {}).get("id")
+                if pid:
+                    il_ids.add(int(pid))
+        if not il_ids:
+            return 0.0
+        # Cross-reference with PECOTA
+        total_warp = 0.0
+        for df in [pecota_hit_df, pecota_pit_df]:
+            matched = df[df["mlbid"].isin(il_ids)]
+            total_warp += float(matched["warp"].clip(lower=0).sum())
+        return round(total_warp, 2)
+    except Exception:
+        return 0.0
+
+
 def _regressed_win_pct(rs_per_g, ra_per_g, gp):
     exp = PYTHAG_EXPONENT; P = 200; tot = gp + P
     rs = float(np.clip((rs_per_g*gp + LEAGUE_AVG_RPG*P)/tot, 2.5, 7.5))
@@ -417,10 +451,13 @@ def fetch_team_projections(standings_df=None) -> tuple:
         ]
 
         proj_wp = proj_rpg**exp / (proj_rpg**exp + proj_rapg**exp)
+        # Fetch IL WARP for this team
+        il_warp = _fetch_il_warp(tid, hit_df, pit_df)
         rows.append({"team_id":tid,"proj_runs_per_game":round(proj_rpg,3),
                       "proj_ra_per_game":round(proj_rapg,3),"proj_win_pct":round(float(proj_wp),4),
                       "proj_sp_fip":round(sp_era,2),"proj_rp_fip":round(rp_era,2),
-                      "proj_wrc_plus":round((team_ops/LEAGUE_AVG_OPS)*100,1)})
+                      "proj_wrc_plus":round((team_ops/LEAGUE_AVG_OPS)*100,1),
+                      "il_warp":il_warp})
 
     proj_df = pd.DataFrame(rows)
     proj_df["proj_source"] = "PECOTA 2026"
@@ -480,7 +517,7 @@ def pythag(rs, ra):
 def build_master(standings_df, statcast_df, player_detail=None) -> pd.DataFrame:
     df = standings_df.copy()
     merge_cols = ["team_id", "proj_win_pct", "proj_runs_per_game", "proj_ra_per_game"]
-    for col in ["proj_source", "proj_sp_fip", "proj_rp_fip", "proj_wrc_plus"]:
+    for col in ["proj_source", "proj_sp_fip", "proj_rp_fip", "proj_wrc_plus", "il_warp"]:
         if col in statcast_df.columns:
             merge_cols.append(col)
     df = df.merge(statcast_df[merge_cols], on="team_id", how="left")
@@ -491,12 +528,28 @@ def build_master(standings_df, statcast_df, player_detail=None) -> pd.DataFrame:
     proj_source = df["proj_source"].iloc[0] if "proj_source" in df.columns else "Unknown"
     
     if proj_source in ("FanGraphs DC", "PECOTA 2026"):
-        proj_weight = (0.65 - (gp / 162.0) * 0.25).clip(0.40, 0.65)
+        base_proj_w = (0.65 - (gp / 162.0) * 0.25).clip(0.40, 0.65)
     else:
-        proj_weight = (0.55 - (gp / 162.0) * 0.15).clip(0.40, 0.55)
-        
-    pythag_weight = 1.0 - proj_weight
-    df["blended_win_pct"] = (df["proj_win_pct"] * proj_weight + df["pythag_win_pct"] * pythag_weight).clip(0.20, 0.80)
+        base_proj_w = (0.55 - (gp / 162.0) * 0.15).clip(0.40, 0.55)
+
+    base_pythag_w = 1.0 - base_proj_w
+
+    # IL WARP adjustment: teams with significant injured talent have a depressed
+    # Pythagorean that doesn't reflect true talent. Reduce Pythagorean weight
+    # proportional to how much WARP is sitting on the IL.
+    # il_warp_pct column is set by compute_buyer_seller using PECOTA cross-reference.
+    TYPICAL_TEAM_WARP = 35.0
+    if "il_warp" in df.columns:
+        il_frac = (df["il_warp"] / TYPICAL_TEAM_WARP).clip(0.0, 0.50)
+    else:
+        il_frac = pd.Series(0.0, index=df.index)
+
+    adj_pythag_w = base_pythag_w * (1.0 - il_frac)
+    adj_proj_w   = 1.0 - adj_pythag_w
+
+    proj_weight   = adj_proj_w
+    pythag_weight = adj_pythag_w
+    df["blended_win_pct"] = (df["proj_win_pct"] * adj_proj_w + df["pythag_win_pct"] * adj_pythag_w).clip(0.20, 0.80)
     
     df["proj_weight_used"] = proj_weight.round(2) if hasattr(proj_weight, 'round') else proj_weight
     df["pythag_weight_used"] = pythag_weight.round(2) if hasattr(pythag_weight, 'round') else pythag_weight
@@ -767,6 +820,7 @@ def render_team_tab(mdf, sim):
             ("Games Played Dampener", f"{dampener_pct}% of full score"),
             ("Adjusted Score",        f"{r.get('adjusted_score',0):.2f}"),
             ("Injury Adj (GB units)", f"{r.get('injury_score_adj',0):+.2f}"),
+            ("IL WARP (talent missing)", f"{r.get('il_warp',0):.1f} WARP"),
             ("Base Win Adj",          f"{r.get('base_adj',0):+.1%}"),
             ("Full Adj (post-DL)",    f"{r.get('final_adj',0):+.1%}"),
             ("Ramped Adj (today)",    f"{r.get('ramped_adj',0):+.1%}"),
