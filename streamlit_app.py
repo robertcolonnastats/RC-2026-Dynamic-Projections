@@ -32,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# CONSTANTS
+# CONSTANTS (Cleaned of trailing spaces)
 # ==============================================================================
 SEASON_YEAR = 2026
 OPENING_DAY = "2026-03-27"
@@ -40,12 +40,24 @@ WORLD_SERIES_END_APPROX = "2026-11-01"
 TRADE_DEADLINE = "2026-07-31"
 DEADLINE_RAMP_START = "2026-05-20"
 SOS_SENSITIVITY = 0.15
+HARD_SELLER_GB = 8.0
+SOFT_SELLER_GB = 4.0
+NEUTRAL_BAND = 3.0
+ADJ_HARD_SELLER = -0.12
+ADJ_SOFT_SELLER = -0.06
+ADJ_NEUTRAL = 0.00
+ADJ_SOFT_BUYER = +0.04
+ADJ_HARD_BUYER = +0.07
+RD_SCALE_GAMES = 162
+RD_MODIFIER_CAP = 2.0
+RD_SENSITIVITY = 0.02
 PYTHAG_EXPONENT = 1.83
+PYTHAG_GAP_SENSITIVITY = 0.5
 N_SIMULATIONS = 1_000
 RANDOM_SEED = 42
-CACHE_DIR = "/tmp/rc_mlb_2026_v18"
-CACHE_FILE = "/tmp/rc_mlb_2026_v18/latest.json"
-CACHE_VERSION = "v18-sample-regression"
+CACHE_DIR = "/tmp/rc_mlb_2026_v22"
+CACHE_FILE = "/tmp/rc_mlb_2026_v22/latest.json"
+CACHE_VERSION = "v22-reset-base"
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
 TEAM_INFO = {
@@ -79,7 +91,8 @@ def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
 _ROSTER_CACHE = {}
 def fetch_team_statuses():
     today = date.today().isoformat()
-    if _ROSTER_CACHE.get("date") == today and _ROSTER_CACHE.get("data"): return _ROSTER_CACHE["data"]
+    if _ROSTER_CACHE.get("date") == today and _ROSTER_CACHE.get("data"):
+        return _ROSTER_CACHE["data"]
     data, il_codes = {}, {"IL10", "IL60", "DL10", "DL15", "DL60", "7DL", "10DL", "60DL"}
     for tid in TEAM_INFO:
         try:
@@ -88,7 +101,8 @@ def fetch_team_statuses():
             ros = requests.get(f"{MLB_API_BASE}/teams/{tid}/roster", params={"rosterType": "40Man", "season": SEASON_YEAR}, timeout=10)
             il_ids = {p["person"]["id"] for p in ros.json().get("roster", []) if p.get("status", {}).get("code", "") in il_codes} if ros.status_code == 200 else set()
             data[tid] = {"active": active_ids, "il": il_ids}
-        except: data[tid] = {"active": set(), "il": set()}
+        except:
+            data[tid] = {"active": set(), "il": set()}
     _ROSTER_CACHE["data"], _ROSTER_CACHE["date"] = data, today
     return data
 
@@ -136,7 +150,7 @@ def save_cache(payload):
     except Exception as e: print(f"Cache write failed: {e}")
 
 # ==============================================================================
-# DATA FETCHING & STANDINGS
+# DATA FETCHING
 # ==============================================================================
 def fetch_standings():
     resp = requests.get(f"{MLB_API_BASE}/standings", params={"leagueId": "103,104", "season": SEASON_YEAR, "standingsTypes": "regularSeason", "hydrate": "team,record"}, timeout=15)
@@ -327,7 +341,6 @@ def fetch_team_projections(standings_df, roster_map):
         
         def calc_staff_era(df, role):
             if df.empty or df["ip"].sum() == 0: return LEAGUE_AVG_ERA
-            # FIX: Cap IP to prevent single-pitcher dominance (max ~180 for SP, ~60 for RP)
             capped_ip = df["ip"].clip(upper=180.0 if role == "SP" else 60.0)
             blended = (df["fip"].fillna(LEAGUE_AVG_FIP)*0.7 + df["era"].fillna(LEAGUE_AVG_ERA)*0.3).clip(2.0, 7.5)
             if capped_ip.sum() == 0: return LEAGUE_AVG_ERA
@@ -363,9 +376,9 @@ def build_master(std, prj):
     df["pythag_win_pct"] = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
     gp = df["games_played"].clip(0, 162)
     
-    # FIX: Regress Pythag for small sample size (standard Tango regression)
+    # Regress Pythag for small sample size (standard Tango regression)
     df["pythag_win_pct"] = df["pythag_win_pct"] * (gp / (gp + 80.0)) + 0.500 * (80.0 / (gp + 80.0))
-    
+
     base_proj_w = (0.70 - (gp / 162.0) * 0.25).clip(0.45, 0.70)
     il_frac = (df["il_warp"] / TYPICAL_TEAM_WARP).clip(0.0, 0.50)
     adj_pyth_w = (1.0 - base_proj_w) * (1.0 - il_frac)
@@ -416,7 +429,6 @@ def compute_sos(df, opps):
 def apply_schedule_adjustment(df, sensitivity=SOS_SENSITIVITY):
     df = df.copy()
     df["sos_adjustment"] = (0.500 - df["sos_raw"]) * sensitivity
-    # FIX: Scale SOS impact by sample size (0 early, max at ~half season)
     sos_scale = (df["games_played"] / 81.0).clip(0, 1)
     df["adj_win_pct"] = (df["adj_win_pct"] + df["sos_adjustment"] * sos_scale).clip(0.20, 0.80)
     return df
@@ -458,7 +470,7 @@ def render_projections_tab(mdf, sim):
     for d in sorted(df["Division"].unique()):
         dd = df[df["Division"]==d].sort_values("Proj W", ascending=False)
         dd["Status"] = dd.apply(lambda r: f"{TIER_EMOJI.get(r['tier'],'⚪')} {r['Status']}", axis=1)
-        st.markdown(f"### {d}"); st.dataframe(dd, hide_index=True, width="stretch")
+        st.markdown(f"### {d}"); st.dataframe(dd, hide_index=True, use_container_width=True)
 
 def render_deadline_tab(mdf, sim):
     st.markdown("## Trade Deadline Impact")
