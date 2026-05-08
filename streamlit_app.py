@@ -1316,7 +1316,6 @@ def main():
         # Removed "App is updating." text
         st.warning("⏳ Data refreshes automatically between 12:00 AM and 12:30 AM EST each night. Projections may be temporarily unavailable.")
     
-    import os
     lc, tc, _ = st.columns([1,4,2])
     if os.path.exists("rc_logo.png"): lc.image("rc_logo.png", width=90)
     else: lc.markdown("⚾")
