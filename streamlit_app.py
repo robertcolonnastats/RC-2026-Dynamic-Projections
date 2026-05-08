@@ -384,10 +384,297 @@ LEAGUE_AVG_RPG    = 4.50
 LEAGUE_AVG_FIP    = 4.10
 LEAGUE_AVG_OPS    = 0.730
 LEAGUE_AVG_ERA    = 4.20
+LEAGUE_AVG_WRC    = 100.0   # league-average wRC+
 LEAGUE_SP_IP_SHARE = 0.57
 LEAGUE_RP_IP_SHARE = 0.43
 REPLACEMENT_OPS   = 0.640   # replacement-level batter
 REPLACEMENT_ERA   = 5.50    # replacement-level pitcher
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AGING CURVES
+# Evidence-based aging adjustments using quality-of-contact signals.
+#
+# Key principles (based on Statcast research):
+# - Bat speed / hard contact peaks ~27 and declines gradually
+# - High bat speed players at 35 decline slower than low bat speed players
+# - Walk rate is most durable skill — lasts into late 30s
+# - Strikeout rate worsens with age as bat speed drops
+# - For pitchers: velocity peaks ~26, command peaks ~28-30
+# - Young players (age <25): project improvement, but with uncertainty
+# - Rookies (age <23): project meaningful growth
+#
+# We use OPS as our primary batting quality metric and ERA as pitching metric.
+# Aging adjustments modify the weighted career/prior/current season projection.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _batter_aging_factor(age: int, ops: float) -> float:
+    """
+    Returns a multiplier applied to a batter's projected OPS based on age
+    and their current quality level (OPS as proxy for bat speed/contact quality).
+
+    Key insights:
+    - Peak offensive age is ~27 for most hitters
+    - High-OPS players (.850+) have better bat speed/contact skills and
+      decline more slowly after peak — they have more "room to give"
+    - Low-OPS players (.650-) are already near floor, decline faster
+    - Young players have upside curves that are larger for elite prospects
+    - Age 35+ power decline is steeper than contact decline
+
+    Returns multiplier (1.0 = no adjustment, 1.05 = 5% better, 0.95 = 5% worse)
+    """
+    if age is None or age <= 0:
+        return 1.0
+
+    # ── Young player growth curves ────────────────────────────────────────────
+    if age <= 22:
+        # Rookie territory — significant upside, high variance
+        # Elite prospects (.750+ OPS already) project large improvement
+        if ops >= 0.750:
+            return 1.10   # 10% improvement expected (top talent developing)
+        elif ops >= 0.700:
+            return 1.07
+        else:
+            return 1.04   # Modest improvement even for struggling rookies
+
+    elif age <= 24:
+        # Pre-prime — most hitters still improving
+        if ops >= 0.800:
+            return 1.06
+        elif ops >= 0.750:
+            return 1.04
+        else:
+            return 1.02
+
+    elif age <= 26:
+        # Approaching peak — small improvement still likely
+        if ops >= 0.800:
+            return 1.03
+        else:
+            return 1.01
+
+    elif age <= 28:
+        # Peak years — no adjustment
+        return 1.00
+
+    elif age <= 30:
+        # Just past peak — minimal decline
+        if ops >= 0.850:
+            return 0.99   # Elite contact/bat speed ages gracefully
+        elif ops >= 0.750:
+            return 0.98
+        else:
+            return 0.97
+
+    elif age <= 32:
+        # Early decline phase
+        if ops >= 0.850:
+            return 0.97   # Plus bat speed still working well
+        elif ops >= 0.750:
+            return 0.95
+        else:
+            return 0.93   # Below-average bat speed declining faster
+
+    elif age <= 34:
+        # Mid decline
+        if ops >= 0.900:
+            return 0.95   # Elite hitters (Judge, Freeman) still valuable
+        elif ops >= 0.800:
+            return 0.92
+        elif ops >= 0.730:
+            return 0.89
+        else:
+            return 0.86
+
+    elif age <= 36:
+        # Late career
+        if ops >= 0.900:
+            return 0.91   # Elite bat speed players have significant runway
+        elif ops >= 0.800:
+            return 0.87
+        elif ops >= 0.730:
+            return 0.83
+        else:
+            return 0.79
+
+    else:
+        # Age 37+ — steep decline for most
+        if ops >= 0.900:
+            return 0.86   # Rare elite contact hitters can survive (Pujols type)
+        elif ops >= 0.800:
+            return 0.81
+        else:
+            return 0.75
+
+
+def _pitcher_aging_factor(age: int, era: float, role: str = "SP") -> float:
+    """
+    Returns a multiplier applied to a pitcher's projected ERA based on age
+    and current quality (ERA as proxy for command/velocity/stuff).
+
+    Key insights:
+    - Velocity peaks ~25-26, begins declining ~28
+    - Elite pitchers (sub-3.00 ERA) have exceptional command that ages better
+      than velocity — they learn to pitch without needing plus stuff
+    - High-ERA pitchers (power-dependent, poor command) decline fast
+    - Relievers age differently — shorter outings preserve them longer
+    - Young starters frequently improve command from age 22-27
+    - ERA multiplier >1.0 = ERA gets worse; <1.0 = ERA gets better
+
+    Returns multiplier for ERA (1.0 = no change, 1.10 = ERA gets 10% worse)
+    """
+    if age is None or age <= 0:
+        return 1.0
+
+    is_rp = (role == "RP")
+
+    # ── Young pitcher improvement ─────────────────────────────────────────────
+    if age <= 23:
+        # Young pitchers — command usually improving
+        if era <= 3.50:
+            return 0.94   # Elite young arm, expect improvement
+        elif era <= 4.20:
+            return 0.96
+        else:
+            return 0.98   # Struggling young arm, slight improvement expected
+
+    elif age <= 25:
+        if era <= 3.50:
+            return 0.96
+        elif era <= 4.20:
+            return 0.98
+        else:
+            return 1.00
+
+    elif age <= 28:
+        # Peak command years
+        if era <= 3.50:
+            return 0.99   # Slight improvement still possible
+        else:
+            return 1.00
+
+    elif age <= 30:
+        # Just past peak for most
+        if era <= 3.00:
+            return 1.00   # Elite command holds
+        elif era <= 3.75:
+            return 1.02
+        else:
+            return 1.03
+
+    elif age <= 32:
+        # Velocity starting to wane
+        if era <= 3.00:
+            return 1.02   # Elite pitchers compensate with command
+        elif era <= 3.75:
+            return 1.04
+        elif era <= 4.50:
+            return 1.06
+        else:
+            return 1.09   # Poor ERA pitchers losing velocity = bad
+
+    elif age <= 34:
+        if is_rp:
+            # Relievers age better in this window
+            if era <= 3.50:
+                return 1.03
+            elif era <= 4.50:
+                return 1.06
+            else:
+                return 1.10
+        else:
+            if era <= 3.00:
+                return 1.04   # Verlander/Scherzer type — elite command saves them
+            elif era <= 3.75:
+                return 1.07
+            elif era <= 4.50:
+                return 1.10
+            else:
+                return 1.14
+
+    elif age <= 36:
+        if is_rp:
+            if era <= 3.50:
+                return 1.07
+            else:
+                return 1.13
+        else:
+            if era <= 3.00:
+                return 1.07
+            elif era <= 3.75:
+                return 1.12
+            else:
+                return 1.18
+
+    else:
+        # Age 37+ — most pitchers off a cliff
+        if is_rp:
+            if era <= 3.50:
+                return 1.12
+            else:
+                return 1.22
+        else:
+            if era <= 3.00:
+                return 1.10
+            elif era <= 3.75:
+                return 1.18
+            else:
+                return 1.28
+
+
+def _get_player_age(player_id: int, age_cache: dict | None = None) -> int | None:
+    """
+    Get player age. Uses age_cache dict if provided (populated from roster hydration).
+    Only makes individual API call if not in cache.
+    """
+    if age_cache and player_id in age_cache:
+        return age_cache[player_id]
+    try:
+        url = f"{MLB_API_BASE}/people/{player_id}"
+        resp = requests.get(url, timeout=5)
+        if resp.status_code != 200:
+            return None
+        person = resp.json().get("people", [{}])[0]
+        dob_str = person.get("birthDate", "")
+        if not dob_str:
+            return None
+        dob = date.fromisoformat(dob_str)
+        today = date.today()
+        age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+        return age
+    except Exception:
+        return None
+
+
+def _build_age_cache_from_roster(roster: list) -> dict:
+    """
+    Extract ages from roster data (person.currentAge or person.birthDate).
+    This is free — birthdate/age is already in the roster response.
+    Returns {player_id: age}
+    """
+    cache = {}
+    today = date.today()
+    for entry in roster:
+        person = entry.get("person", {})
+        pid    = person.get("id", 0)
+        if not pid:
+            continue
+        # MLB API returns currentAge directly in person object
+        age = person.get("currentAge")
+        if age:
+            cache[pid] = int(age)
+            continue
+        # Fallback: compute from birthDate
+        dob_str = person.get("birthDate", "")
+        if dob_str:
+            try:
+                dob = date.fromisoformat(dob_str)
+                age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+                cache[pid] = age
+            except Exception:
+                pass
+    return cache
+
+
 
 
 def _fetch_team_player_stats(team_id: int, season: int) -> dict:
@@ -484,7 +771,7 @@ def _fetch_team_roster_with_stats(team_id: int) -> dict:
     try:
         # Fetch 40-man roster (includes IL players with status)
         url = f"{MLB_API_BASE}/teams/{team_id}/roster"
-        params = {"rosterType": "40Man", "season": SEASON_YEAR, "hydrate": "person"}
+        params = {"rosterType": "40Man", "season": SEASON_YEAR, "hydrate": "person(currentAge,birthDate)"}
         resp = requests.get(url, params=params, timeout=10)
         if resp.status_code != 200:
             return result
@@ -492,6 +779,9 @@ def _fetch_team_roster_with_stats(team_id: int) -> dict:
         roster = resp.json().get("roster", [])
         if not roster:
             return result
+
+        # Build age cache from roster (free — age is in the roster response)
+        age_cache = _build_age_cache_from_roster(roster)
 
         # Get all players' season stats in 2 calls (much faster)
         season_stats = _fetch_team_player_stats(team_id, SEASON_YEAR)
@@ -559,8 +849,18 @@ def _fetch_team_roster_with_stats(team_id: int) -> dict:
                 career_weight = 1.0 - cur_weight - prior_weight
                 era = (career_era * career_weight + prior_era * prior_weight +
                        season_era * cur_weight)
-
                 era = float(np.clip(era, 1.5, 8.0))
+
+                # Determine SP vs RP first (needed for aging curve)
+                career_gs_pre = int(career_pit.get("gamesStarted", 0) or 0)
+                career_g_pre  = int(career_pit.get("gamesPlayed", 1) or 1)
+                role_pre = "SP" if (career_gs_pre / max(career_g_pre, 1)) >= 0.4 else "RP"
+
+                # Apply aging curve using cached age — no extra API call
+                age = _get_player_age(pid, age_cache)
+                if age is not None:
+                    aging_mult = _pitcher_aging_factor(age, era, role_pre)
+                    era = float(np.clip(era * aging_mult, 1.5, 8.0))
 
                 # Determine SP vs RP by career GS rate
                 career_gs   = int(career_pit.get("gamesStarted", 0) or 0)
@@ -608,14 +908,19 @@ def _fetch_team_roster_with_stats(team_id: int) -> dict:
                 career_weight = 1.0 - cur_weight - prior_weight
                 ops = (career_ops * career_weight + prior_ops * prior_weight + 
                        season_ops * cur_weight)
-
                 ops = float(np.clip(ops, 0.400, 1.200))
+
+                # Apply aging curve using cached age — no extra API call
+                age = _get_player_age(pid, age_cache)
+                if age is not None:
+                    aging_mult = _batter_aging_factor(age, ops)
+                    ops = float(np.clip(ops * aging_mult, 0.400, 1.200))
 
                 # Projected PA based on roster role
                 career_pa   = int(career_hit.get("plateAppearances", 0) or 0)
                 career_g    = int(career_hit.get("gamesPlayed", 1) or 1)
                 pa_per_g    = career_pa / max(career_g, 1)
-                proj_pa     = int(pa_per_g * 150)  # assume ~150 games for starters
+                proj_pa     = int(pa_per_g * 150)
                 proj_pa     = max(min(proj_pa, 650), 50)
 
                 entry_data = {
@@ -935,7 +1240,7 @@ def fetch_team_il(team_id: int) -> list[dict]:
     try:
         # Pull 40-man roster with status hydration
         url = f"{MLB_API_BASE}/teams/{team_id}/roster"
-        params = {"rosterType": "40Man", "season": SEASON_YEAR, "hydrate": "person"}
+        params = {"rosterType": "40Man", "season": SEASON_YEAR, "hydrate": "person(currentAge,birthDate)"}
         resp = requests.get(url, params=params, timeout=10)
         if resp.status_code != 200:
             return []
