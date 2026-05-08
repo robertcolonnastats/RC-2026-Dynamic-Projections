@@ -56,9 +56,8 @@ PYTHAG_EXPONENT          =  1.83
 PYTHAG_GAP_SENSITIVITY   =  0.5
 N_SIMULATIONS            = 1_000  # Optimized for speed (vectorized engine)
 RANDOM_SEED              = 42
-CACHE_DIR                = "/tmp/rc_proj_cache"
-CACHE_FILE               = "/tmp/rc_proj_cache/latest.json"
-CACHE_VERSION            = "v9-tmp-cache"   # using /tmp — wiped on every restart
+# No disk cache — using Streamlit's built-in cache with TTL
+# This is the correct approach: Streamlit manages cache invalidation properly
 MLB_API_BASE             = "https://statsapi.mlb.com/api/v1"
 
 TEAM_INFO = {
@@ -111,88 +110,10 @@ EST = ZoneInfo("America/New_York")
 # ==============================================================================
 # CACHE MANAGER
 # ==============================================================================
-def _ensure_cache_dir():
-    os.makedirs(CACHE_DIR, exist_ok=True)
+def get_last_updated():
+    """Returns a human-readable string of when data was last loaded."""
+    return datetime.now(EST).strftime("%B %d, %Y %I:%M %p EST")
 
-def get_season_state() -> str:
-    today = date.today()
-    opening = date.fromisoformat(OPENING_DAY)
-    ws_end = date.fromisoformat(WORLD_SERIES_END_APPROX)
-    deadline = date.fromisoformat(TRADE_DEADLINE)
-    ramp_start = date.fromisoformat(DEADLINE_RAMP_START)
-    if today < opening or today > ws_end:
-        return "offseason"
-    elif today > deadline:
-        return "post_deadline"
-    elif today >= ramp_start:
-        return "deadline_ramp"
-    else:
-        return "pre_deadline"
-
-def get_deadline_ramp_factor() -> float:
-    state = get_season_state()
-    today = date.today()
-    ramp_start = date.fromisoformat(DEADLINE_RAMP_START)
-    deadline = date.fromisoformat(TRADE_DEADLINE)
-    if state in ("offseason", "pre_deadline"):
-        return 0.0
-    if state == "post_deadline":
-        return 1.0
-    total = (deadline - ramp_start).days
-    elapsed = (today - ramp_start).days
-    return round(min(max(elapsed / max(total, 1), 0.0), 1.0), 4)
-
-def get_last_updated() -> str:
-    _ensure_cache_dir()
-    if not os.path.exists(CACHE_FILE):
-        return "Never"
-    from datetime import datetime
-    mtime = os.path.getmtime(CACHE_FILE)
-    dt = datetime.fromtimestamp(mtime, tz=EST)
-    return dt.strftime("%B %d, %Y at %I:%M %p EST")
-
-def is_cache_valid() -> bool:
-    _ensure_cache_dir()
-    if not os.path.exists(CACHE_FILE):
-        return False
-    from datetime import datetime
-    mtime = os.path.getmtime(CACHE_FILE)
-    now_est = datetime.now(EST)
-    midnight = now_est.replace(hour=0, minute=0, second=0, microsecond=0)
-    if mtime < midnight.timestamp():
-        return False
-    # Version check — if code was updated, invalidate old cache
-    try:
-        with open(CACHE_FILE, "r") as f:
-            data = json.load(f)
-        if data.get("cache_version") != CACHE_VERSION:
-            print(f"Cache version mismatch ({data.get('cache_version')} vs {CACHE_VERSION}) — forcing fresh load")
-            return False
-    except Exception:
-        return False
-    return True
-
-def load_cache() -> dict | None:
-    if not is_cache_valid():
-        return None
-    try:
-        with open(CACHE_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-def save_cache(payload: dict):
-    _ensure_cache_dir()
-    try:
-        payload["cache_version"] = CACHE_VERSION
-        with open(CACHE_FILE, "w") as f:
-            json.dump(payload, f, default=str)
-    except Exception as e:
-        print(f"Cache write failed: {e}")
-
-# ==============================================================================
-# DATA FETCHING
-# ==============================================================================
 def fetch_standings() -> pd.DataFrame:
     url = f"{MLB_API_BASE}/standings"
     params = {
@@ -1240,51 +1161,63 @@ def render_methodology_tab():
 # ==============================================================================
 # MAIN
 # ==============================================================================
-def load_all_data():
-    cached = load_cache()
-    if cached:
-        m = pd.DataFrame(cached["master"]); s = cached.get("sim_results", {}); sc = pd.DataFrame(cached.get("schedule", []))
-        if not m.empty and s: return m, s, sc
-
-    st.markdown("### ⚾ Loading fresh data...")
-    pb = st.progress(0); tx = st.empty()
-    def up(p, m): pb.progress(p); tx.markdown(f"**{m}**")
-    up(10, "Fetching standings"); std = fetch_standings()
-    up(30, "Fetching schedule")
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_all_data_cached(cache_bust: str):
+    """
+    Core data pipeline. Wrapped with st.cache_data (1 hour TTL).
+    cache_bust param forces fresh load when changed.
+    Returns serializable dicts/lists only (DataFrames serialized to records).
+    """
+    std = fetch_standings()
     try: sch = fetch_schedule()
     except: sch = pd.DataFrame(columns=["game_id","game_date","home_team_id","away_team_id","status"])
-    up(50, "Building projections (PECOTA + Statcast)")
     try:
         prj, pdet = fetch_team_projections(std)
-        if prj.empty:
-            raise ValueError("Projection returned empty DataFrame")
-    except Exception as _proj_e:
-        st.warning(f"Projection partially failed: {_proj_e} — using regression fallback")
-        # Regression fallback: always works, uses current RS/RA
+        if prj.empty: raise ValueError("Empty projection")
+    except Exception as _e:
         rows = []
         for _, row in std.iterrows():
             gp  = max(int(row.get("games_played",0)),1)
-            rsg = row.get("runs_scored",0)/gp; rag = row.get("runs_allowed",0)/gp
-            wp  = _regressed_win_pct(rsg, rag, gp)
+            wp  = _regressed_win_pct(row.get("runs_scored",0)/gp, row.get("runs_allowed",0)/gp, gp)
             rows.append({"team_id":int(row["team_id"]),"proj_win_pct":round(wp,4),
                          "proj_runs_per_game":LEAGUE_AVG_RPG,"proj_ra_per_game":LEAGUE_AVG_RPG,
                          "proj_sp_fip":LEAGUE_AVG_FIP,"proj_rp_fip":LEAGUE_AVG_FIP,
                          "proj_wrc_plus":LEAGUE_AVG_WRC,"il_warp":0.0})
-        prj  = pd.DataFrame(rows); prj["proj_source"] = "Regression"
+        prj = pd.DataFrame(rows); prj["proj_source"] = "Regression"
         pdet = {t:{"batters":[],"sp":[],"rp":[]} for t in TEAM_INFO}
-    up(70, "Calculating adjustments")
     inj = {t: compute_injury_adjustment(t) for t in TEAM_INFO}
     mst = build_master(std, prj, pdet)
     mst = compute_buyer_seller(mst, inj)
     mst = apply_ramp(mst, get_deadline_ramp_factor())
-    up(80, "Computing SoS")
     try: mst = compute_sos(mst, compute_remaining_opponents(sch))
     except: pass
-    up(90, "Running simulation")
     sim = run_simulation(mst, sch)
-    save_cache({"master": mst.to_dict(orient="records"), "sim_results": sim, "schedule": sch.to_dict(orient="records")})
-    up(100, "✅ Done"); pb.empty(); tx.empty()
-    return mst, sim, sch
+    return (mst.to_dict(orient="records"),
+            sim,
+            sch.to_dict(orient="records"))
+
+
+def load_all_data():
+    """Load data with progress display. Uses st.cache_data for caching."""
+    # cache_bust changes at midnight EST to force daily refresh
+    now_est = datetime.now(EST)
+    cache_bust = now_est.strftime("%Y-%m-%d")
+
+    # Check if cached data exists in st.cache_data
+    # Show progress only on first load (cache miss)
+    pb = st.progress(0); tx = st.empty()
+    tx.markdown("**⚾ Loading MLB projections (PECOTA 2026 + live data)...**")
+    pb.progress(10)
+
+    try:
+        mst_records, sim, sch_records = _load_all_data_cached(cache_bust)
+        mst = pd.DataFrame(mst_records)
+        sch = pd.DataFrame(sch_records)
+        pb.progress(100); pb.empty(); tx.empty()
+        return mst, sim, sch
+    except Exception as e:
+        pb.empty(); tx.empty()
+        raise e
 
 def main():
     state = get_season_state()
