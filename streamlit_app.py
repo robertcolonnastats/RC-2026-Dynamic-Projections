@@ -27,12 +27,10 @@ st.markdown("""
 <style>
 .main .block-container { max-width: 1400px; padding-top: 1rem; }
 .stTabs [data-baseweb="tab"] { padding: 8px 20px; border-radius: 6px 6px 0 0; font-weight: 500; }
-.app-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
-.app-logo { width: 60px; height: 60px; }
-.disclaimer { background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 1rem; margin: 1rem 0; border-radius: 4px; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Constants ────────────────────────────────────────────────────────────────
 SEASON_YEAR              = 2026
 OPENING_DAY              = "2026-03-27"
 WORLD_SERIES_END_APPROX  = "2026-11-01"
@@ -60,6 +58,7 @@ CACHE_DIR                = "data/cache"
 CACHE_FILE               = "data/cache/latest.json"
 MLB_API_BASE             = "https://statsapi.mlb.com/api/v1"
 
+# Cloudscraper for FanGraphs bypass
 try:
     import cloudscraper
     _SESSION = cloudscraper.create_scraper()
@@ -104,6 +103,7 @@ TIER_COLORS = {"hard_seller": "#d62728", "soft_seller": "#ff7f0e", "neutral": "#
 TIER_EMOJI = {"hard_seller": "🔴", "soft_seller": "🟠", "neutral": "⚪", "soft_buyer": "🟢", "hard_buyer": "🔵"}
 EST = ZoneInfo("America/New_York")
 
+# ── Cache Manager ─────────────────────────────────────────────────────────────
 def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
 
 def get_season_state() -> str:
@@ -146,6 +146,7 @@ def save_cache(payload: dict):
         with open(CACHE_FILE, "w") as f: json.dump(payload, f, default=str)
     except Exception as e: print(f"Cache write failed: {e}")
 
+# ── Data Fetching ─────────────────────────────────────────────────────────────
 def fetch_standings() -> pd.DataFrame:
     resp = requests.get(f"{MLB_API_BASE}/standings", params={"leagueId": "103,104", "season": SEASON_YEAR, "standingsTypes": "regularSeason", "hydrate": "team,record"}, timeout=15)
     resp.raise_for_status()
@@ -205,6 +206,7 @@ def compute_remaining_opponents(df: pd.DataFrame) -> dict[int, list[int]]:
         opps.setdefault(h, []).append(a); opps.setdefault(a, []).append(h)
     return opps
 
+# ── Projection Engine ─────────────────────────────────────────────────────────
 LEAGUE_AVG_RPG, LEAGUE_AVG_FIP, LEAGUE_AVG_WRC = 4.50, 4.10, 100.0
 LEAGUE_SP_IP_SHARE, LEAGUE_RP_IP_SHARE = 0.57, 0.43
 
@@ -332,6 +334,7 @@ def fetch_team_projections(standings_df=None):
     df["proj_source"] = "League Average"
     return df, detail
 
+# ── Injury Data ───────────────────────────────────────────────────────────────
 POSITION_WAR_PROXY = {"C": 2.5, "1B": 1.8, "2B": 2.5, "3B": 2.8, "SS": 3.2, "LF": 2.0, "CF": 2.8, "RF": 2.2, "DH": 1.5, "SP": 3.0, "RP": 0.8, "P": 2.0}
 DEADLINE = date.fromisoformat(TRADE_DEADLINE)
 
@@ -375,6 +378,7 @@ def fetch_all_team_injuries(team_ids):
             return {futs[f]: f.result() for f in cf.as_completed(futs, timeout=15)}
     except: return {t: 0.0 for t in team_ids}
 
+# ── Engine ────────────────────────────────────────────────────────────────────
 def pythag(rs, ra):
     if rs<=0 or ra<=0: return 0.5
     return rs**PYTHAG_EXPONENT / (rs**PYTHAG_EXPONENT + ra**PYTHAG_EXPONENT)
@@ -513,6 +517,7 @@ def run_simulation(df, sched):
     aw = ws(ar, adj); bw = ws(br, base)
     return {"division_odds": {t: float(ad[i]) for i,t in enumerate(tids)}, "playoff_odds": {t: float(ap[i]) for i,t in enumerate(tids)}, "ws_odds": {t: float(aw[i]) for i,t in enumerate(tids)}, "proj_wins": {t: float(ar.mean(0)[i]) for i,t in enumerate(tids)}, "proj_wins_std": {t: float(ar.std(0)[i]) for i,t in enumerate(tids)}, "pre_deadline_division_odds": {t: float(bd[i]) for i,t in enumerate(tids)}, "pre_deadline_playoff_odds": {t: float(bp[i]) for i,t in enumerate(tids)}, "pre_deadline_ws_odds": {t: float(bw[i]) for i,t in enumerate(tids)}}
 
+# ── UI Tabs ───────────────────────────────────────────────────────────────────
 def render_projections_tab(master_df, sim_results):
     st.markdown("## 2026 MLB Season Projections")
     src = master_df["proj_source"].iloc[0] if "proj_source" in master_df.columns else "Unknown"
@@ -642,6 +647,7 @@ def render_methodology_tab():
     with st.expander("⚠️ Limitations"):
         st.markdown("No real-time trade parser — classification updates via standings, not transaction wire\nInjuries not modeled dynamically in fallback\nPlayoff bracket is simplified\nHome field advantage not modeled\nProspects received in trades are treated as replacement level")
 
+# ── Main ──────────────────────────────────────────────────────────────────────
 def load_all_data():
     cached = load_cache()
     if cached and cached.get("master") and cached.get("sim_results"):
@@ -673,20 +679,16 @@ def load_all_data():
     return master, sim, sched
 
 def main():
-    # Header with logo and disclaimer
+    # Header with logo and plain text disclaimer
     col_logo, col_title = st.columns([1, 10])
     with col_logo:
-        try: st.image("logo.png", width=60)
+        try: st.image("https://www.mlbstatic.com/team-logos/league-on-dark/1.svg", width=50)
         except: st.markdown("⚾")
     with col_title:
         st.title(f"⚾ MLB {SEASON_YEAR} Projections")
     
-    st.markdown("""
-    <div class="disclaimer">
-    <strong>⚠️ Daily Update Notice:</strong> This website updates automatically each day between midnight and 12:30 AM EST. 
-    During this window, data may be temporarily unavailable or show mixed states. Please check back after 12:30 AM for complete updated projections.
-    </div>
-    """, unsafe_allow_html=True)
+    # Plain text disclaimer (no yellow box)
+    st.caption("⚠️ Daily Update Notice: This website updates automatically each day between midnight and 12:30 AM EST. During this window, data may be temporarily unavailable. Please check back after 12:30 AM for complete updated projections.")
     
     if "master_df" not in st.session_state or not st.session_state.get("data_loaded"):
         try:
