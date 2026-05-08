@@ -27,10 +27,13 @@ st.markdown("""
 <style>
 .main .block-container { max-width: 1400px; padding-top: 1rem; }
 .stTabs [data-baseweb="tab"] { padding: 8px 20px; border-radius: 6px 6px 0 0; font-weight: 500; }
+.app-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
+.app-logo { width: 60px; height: 60px; }
+.disclaimer { background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 1rem; margin: 1rem 0; border-radius: 4px; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Constants ──────────────────────────────────────────────────────────────────
+# ── Constants ────────────────────────────────────────────────────────────────
 SEASON_YEAR              = 2026
 OPENING_DAY              = "2026-03-27"
 WORLD_SERIES_END_APPROX  = "2026-11-01"
@@ -204,7 +207,7 @@ def compute_remaining_opponents(df: pd.DataFrame) -> dict[int, list[int]]:
         opps.setdefault(h, []).append(a); opps.setdefault(a, []).append(h)
     return opps
 
-# ── Projection Engine (Option A: pybaseball chain) ────────────────────────────
+# ── Projection Engine ─────────────────────────────────────────────────────────
 LEAGUE_AVG_RPG, LEAGUE_AVG_FIP, LEAGUE_AVG_WRC = 4.50, 4.10, 100.0
 LEAGUE_SP_IP_SHARE, LEAGUE_RP_IP_SHARE = 0.57, 0.43
 FG_TEAM_MAP = {"Angels": 108, "Diamondbacks": 109, "Orioles": 110, "Red Sox": 111, "Cubs": 112, "Reds": 113, "Guardians": 114, "Rockies": 115, "Tigers": 116, "Astros": 117, "Royals": 118, "Dodgers": 119, "Nationals": 120, "Mets": 121, "Athletics": 133, "Pirates": 134, "Padres": 135, "Mariners": 136, "Giants": 137, "Cardinals": 138, "Rays": 139, "Rangers": 140, "Blue Jays": 141, "Twins": 142, "Phillies": 143, "Braves": 144, "White Sox": 145, "Marlins": 146, "Yankees": 147, "Brewers": 158}
@@ -217,49 +220,50 @@ def _regressed_win_pct(rs_g, ra_g, gp):
     wp = rs**PYTHAG_EXPONENT / (rs**PYTHAG_EXPONENT + ra**PYTHAG_EXPONENT)
     return float(rs), float(ra), float(wp)
 
-def _fetch_pybaseball_chain():
-    """Chain: FanGraphs DC -> Steamer -> ZiPS -> None"""
+def _fetch_fg_dc_batting() -> pd.DataFrame | None:
     try:
-        from pybaseball import fangraphs, steamers, zips
-        sources = [
-            ("FanGraphs DC", lambda: (fangraphs(projection_type='DC', stats='bat', pos='all', team='0', qual=0), fangraphs(projection_type='DC', stats='pit', pos='all', team='0', qual=0))),
-            ("Steamer", lambda: (steamers(projection_type='steamer', pos='all', qual=0), steamers(projection_type='steamer', pos='all', qual=0, pitching=True))),
-            ("ZiPS", lambda: (zips(pos='all'), zips(pos='all'))),
-        ]
-        for name, fetch_fn in sources:
-            try:
-                bat, pit = fetch_fn()
-                if bat is not None and len(bat) > 50:
-                    print(f"✅ {name} loaded ({len(bat)} players)")
-                    return bat, pit, name
-            except Exception as e:
-                print(f"⚠️ {name} failed: {e}")
-                continue
-    except ImportError:
-        print("⚠️ pybaseball not installed")
-    return None, None, None
+        r = _SESSION.get("https://www.fangraphs.com/api/projections", params={"type": "fangraphsdc", "stats": "bat", "pos": "all", "team": 0, "players": 0, "lg": "all"}, timeout=20)
+        if r.status_code != 200: return None
+        raw = r.json()
+        data = raw.get("data", raw) if isinstance(raw, dict) else raw
+        if not isinstance(data, list) or len(data) < 50: return None
+        df = pd.DataFrame(data); df.columns = [c.strip() for c in df.columns]
+        return df
+    except Exception: return None
 
-def _build_projections_from_pybaseball(bat_df, pit_df, source_name):
+def _fetch_fg_dc_pitching() -> pd.DataFrame | None:
+    try:
+        r = _SESSION.get("https://www.fangraphs.com/api/projections", params={"type": "fangraphsdc", "stats": "pit", "pos": "all", "team": 0, "players": 0, "lg": "all"}, timeout=20)
+        if r.status_code != 200: return None
+        raw = r.json()
+        data = raw.get("data", raw) if isinstance(raw, dict) else raw
+        if not isinstance(data, list) or len(data) < 50: return None
+        df = pd.DataFrame(data); df.columns = [c.strip() for c in df.columns]
+        return df
+    except Exception: return None
+
+def _team_id_from_fg_row(row: pd.Series) -> int | None:
+    for c in ["teamid", "TeamId", "team_id"]:
+        if c in row.index and pd.notna(row.get(c)):
+            try: return int(float(str(row[c]).strip()))
+            except: pass
+    for c in ["Team", "team", "Tm", "Abbr"]:
+        if c in row.index:
+            abbr = str(row[c]).strip().upper().replace(".", "")
+            if abbr in FG_ABBR_MAP: return FG_ABBR_MAP[abbr]
+    for c in ["TeamName", "Team Name"]:
+        if c in row.index:
+            for k,v in FG_TEAM_MAP.items():
+                if k.lower() in str(row[c]).lower(): return v
+    return None
+
+def _build_fg_dc_projections(bat_df, pit_df):
     all_ids = list(TEAM_INFO.keys())
     detail = {t: {"batters":[], "sp":[], "rp":[]} for t in all_ids}
     tw, ts, tr = {}, {}, {}
-    
-    # Robust column mapping
-    wrc_c = next((c for c in bat_df.columns if c in ["wRC+", "wrc+", "wRC"]), None)
-    pa_c = next((c for c in bat_df.columns if c in ["PA", "pa"]), None)
-    nm_c = next((c for c in bat_df.columns if c in ["Name", "PlayerName", "player"]), None)
-    war_c = next((c for c in bat_df.columns if c in ["WAR", "war"]), None)
-    tm_c = next((c for c in bat_df.columns if c in ["Team", "Tm"]), None)
-    
+    wrc_c, pa_c, nm_c, war_c = next((c for c in bat_df.columns if c in ["wRC+", "wrc+", "WRC+"]), None), next((c for c in bat_df.columns if c in ["PA", "pa"]), None), next((c for c in bat_df.columns if c in ["PlayerName", "Name"]), None), next((c for c in bat_df.columns if c in ["WAR", "war"]), None)
     if wrc_c and pa_c:
-        def map_tid(row):
-            if tm_c:
-                abbr = str(row[tm_c]).strip().upper().replace(".", "")
-                if abbr in FG_ABBR_MAP: return FG_ABBR_MAP[abbr]
-                for k,v in FG_TEAM_MAP.items():
-                    if k.lower() in str(row[tm_c]).lower(): return v
-            return None
-        bat_df["_tid"] = bat_df.apply(map_tid, axis=1).dropna().astype(int)
+        bat_df["_tid"] = bat_df.apply(_team_id_from_fg_row, axis=1).dropna().astype(int)
         bat_df[wrc_c] = pd.to_numeric(bat_df[wrc_c], errors="coerce").fillna(100)
         bat_df[pa_c] = pd.to_numeric(bat_df[pa_c], errors="coerce").fillna(0)
         for t in all_ids:
@@ -268,16 +272,13 @@ def _build_projections_from_pybaseball(bat_df, pit_df, source_name):
             tw[t] = float(np.average(sub[wrc_c], weights=sub[pa_c].clip(1)))
             for _,p in sub.nlargest(9, pa_c).iterrows():
                 detail[t]["batters"].append({"name": str(p.get(nm_c,"?")), "pa": int(p[pa_c]), "wrc_plus": round(float(p[wrc_c]),1), "war": round(float(p[war_c]),1) if war_c and pd.notna(p.get(war_c)) else None})
-                
-    ip_c, gs_c, fip_c, era_c, pn_c, pw_c = next((c for c in pit_df.columns if c in ["IP", "ip"]), None), next((c for c in pit_df.columns if c in ["GS", "gs"]), None), next((c for c in pit_df.columns if c in ["FIP", "fip"]), None), next((c for c in pit_df.columns if c in ["ERA", "era"]), None), next((c for c in pit_df.columns if c in ["Name", "PlayerName"]), None), next((c for c in pit_df.columns if c in ["WAR", "war"]), None)
-    
+    ip_c, gs_c, fip_c, era_c, pn_c, pw_c = next((c for c in pit_df.columns if c in ["IP", "ip"]), None), next((c for c in pit_df.columns if c in ["GS", "gs"]), None), next((c for c in pit_df.columns if c in ["FIP", "fip"]), None), next((c for c in pit_df.columns if c in ["ERA", "era"]), None), next((c for c in pit_df.columns if c in ["PlayerName", "Name"]), None), next((c for c in pit_df.columns if c in ["WAR", "war"]), None)
     if ip_c and fip_c:
-        pit_df["_tid"] = pit_df.apply(lambda r: next((FG_ABBR_MAP.get(str(r.get(tm_c,"")).strip().upper(), None), None) for tm_c in ["Team","Tm"] if tm_c in r.index) or next((FG_TEAM_MAP.get(k) for k in FG_TEAM_MAP if k.lower() in str(r.get("Team","")).lower()), None), axis=1).dropna().astype(int)
+        pit_df["_tid"] = pit_df.apply(_team_id_from_fg_row, axis=1).dropna().astype(int)
         pit_df[ip_c] = pd.to_numeric(pit_df[ip_c], errors="coerce").fillna(0)
         pit_df[fip_c] = pd.to_numeric(pit_df[fip_c], errors="coerce").fillna(LEAGUE_AVG_FIP).clip(2.0, 7.5)
         if era_c: pit_df[era_c] = pd.to_numeric(pit_df[era_c], errors="coerce").fillna(LEAGUE_AVG_FIP).clip(1.5, 8.0)
         pit_df["_is_sp"] = pit_df[gs_c] >= 8 if gs_c else pit_df[ip_c] >= 80
-        
         for t in all_ids:
             sub = pit_df[pit_df["_tid"]==t]
             if sub.empty: continue
@@ -294,7 +295,6 @@ def _build_projections_from_pybaseball(bat_df, pit_df, source_name):
                 n = 5 if tag=="sp" else 7
                 for _,p in grp.nlargest(n, ip_c).iterrows():
                     detail[t][tag].append({"name": str(p.get(pn_c,"?")), "ip": round(float(p[ip_c]),1), "fip": round(float(p[fip_c]),2), "era": round(float(p[era_c]),2) if era_c else None, "war": round(float(p[pw_c]),1) if pw_c and pd.notna(p.get(pw_c)) else None})
-                    
     rows = []
     for t in all_ids:
         w = tw.get(t, LEAGUE_AVG_WRC)
@@ -309,16 +309,17 @@ def _build_projections_from_pybaseball(bat_df, pit_df, source_name):
 def fetch_team_projections(standings_df=None):
     all_ids = list(TEAM_INFO.keys())
     detail = {t: {"batters":[], "sp":[], "rp":[]} for t in all_ids}
-    
     try:
-        bat, pit, source = _fetch_pybaseball_chain()
-        if bat is not None and pit is not None:
-            df, detail = _build_projections_from_pybaseball(bat, pit, source)
-            if not df.empty and df["proj_win_pct"].std()>0.01:
-                df["proj_source"] = source
-                return df, detail
-    except Exception as e: print(f"Projection chain failed: {e}")
-    
+        import concurrent.futures as cf
+        with cf.ThreadPoolExecutor(max_workers=2) as ex:
+            bf, pf = ex.submit(_fetch_fg_dc_batting), ex.submit(_fetch_fg_dc_pitching)
+            bat, pit = bf.result(timeout=25), pf.result(timeout=25)
+            if bat is not None and pit is not None and len(bat)>50:
+                df, detail = _build_fg_dc_projections(bat, pit)
+                if not df.empty and df["proj_win_pct"].std()>0.01:
+                    df["proj_source"] = "FanGraphs DC"
+                    return df, detail
+    except Exception as e: print(f"FG fetch failed: {e}")
     if standings_df is not None and not standings_df.empty:
         rows = []
         for _,r in standings_df.iterrows():
@@ -327,7 +328,6 @@ def fetch_team_projections(standings_df=None):
             rows.append({"team_id": tid, "proj_runs_per_game": round(rs,3), "proj_ra_per_game": round(ra,3), "proj_win_pct": round(wp,4), "proj_sp_fip": LEAGUE_AVG_FIP, "proj_rp_fip": LEAGUE_AVG_FIP, "proj_wrc_plus": LEAGUE_AVG_WRC})
         df = pd.DataFrame(rows); df["proj_source"] = "Regression-to-Mean"
         return df, detail
-        
     df = pd.DataFrame([{"team_id": t, "proj_runs_per_game": LEAGUE_AVG_RPG, "proj_ra_per_game": LEAGUE_AVG_RPG, "proj_win_pct": 0.5, "proj_sp_fip": LEAGUE_AVG_FIP, "proj_rp_fip": LEAGUE_AVG_FIP, "proj_wrc_plus": LEAGUE_AVG_WRC} for t in all_ids])
     df["proj_source"] = "League Average"
     return df, detail
@@ -522,7 +522,7 @@ def render_projections_tab(df, sim):
     st.caption(f"Updated daily at midnight EST · 10,000-sim Monte Carlo · Source: {src}")
     rows = []
     for _,r in df.iterrows():
-        rows.append({"Team": r["abbr"], "W": r["wins"], "L": r["losses"], "Win%": f"{r['win_pct']:.3f}", "Pythag%": f"{r['pythag_win_pct']:.3f}", "GB(WC)": f"{r['wc_games_back']:.1f}" if r["wc_games_back"]>0 else "—", "Proj W": round(sim["proj_wins"].get(r["team_id"], r["wins"]), 1), "Proj L": round(162-sim["proj_wins"].get(r["team_id"], r["wins"]), 1), "Proj Rec": f"{int(round(sim['proj_wins'].get(r['team_id'], r['wins'])))}-{int(round(162-sim['proj_wins'].get(r['team_id'], r['wins'])))}", "Div%": f"{sim['division_odds'].get(r['team_id'],0):.1%}", "Playoff%": f"{sim['playoff_odds'].get(r['team_id'],0):.1%}", "WS%": f"{sim['ws_odds'].get(r['team_id'],0):.2%}", "Status": r.get("tier_label","Neutral"), "tier": r.get("tier","neutral"), "SoS": r.get("sos_label","—")})
+        rows.append({"Team": r["abbr"], "W": r["wins"], "L": r["losses"], "Win%": f"{r['win_pct']:.3f}", "Pythag%": f"{r['pythag_win_pct']:.3f}", "GB(WC)": f"{r['wc_games_back']:.1f}" if r["wc_games_back"]>0 else "—", "Proj W": round(sim["proj_wins"].get(r["team_id"], r["wins"]), 1), "Proj L": round(162-sim["proj_wins"].get(r["team_id"], r["wins"]), 1), "Proj Rec": f"{int(round(sim['proj_wins'].get(r['team_id'], r['wins'])))}-{int(round(162-sim['proj_wins'].get(r['team_id'], r['wins'])))}", "Div%": f"{sim['division_odds'].get(r["team_id'],0):.1%}", "Playoff%": f"{sim['playoff_odds'].get(r["team_id'],0):.1%}", "WS%": f"{sim['ws_odds'].get(r["team_id'],0):.2%}", "Status": r.get("tier_label","Neutral"), "tier": r.get("tier","neutral"), "SoS": r.get("sos_label","—")})
     disp = pd.DataFrame(rows)
     c1, c2 = st.columns(2)
     lf = c1.radio("League", ["All","AL","NL"], horizontal=True, key="proj_league")
@@ -569,7 +569,6 @@ def render_deadline_tab(df, sim):
 def render_team_tab(df, sim):
     st.markdown("## Team Detail")
     opts = sorted([(r["name"], r["team_id"]) for _,r in df.iterrows()])
-    # Persistent state to prevent tab jumping
     if "selected_team_idx" not in st.session_state: st.session_state.selected_team_idx = 0
     sel = st.selectbox("Select a team", [o[0] for o in opts], index=st.session_state.selected_team_idx, key="team_sel")
     st.session_state.selected_team_idx = [o[0] for o in opts].index(sel)
@@ -646,7 +645,7 @@ def load_all_data():
     up(30, "📅 Fetching schedule...")
     try: sched = fetch_schedule()
     except: sched = pd.DataFrame(columns=["game_id","game_date","home_team_id","away_team_id","status"])
-    up(50, "⚾ Fetching projections (pybaseball chain)...")
+    up(50, "⚾ Fetching projections...")
     proj, det = fetch_team_projections(stand)
     up(70, "🧮 Building master...")
     master = build_master(stand, proj, det)
@@ -665,6 +664,23 @@ def load_all_data():
     return master, sim, sched
 
 def main():
+    # Header with logo
+    col_logo, col_title = st.columns([1, 10])
+    with col_logo:
+        st.image("logo.png", width=60)  # Place your logo.png in the same directory
+    with col_title:
+        st.title(f"⚾ MLB {SEASON_YEAR} Projections")
+    
+    # Disclaimer
+    st.markdown("""
+    <div class="disclaimer">
+    <strong>⚠️ Daily Update Notice:</strong> This website updates automatically each day between midnight and 12:30 AM EST. 
+    During this window, data may be temporarily unavailable or show mixed states. Please check back after 12:30 AM for complete updated projections.
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.caption(f"Source: {m['proj_source'].iloc[0] if 'm' in locals() else 'Loading...'} · Updated: {get_last_updated()}")
+    
     if "master_df" not in st.session_state or not st.session_state.get("data_loaded"):
         try:
             m, s, sch = load_all_data()
@@ -677,8 +693,7 @@ def main():
     else:
         m, s, sch = st.session_state["master_df"], st.session_state["sim_results"], st.session_state["schedule_df"]
     if m.empty: st.warning("No data"); st.stop()
-    st.title(f"⚾ MLB {SEASON_YEAR} Projections")
-    st.caption(f"Source: {m['proj_source'].iloc[0]} · Updated: {get_last_updated()}")
+    
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Projections", "🔄 Deadline Impact", "🔍 Team Detail", "📖 Methodology"])
     with tab1: render_projections_tab(m, s)
     with tab2: render_deadline_tab(m, s)
