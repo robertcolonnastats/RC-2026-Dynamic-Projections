@@ -57,7 +57,7 @@ N_SIMULATIONS = 1_000
 RANDOM_SEED = 42
 CACHE_DIR = "/tmp/rc_mlb_2026_v17"
 CACHE_FILE = "/tmp/rc_mlb_2026_v17/latest.json"
-CACHE_VERSION = "v17-full-clean-fix"
+CACHE_VERSION = "v17-roster-synced-fixed"
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
 TEAM_INFO = {
@@ -87,6 +87,36 @@ EST = ZoneInfo("America/New_York")
 # CACHE & ROSTER SYNC
 # ==============================================================================
 def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
+_ROSTER_CACHE = {}
+
+def fetch_team_statuses():
+    today = date.today().isoformat()
+    if _ROSTER_CACHE.get("date") == today and _ROSTER_CACHE.get("data"):
+        return _ROSTER_CACHE["data"]
+    data, il_codes = {}, {"IL10", "IL60", "DL10", "DL15", "DL60", "7DL", "10DL", "60DL"}
+    for tid in TEAM_INFO:
+        try:
+            act = requests.get(f"{MLB_API_BASE}/teams/{tid}/roster", params={"rosterType": "active", "season": SEASON_YEAR}, timeout=10)
+            active_ids = {p["person"]["id"] for p in act.json().get("roster", [])} if act.status_code == 200 else set()
+            ros = requests.get(f"{MLB_API_BASE}/teams/{tid}/roster", params={"rosterType": "40Man", "season": SEASON_YEAR}, timeout=10)
+            il_ids = {p["person"]["id"] for p in ros.json().get("roster", []) if p.get("status", {}).get("code", "") in il_codes} if ros.status_code == 200 else set()
+            data[tid] = {"active": active_ids, "il": il_ids}
+        except: data[tid] = {"active": set(), "il": set()}
+    _ROSTER_CACHE["data"], _ROSTER_CACHE["date"] = data, today
+    return data
+
+def get_season_state():
+    today, open_d, ws, dl, ramp = date.today(), date.fromisoformat(OPENING_DAY), date.fromisoformat(WORLD_SERIES_END_APPROX), date.fromisoformat(TRADE_DEADLINE), date.fromisoformat(DEADLINE_RAMP_START)
+    if today < open_d or today > ws: return "offseason"
+    elif today > dl: return "post_deadline"
+    elif today >= ramp: return "deadline_ramp"
+    return "pre_deadline"
+
+def get_deadline_ramp_factor():
+    today, rs, dl = date.today(), date.fromisoformat(DEADLINE_RAMP_START), date.fromisoformat(TRADE_DEADLINE)
+    if today < rs: return 0.0
+    if today >= dl: return 1.0
+    return round(min(max((today - rs).days / max((dl - rs).days, 1), 0.0), 1.0), 4)
 
 def get_last_updated():
     _ensure_cache_dir()
@@ -97,8 +127,7 @@ def is_cache_valid():
     _ensure_cache_dir()
     if not os.path.exists(CACHE_FILE): return False
     mtime = os.path.getmtime(CACHE_FILE)
-    now_est = datetime.now(EST)
-    if mtime < now_est.replace(hour=0, minute=0, second=0, microsecond=0).timestamp(): return False
+    if mtime < datetime.now(EST).replace(hour=0, minute=0, second=0, microsecond=0).timestamp(): return False
     try:
         with open(CACHE_FILE) as f:
             if json.load(f).get("cache_version") != CACHE_VERSION:
@@ -118,22 +147,6 @@ def save_cache(payload):
         payload["cache_version"] = CACHE_VERSION
         with open(CACHE_FILE, "w") as f: json.dump(payload, f, default=str)
     except Exception as e: print(f"Cache write failed: {e}")
-
-def fetch_active_rosters():
-    """Fetches current active rosters to handle trades and callups."""
-    roster_map = {}
-    with cf.ThreadPoolExecutor(max_workers=10) as ex:
-        futures = {ex.submit(requests.get, f"{MLB_API_BASE}/teams/{tid}/roster", 
-                             params={"rosterType": "active", "season": SEASON_YEAR}, timeout=10): tid 
-                   for tid in TEAM_INFO}
-        for future in cf.as_completed(futures):
-            tid = futures[future]
-            try:
-                resp = future.result()
-                if resp.status_code == 200:
-                    roster_map[tid] = {p["person"]["id"] for p in resp.json().get("roster", [])}
-            except: roster_map[tid] = set()
-    return roster_map
 
 # ==============================================================================
 # DATA FETCHING
@@ -159,8 +172,11 @@ def fetch_standings():
     for lg in ["AL", "NL"]:
         lg_df = df[df["league"] == lg].copy()
         div_leaders = lg_df.groupby("division")["win_pct"].idxmax()
-        lg_df.loc[~lg_df.index.isin(div_leaders), "wc_games_back"] = lg_df.apply(
-            lambda r: round(((lg_df[lg_df.index != r.name]["win_pct"].nlargest(3).min() if len(lg_df[lg_df.index != r.name]) >= 3 else 0.0) - r["win_pct"]) * r["games_played"], 1) if r["team_id"] not in div_leaders.values else -5.0, axis=1)
+        wc_pool = lg_df[~lg_df.index.isin(div_leaders)].sort_values("win_pct", ascending=False)
+        wc_cutoff = wc_pool.iloc[2]["win_pct"] if len(wc_pool) >= 3 else (wc_pool.iloc[-1]["win_pct"] if len(wc_pool) > 0 else 0.5)
+        for idx, row in lg_df.iterrows():
+            if idx in div_leaders.values: lg_df.loc[idx, "wc_games_back"] = -5.0
+            else: lg_df.loc[idx, "wc_games_back"] = round((wc_cutoff - row["win_pct"]) * row["games_played"], 1)
         df.loc[df["league"] == lg, "wc_games_back"] = lg_df["wc_games_back"]
     return df.sort_values(["league", "division", "wins"], ascending=[True, True, False])
 
@@ -206,31 +222,25 @@ PA_FULL_WEIGHT, IP_FULL_WEIGHT = 300, 100
 
 PECOTA_TEAM_MAP = {"ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CHW":145, "CIN":113, "CLE":114, "COL":115, "DET":116, "HOU":117, "KC":118, "LAA":108, "LAD":119, "MIA":146, "MIL":158, "MIN":142, "NYM":121, "NYY":147, "PHI":143, "PIT":134, "OAK":133, "SD":135, "SEA":136, "SF":137, "STL":138, "TB":139, "TEX":140, "TOR":141, "WAS":120}
 
-# JSON data loaded from environment or defined here.
-# Note: The code below handles trailing spaces in JSON automatically.
-_PECOTA_HIT_JSON = '[]' # Paste full JSON string here
-_PECOTA_PIT_JSON = '[]' # Paste full JSON string here
+# ⚠️ PASTE YOUR FULL JSON STRINGS HERE. The code handles cleaning automatically.
+_PECOTA_HIT_JSON = '[{"mlbid":592450,"name":"Aaron Judge","team":"NYY","pos":"RF","age":34,"pa":672,"drc_plus":175,"ops":0.985,"warp":7.3},{"mlbid":660271,"name":"Shohei Ohtani","team":"LAD","pos":"DH","age":31,"pa":700,"drc_plus":156,"ops":0.931,"warp":6.3},{"mlbid":665742,"name":"Juan Soto","team":"NYM","pos":"LF","age":27,"pa":668,"drc_plus":155,"ops":0.899,"warp":6.2},{"mlbid":677951,"name":"Bobby Witt Jr.","team":"KC","pos":"SS","age":26,"pa":668,"drc_plus":136,"ops":0.831,"warp":5.2}]'
+_PECOTA_PIT_JSON = '[{"mlbid":669373,"name":"Tarik Skubal","team":"DET","age":29.0,"g":29,"gs":29,"ip":192.3,"era":2.42,"fip":2.76,"warp":6.0,"role":"SP"},{"mlbid":676979,"name":"Garrett Crochet","team":"BOS","age":27.0,"g":31,"gs":31,"ip":193.7,"era":3.08,"fip":3.05,"warp":4.5,"role":"SP"},{"mlbid":694973,"name":"Paul Skenes","team":"PIT","age":24.0,"g":29,"gs":29,"ip":177.7,"era":3.02,"fip":3.04,"warp":4.5,"role":"SP"},{"mlbid":519242,"name":"Chris Sale","team":"ATL","age":37.0,"g":28,"gs":28,"ip":165.0,"era":2.92,"fip":3.11,"warp":4.3,"role":"SP"},{"mlbid":650911,"name":"Cristopher Sanchez","team":"PHI","age":29.0,"g":29,"gs":29,"ip":183.7,"era":3.38,"fip":3.12,"warp":4.1,"role":"SP"},{"mlbid":554430,"name":"Zack Wheeler","team":"PHI","age":36.0,"g":21,"gs":21,"ip":105.0,"era":2.97,"fip":3.36,"warp":2.8,"role":"SP"},{"mlbid":605400,"name":"Aaron Nola","team":"PHI","age":33.0,"g":29,"gs":29,"ip":163.0,"era":4.11,"fip":4.01,"warp":2.3,"role":"SP"}]'
 
 _ph = None; _pp = None
 def _pecota():
     global _ph, _pp
     if _ph is None:
-        raw = json.loads(_PECOTA_HIT_JSON)
-        # Clean spaces in keys and string values
-        clean_data = [{k.strip(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()} for row in raw]
-        _ph = pd.DataFrame(clean_data)
+        _ph = pd.DataFrame(json.loads(_PECOTA_HIT_JSON))
+        _ph.columns = _ph.columns.str.strip()
+        for c in _ph.select_dtypes(include='object').columns: _ph[c] = _ph[c].str.strip()
         _ph["team_id"] = _ph["team"].map(PECOTA_TEAM_MAP)
-        _ph = _ph.dropna(subset=["team_id"])
-        _ph["team_id"] = _ph["team_id"].astype(int)
-        _ph["mlbid"] = _ph["mlbid"].astype(int)
+        _ph = _ph.dropna(subset=["team_id"]); _ph["team_id"] = _ph["team_id"].astype(int)
     if _pp is None:
-        raw = json.loads(_PECOTA_PIT_JSON)
-        clean_data = [{k.strip(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()} for row in raw]
-        _pp = pd.DataFrame(clean_data)
+        _pp = pd.DataFrame(json.loads(_PECOTA_PIT_JSON))
+        _pp.columns = _pp.columns.str.strip()
+        for c in _pp.select_dtypes(include='object').columns: _pp[c] = _pp[c].str.strip()
         _pp["team_id"] = _pp["team"].map(PECOTA_TEAM_MAP)
-        _pp = _pp.dropna(subset=["team_id"])
-        _pp["team_id"] = _pp["team_id"].astype(int)
-        _pp["mlbid"] = _pp["mlbid"].astype(int)
+        _pp = _pp.dropna(subset=["team_id"]); _pp["team_id"] = _pp["team_id"].astype(int)
     return _ph, _pp
 
 def fetch_team_projections(standings_df, roster_map):
@@ -246,41 +256,27 @@ def fetch_team_projections(standings_df, roster_map):
     rows = []
     for tid in all_ids:
         active_ids = roster_map.get(tid, set())
-        # Filter PECOTA data for this team (handling roster sync)
-        # If player is active on THIS team, count them. If active elsewhere, ignore.
-        # If not active anywhere, assume PECOTA assignment is correct (e.g. minor league).
-        ph_team = ph[ph["team_id"] == tid]
-        pp_team = pp[pp["team_id"] == tid]
+        ph_team = ph[ph["team_id"] == tid]; pp_team = pp[pp["team_id"] == tid]
         
-        # Hitters
         lineup = ph_team.sort_values("pa", ascending=False).head(9)
         if not lineup.empty:
-            weights = []
-            for _, r in lineup.iterrows():
-                # If player is active on THIS team, full weight. If not active (IL/Minors), low weight.
-                w = 600.0 if r["mlbid"] in active_ids else 10.0
-                weights.append(w)
+            weights = [600.0 if r["mlbid"] in active_ids else 10.0 for _, r in lineup.iterrows()]
             pecota_ops = float(np.average(lineup["ops"].fillna(LEAGUE_AVG_OPS), weights=weights))
         else: pecota_ops = LEAGUE_AVG_OPS
         pecota_ops = float(np.clip(pecota_ops, 0.620, 0.850))
         
         reg_sens = 0.15 if not lineup.empty and lineup["drc_plus"].mean() > 110 else 0.30
-        cur_pa = float(team_pa.get(tid, 0)); w_cur = min(cur_pa / PA_FULL_WEIGHT, 1.0); w_pri = 1.0 - w_cur
-        xwoba = LEAGUE_AVG_XWOBA # Placeholder for full statcast logic
-        team_ops = float(np.clip(pecota_ops * (1 + (xwoba/LEAGUE_AVG_XWOBA - 1) * reg_sens), 0.620, 0.850))
+        cur_pa = float(team_pa.get(tid, 0)); w_cur = min(cur_pa / PA_FULL_WEIGHT, 1.0)
+        team_ops = float(np.clip(pecota_ops * (1 + (LEAGUE_AVG_XWOBA/LEAGUE_AVG_XWOBA - 1) * reg_sens), 0.620, 0.850))
         proj_rpg = float(np.clip((team_ops/LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG, 2.5, 7.5))
         
-        # Pitchers
         sp = pp_team[pp_team["role"] == "SP"].sort_values("ip", ascending=False)
         rp = pp_team[pp_team["role"] == "RP"].sort_values("ip", ascending=False)
         def calc_era(df, role):
             if df.empty or df["ip"].sum() == 0: return LEAGUE_AVG_ERA
-            weights = []
-            for _, r in df.iterrows():
-                w = (185.0 if role=="SP" else 65.0) if r["mlbid"] in active_ids else max(r["ip"], 1.0)
-                weights.append(w)
+            w = [185.0 if role=="SP" else 65.0 if r["mlbid"] in active_ids else max(r["ip"], 1.0) for _, r in df.iterrows()]
             blended = (df["fip"].fillna(LEAGUE_AVG_FIP)*0.7 + df["era"].fillna(LEAGUE_AVG_ERA)*0.3).clip(2.0, 7.5)
-            return float(np.average(blended, weights=weights))
+            return float(np.average(blended, weights=w))
             
         sp_era = float(np.clip(calc_era(sp, "SP"), 2.80, 5.50))
         rp_era = float(np.clip(calc_era(rp, "RP"), 3.00, 5.50))
@@ -307,15 +303,10 @@ def build_master(std, prj):
     df = df.merge(prj[merge_cols], on="team_id", how="left")
     df["pythag_win_pct"] = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
     gp = df["games_played"].clip(0, 162)
-    
-    # Sliding scale: trust projections more early, record more late
-    sample_w = gp.apply(lambda g: 0.0 if g < 20 else 1.0 if g >= 100 else 0.5 * (1 + np.tanh(3 * ((g - 20) / 80 - 0.5))))
     base_proj_w = (0.70 - (gp / 162.0) * 0.25).clip(0.45, 0.70)
-    
     il_frac = (df["il_warp"] / TYPICAL_TEAM_WARP).clip(0.0, 0.50)
     adj_pyth_w = (1.0 - base_proj_w) * (1.0 - il_frac)
     adj_proj_w = 1.0 - adj_pyth_w
-    
     df["blended_win_pct"] = (df["proj_win_pct"]*adj_proj_w + df["pythag_win_pct"]*adj_pyth_w).clip(0.20, 0.80)
     df["games_remaining"] = (162 - gp).clip(0, 162)
     return df
@@ -439,17 +430,10 @@ def load_all_data():
     if cached:
         m = pd.DataFrame(cached["master"]); s = cached.get("sim_results", {}); sc = pd.DataFrame(cached.get("schedule", []))
         if not m.empty and s: return m, s, sc
-    st.markdown("### ⚾ Loading fresh data..."); pb = st.progress(0)
-    
-    # Fetch Active Rosters First
-    roster_map = fetch_active_rosters(); pb.progress(20)
-    
-    std = fetch_standings(); pb.progress(40)
-    sch = fetch_schedule(); pb.progress(50)
-    
-    # Run Projections with Live Roster Data
-    prj, det = fetch_team_projections(std, roster_map); pb.progress(70)
-    
+    st.markdown("### ⚾ Loading fresh data... (Syncing Rosters)"); pb = st.progress(0)
+    roster_map = fetch_team_statuses(); pb.progress(20)
+    std = fetch_standings(); pb.progress(40); sch = fetch_schedule()
+    prj, det = fetch_team_projections(std, roster_map); pb.progress(60)
     mst = build_master(std, prj)
     mst = compute_buyer_seller(mst)
     mst = apply_ramp(mst, get_deadline_ramp_factor())
@@ -457,16 +441,13 @@ def load_all_data():
     mst = compute_sos(mst, compute_remaining_opponents(sch))
     mst = apply_schedule_adjustment(mst, SOS_SENSITIVITY)
     sim = run_simulation(mst, sch); pb.progress(100)
-    
     save_cache({"master": mst.to_dict(orient="records"), "sim_results": sim, "schedule": sch.to_dict(orient="records")})
     return mst, sim, sch
 
 def main():
     st.markdown("# MLB 2026 Season Projections")
     if "master_df" not in st.session_state or not st.session_state.get("loaded"):
-        try:
-            m, s, sc = load_all_data()
-            st.session_state.update(master_df=m, sim_results=s, schedule_df=sc, loaded=True)
+        try: m, s, sc = load_all_data(); st.session_state.update(master_df=m, sim_results=s, schedule_df=sc, loaded=True)
         except Exception as e: st.error(f"Load failed: {e}"); st.stop()
     m, s, sc = st.session_state["master_df"], st.session_state["sim_results"], st.session_state["schedule_df"]
     if m.empty: st.warning("No data"); st.stop()
