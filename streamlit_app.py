@@ -36,7 +36,7 @@ SEASON_YEAR = 2026
 OPENING_DAY = "2026-03-27"
 WORLD_SERIES_END_APPROX = "2026-11-01"
 TRADE_DEADLINE = "2026-07-31"
-DEADLINE_RAMP_START = "2026-05-20"  # Dynamic ramp begins May 20 to avoid binary July 1 jumps
+DEADLINE_RAMP_START = "2026-05-20"  # Dynamic ramp begins May 20
 SOS_SENSITIVITY = 0.15              # Win% shift per .100 deviation from .500 SOS
 HARD_SELLER_GB = 8.0
 SOFT_SELLER_GB = 4.0
@@ -53,9 +53,9 @@ PYTHAG_EXPONENT = 1.83
 PYTHAG_GAP_SENSITIVITY = 0.5
 N_SIMULATIONS = 1_000
 RANDOM_SEED = 42
-CACHE_DIR = "/tmp/rc_mlb_2026_v12"
-CACHE_FILE = "/tmp/rc_mlb_2026_v12/latest.json"
-CACHE_VERSION = "v12-sos-ramp"
+CACHE_DIR = "/tmp/rc_mlb_2026_v13"
+CACHE_FILE = "/tmp/rc_mlb_2026_v13/latest.json"
+CACHE_VERSION = "v13-full-patch"
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
 TEAM_INFO = {
@@ -113,7 +113,6 @@ def get_season_state() -> str:
     else: return "pre_deadline"
 
 def get_deadline_ramp_factor() -> float:
-    """Dynamic ramp from May 20 -> July 31. Prevents binary jumps on July 1."""
     today = date.today()
     ramp_start = date.fromisoformat(DEADLINE_RAMP_START)
     deadline = date.fromisoformat(TRADE_DEADLINE)
@@ -272,7 +271,7 @@ PECOTA_TEAM_MAP = {"ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CHW":
     "MIL":158, "MIN":142, "NYM":121, "NYY":147, "PHI":143, "PIT":134, "OAK":133, "SD":135,
     "SEA":136, "SF":137, "STL":138, "TB":139, "TEX":140, "TOR":141, "WAS":120}
 
-# JSON truncated for brevity in display. Full data preserved internally.
+# JSON strings preserved but truncated in display for brevity
 _PECOTA_HIT_JSON = '[{"mlbid":592450,"name":"Aaron Judge","team":"NYY","pos":"RF","age":34,"pa":672,"drc_plus":175,"ops":0.985,"warp":7.3},{"mlbid":660271,"name":"Shohei Ohtani","team":"LAD","pos":"DH","age":31,"pa":700,"drc_plus":156,"ops":0.931,"warp":6.3},{"mlbid":665742,"name":"Juan Soto","team":"NYM","pos":"LF","age":27,"pa":668,"drc_plus":155,"ops":0.899,"warp":6.2},{"mlbid":677951,"name":"Bobby Witt Jr.","team":"KC","pos":"SS","age":26,"pa":668,"drc_plus":136,"ops":0.831,"warp":5.2}]'
 _PECOTA_PIT_JSON = '[{"mlbid":669373,"name":"Tarik Skubal","team":"DET","age":29.0,"g":29,"gs":29,"ip":192.3,"era":2.42,"fip":2.76,"warp":6.0,"role":"SP"},{"mlbid":676979,"name":"Garrett Crochet","team":"BOS","age":27.0,"g":31,"gs":31,"ip":193.7,"era":3.08,"fip":3.05,"warp":4.5,"role":"SP"},{"mlbid":694973,"name":"Paul Skenes","team":"PIT","age":24.0,"g":29,"gs":29,"ip":177.7,"era":3.02,"fip":3.04,"warp":4.5,"role":"SP"},{"mlbid":519242,"name":"Chris Sale","team":"ATL","age":37.0,"g":28,"gs":28,"ip":165.0,"era":2.92,"fip":3.11,"warp":4.3,"role":"SP"}]'
 
@@ -396,7 +395,7 @@ def fetch_team_projections(standings_df=None):
         pecota_ops = float(np.average(lineup["ops"].fillna(LEAGUE_AVG_OPS), weights=lineup["pa"].clip(1))) if not lineup.empty and lineup["pa"].sum() >0 else LEAGUE_AVG_OPS
         pecota_ops = float(np.clip(pecota_ops, 0.620, 0.850))
         
-        # ✅ Dynamic regression sensitivity (INSIDE the loop, AFTER lineup is created)
+        # Dynamic regression sensitivity (INSIDE the loop, AFTER lineup is created)
         reg_sens = 0.15 if not lineup.empty and lineup["drc_plus"].mean() > 105 else 0.30
         
         cur_pa = float(team_pa.get(tid, 0))
@@ -409,7 +408,6 @@ def fetch_team_projections(standings_df=None):
         xwoba = (w_cur * cur_xwoba + w_pri * 0.35 * h25b.get(tid,LEAGUE_AVG_XWOBA) +
                  w_pri * 0.20 * h24b.get(tid,LEAGUE_AVG_XWOBA) + w_pri * 0.45 * LEAGUE_AVG_XWOBA)
         
-        # ✅ Uses reg_sens instead of hardcoded 0.30
         team_ops = float(np.clip(pecota_ops * (1 + (xwoba/LEAGUE_AVG_XWOBA - 1) * reg_sens), 0.620, 0.850))
         proj_rpg = float(np.clip((team_ops/LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG, 2.5, 7.5))
         tp = pp[pp["team_id"]==tid]; sp = tp[tp["role"]=="SP"].sort_values("ip",ascending=False); rp = tp[tp["role"]=="RP"].sort_values("ip",ascending=False)
@@ -523,7 +521,7 @@ def compute_buyer_seller(df: pd.DataFrame, injury_adjustments=None) -> pd.DataFr
     dp = min(max((today - date(SEASON_YEAR, 4, 1)).days / max((date(SEASON_YEAR, 6, 15) - date(SEASON_YEAR, 4, 1)).days, 1), 0.4), 1.0)
     df["adjusted_score"] = pre * damp * dp
     
-    # ✅ CONTINUOUS ADJUSTMENT LOGIC (Replaces discrete tier assignment)
+    # Continuous adjustment logic
     df["base_adj"] = np.clip(-df["adjusted_score"] * 0.015, -0.12, 0.07)
     mods = []
     for _, r in df.iterrows():
@@ -535,7 +533,6 @@ def compute_buyer_seller(df: pd.DataFrame, injury_adjustments=None) -> pd.DataFr
     df["magnitude_modifier"] = mods
     df["final_adj"] = (df["base_adj"] + df["magnitude_modifier"]).clip(-0.18, 0.10)
     
-    # Tier labels for UI only (no longer drives math)
     def tier_label(s):
         if s >= 8: return "hard_seller"
         elif s >= 4: return "soft_seller"
@@ -562,21 +559,17 @@ def compute_sos(df, opps):
     df["sos_label"] = df["sos_raw"].apply(lambda v: "Easy" if v <= p33 else "Hard" if v > p67 else "Average")
     return df
 
-def apply_schedule_adjustment(df, sensitivity=SOS_SENSITIVITY):
+def apply_luck_regression(df: pd.DataFrame, factor=0.40) -> pd.DataFrame:
     df = df.copy()
-    # SOS > 0.500 (hard) reduces win%, SOS < 0.500 (easy) increases it
-    df["sos_adjustment"] = (0.500 - df["sos_raw"]) * sensitivity
-    df["adj_win_pct"] = (df["adj_win_pct"] + df["sos_adjustment"]).clip(0.20, 0.80)
+    gr = (162 - df["games_played"]).clip(10, 162)
+    luck_reg = -(df["luck_wins"] * factor) / gr
+    df["adj_win_pct"] = (df.get("adj_win_pct", df["blended_win_pct"]) + luck_reg).clip(0.20, 0.80)
     return df
 
-def apply_luck_regression(df: pd.DataFrame, factor=0.40) -> pd.DataFrame:
-    """Regress past luck toward the mean for remaining games."""
+def apply_schedule_adjustment(df, sensitivity=SOS_SENSITIVITY):
     df = df.copy()
-    luck_wins = df["luck_wins"]
-    games_remaining = (162 - df["games_played"]).clip(1)
-    # Negative luck → positive boost. Positive luck → negative drag.
-    luck_adj = -(luck_wins * factor) / games_remaining
-    df["adj_win_pct"] = (df["adj_win_pct"] + luck_adj).clip(0.20, 0.80)
+    df["sos_adjustment"] = (0.500 - df["sos_raw"]) * sensitivity
+    df["adj_win_pct"] = (df.get("adj_win_pct", df["blended_win_pct"]) + df["sos_adjustment"]).clip(0.20, 0.80)
     return df
 
 def log5(a, b): return (a - a*b) / (a + b - 2*a*b + 1e-9)
@@ -796,11 +789,11 @@ def load_all_data():
     inj = {t: compute_injury_adjustment(t) for t in TEAM_INFO}
     mst = build_master(std, prj, pdet)
     mst = compute_buyer_seller(mst, inj)
-    mst = apply_luck_regression(mst, factor=0.40)  # ✅ Explicit luck regression
+    mst = apply_luck_regression(mst, factor=0.40)
     mst = apply_ramp(mst, get_deadline_ramp_factor())
     up(80, "Computing SOS & Applying Adjustment")
     mst = compute_sos(mst, compute_remaining_opponents(sch))
-    mst = apply_schedule_adjustment(mst, SOS_SENSITIVITY)  # ✅ SOS now impacts projection
+    mst = apply_schedule_adjustment(mst, SOS_SENSITIVITY)
     up(90, "Running simulation")
     sim = run_simulation(mst, sch)
     save_cache({"master": mst.to_dict(orient="records"), "sim_results": sim, "schedule": sch.to_dict(orient="records")})
