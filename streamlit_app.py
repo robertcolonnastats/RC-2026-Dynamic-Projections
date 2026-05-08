@@ -1,7 +1,7 @@
 """
-MLB 2026 Season Projections (Hybrid Edition)
-Uses official PECOTA DC RS/RA baselines to guarantee accurate talent projections.
-Features: Live Roster Sync, Reduced Pythag Regression (gp/(gp+30)), Scaled SOS.
+MLB 2026 Season Projections (Hybrid v21)
+Official PECOTA RS/RA baselines with Pythag Baseline Clamp.
+Features: Live Roster Sync, Reduced Regression, Scaled SOS, Luck Regression.
 """
 import os
 import json
@@ -32,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# CONSTANTS
+# CONSTANTS & PECOTA BASELINES (From PDF)
 # ==============================================================================
 SEASON_YEAR = 2026
 OPENING_DAY = "2026-03-27"
@@ -43,9 +43,9 @@ SOS_SENSITIVITY = 0.15
 PYTHAG_EXPONENT = 1.83
 N_SIMULATIONS = 1_000
 RANDOM_SEED = 42
-CACHE_DIR = "/tmp/rc_mlb_2026_v20"
-CACHE_FILE = "/tmp/rc_mlb_2026_v20/latest.json"
-CACHE_VERSION = "v20-hybrid-pecota-embedded"
+CACHE_DIR = "/tmp/rc_mlb_2026_v21"
+CACHE_FILE = "/tmp/rc_mlb_2026_v21/latest.json"
+CACHE_VERSION = "v21-hybrid-clamp"
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
 TEAM_INFO = {
@@ -71,10 +71,7 @@ TIER_COLORS = {"hard_seller": "#d62728", "soft_seller": "#ff7f0e", "neutral": "#
 TIER_EMOJI = {"hard_seller": "🔴", "soft_seller": "🟠", "neutral": "⚪", "soft_buyer": "🟢", "hard_buyer": "🔵"}
 EST = ZoneInfo("America/New_York")
 
-# ==============================================================================
-# OFFICIAL PECOTA DC RUNS (Extracted from your PDF)
-# This guarantees accurate baselines without JSON parsing failures.
-# ==============================================================================
+# Official PECOTA DC RS/RA from your PDF
 PECOTA_DC_RS = {108:693, 109:715, 110:756, 111:685, 112:782, 113:710, 114:700, 115:678, 116:714, 117:769, 118:693, 119:846, 120:705, 121:715, 133:761, 134:729, 135:708, 136:713, 137:658, 138:672, 139:713, 140:684, 141:708, 142:729, 143:741, 144:786, 145:684, 146:674, 147:805, 158:741}
 PECOTA_DC_RA = {108:802, 109:763, 110:758, 111:688, 112:670, 113:785, 114:712, 115:858, 116:694, 117:827, 118:714, 119:620, 120:820, 121:684, 133:816, 134:709, 135:707, 136:622, 137:716, 138:757, 139:656, 140:644, 141:685, 142:764, 143:722, 144:655, 145:778, 146:711, 147:642, 158:682}
 
@@ -88,6 +85,7 @@ def calc_pythag(rs, ra):
 def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
 _ROSTER_CACHE = {}
 def fetch_team_statuses():
+    """Fetches current active rosters to handle trades and callups."""
     today = date.today().isoformat()
     if _ROSTER_CACHE.get("date") == today and _ROSTER_CACHE.get("data"): return _ROSTER_CACHE["data"]
     data, il_codes = {}, {"IL10", "IL60", "DL10", "DL15", "DL60", "7DL", "10DL", "60DL"}
@@ -95,10 +93,19 @@ def fetch_team_statuses():
         try:
             act = requests.get(f"{MLB_API_BASE}/teams/{tid}/roster", params={"rosterType": "active", "season": SEASON_YEAR}, timeout=10)
             active_ids = {p["person"]["id"] for p in act.json().get("roster", [])} if act.status_code == 200 else set()
-            data[tid] = {"active": active_ids}
-        except: data[tid] = {"active": set()}
+            ros = requests.get(f"{MLB_API_BASE}/teams/{tid}/roster", params={"rosterType": "40Man", "season": SEASON_YEAR}, timeout=10)
+            il_ids = {p["person"]["id"] for p in ros.json().get("roster", []) if p.get("status", {}).get("code", "") in il_codes} if ros.status_code == 200 else set()
+            data[tid] = {"active": active_ids, "il": il_ids}
+        except: data[tid] = {"active": set(), "il": set()}
     _ROSTER_CACHE["data"], _ROSTER_CACHE["date"] = data, today
     return data
+
+def get_season_state():
+    today, open_d, ws, dl, ramp = date.today(), date.fromisoformat(OPENING_DAY), date.fromisoformat(WORLD_SERIES_END_APPROX), date.fromisoformat(TRADE_DEADLINE), date.fromisoformat(DEADLINE_RAMP_START)
+    if today < open_d or today > ws: return "offseason"
+    elif today > dl: return "post_deadline"
+    elif today >= ramp: return "deadline_ramp"
+    return "pre_deadline"
 
 def get_deadline_ramp_factor():
     today, rs, dl = date.today(), date.fromisoformat(DEADLINE_RAMP_START), date.fromisoformat(TRADE_DEADLINE)
@@ -206,25 +213,31 @@ def compute_remaining_opponents(df):
 def build_master(std):
     df = std.copy()
     df["pythag_win_pct"] = df.apply(lambda r: calc_pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
-    
-    # 🟢 HYBRID FIX: Trust Run Differentials Faster
-    gp = df["games_played"].clip(0, 162)
-    pythag_weight = gp / (gp + 30.0)  # Was 80.0 -> Now 30.0 (aligns with PECOTA Sim W)
-    df["regressed_pythag"] = df["pythag_win_pct"] * pythag_weight + 0.500 * (1.0 - pythag_weight)
-    
-    # Embed PECOTA Talent Baseline directly from PDF
     df["pecota_wp"] = df["team_id"].map(lambda t: calc_pythag(PECOTA_DC_RS.get(t, 700), PECOTA_DC_RA.get(t, 700)))
     
-    # Blend: High talent weight early, scales down slightly
-    talent_w = 0.65 + (gp / 162.0) * 0.15
-    record_w = 1.0 - talent_w
-    df["blended_win_pct"] = (df["pecota_wp"] * talent_w + df["regressed_pythag"] * record_w).clip(0.20, 0.80)
+    gp = df["games_played"].clip(0, 162)
+    
+    # 🔒 PYTHAG BASELINE CLAMP
+    # Observed Pythag is constrained to within a margin of PECOTA baseline.
+    # Margin shrinks from ~0.035 (May) to 0.0 (End of Season).
+    margin = 0.035 * (1.0 - gp / 162.0)
+    df["clamped_pythag"] = df["pythag_win_pct"].clip(
+        df["pecota_wp"] - margin, 
+        df["pecota_wp"] + margin
+    )
+    
+    # HYBRID BLEND: Trust Clamped Pythag more as season progresses.
+    # At 38 games: ~48% Record, ~52% PECOTA.
+    record_w = gp / (gp + 40.0)
+    pecota_w = 1.0 - record_w
+    
+    df["blended_win_pct"] = (df["clamped_pythag"] * record_w + df["pecota_wp"] * pecota_w).clip(0.20, 0.80)
     df["games_remaining"] = (162 - gp).clip(0, 162)
     return df
 
 def compute_buyer_seller(df):
     df = df.copy()
-    df["luck_wins"] = df["wins"] - df["regressed_pythag"] * df["games_played"]
+    df["luck_wins"] = df["wins"] - df["pythag_win_pct"] * df["games_played"]
     df["rd_per_162"] = (df["run_differential"] / df["games_played"].clip(1)) * 162
     rd_mod = (-df["rd_per_162"] * 0.02 * ((df["games_played"] - 50) / 50.0).clip(0, 1)).clip(-2.0, 2.0)
     luck_mod = df["luck_wins"] * 0.5 * ((df["games_played"] - 40) / 60.0).clip(0, 1)
@@ -289,7 +302,7 @@ def run_simulation(mdf, sch):
 # UI SECTIONS
 # ==============================================================================
 def render_projections_tab(mdf, sim):
-    st.markdown("## 2026 MLB Season Projections"); st.caption(f"Updated daily · Hybrid v20 (PECOTA Embedded + Live Sync)")
+    st.markdown("## 2026 MLB Season Projections"); st.caption(f"Updated daily · Hybrid v21 (PECOTA + Clamped Pythag)")
     rows = []
     for _, r in mdf.iterrows():
         t = r["team_id"]; proj_w = int(round(sim['proj_wins'].get(t, r['wins'])))
@@ -328,9 +341,10 @@ def render_team_tab(mdf, sim):
 def render_methodology_tab():
     st.markdown("## 📖 Methodology & Model Architecture")
     st.caption(f"Data last updated: {get_last_updated()}")
-    with st.expander("📊 Data Pipeline"): st.markdown("- **PECOTA Embedded**: Uses official BP Deep Chart RS/RA run projections directly.\n- **Live Roster Sync**: Fetches active rosters daily for trades/IL adjustments.")
-    with st.expander("🔮 Hybrid Projection Engine"): st.markdown("1. **Reduced Regression**: `gp/(gp+30)` trusts run differentials much faster.\n2. **Talent Blend**: Weights PECOTA talent at ~65% early season, scaling with record.\n3. **Pitcher Cap**: Staff weights capped to prevent single-ace inflation.")
-    with st.expander("🔄 Continuous Buyer/Seller & SOS"): st.markdown("- Smooth tier adjustments based on WC GB, RD trend, and luck.\n- SOS impact scales linearly from 0% (April) to 100% (August).")
+    with st.expander("📊 Data Pipeline"): st.markdown("- **MLB Stats API**: Live standings, schedules, and Active Rosters fetched daily.\n- **Roster Sync**: Projects based on current active status; IL players/trades handled dynamically.")
+    with st.expander("🔮 Hybrid Projection Engine"): st.markdown("1. **PECOTA Baseline**: Embedded RS/RA data ensures accurate talent baselines.\n2. **Clamped Pythag**: Observed Win% is constrained to ±0.035 of PECOTA early season, shrinking to 0.\n3. **Dynamic Blend**: Weights shift from PECOTA to Observed Record over the season.")
+    with st.expander("🔄 Continuous Buyer/Seller Logic"): st.markdown("- Teams classified by Wild Card GB, run differential trend, and luck deviation.\n- **Continuous Adjustment**: Adjustments scale smoothly to prevent unnatural jumps.")
+    with st.expander("📅 SOS & Luck Regression"): st.markdown(f"- **Scaled SOS**: Schedule impact scales linearly with games played.\n- **Explicit Luck Regression**: Unlucky teams get a direct win% boost; lucky teams get a drag.")
 
 # ==============================================================================
 # MAIN
@@ -340,8 +354,11 @@ def load_all_data():
     if cached:
         m = pd.DataFrame(cached["master"]); s = cached.get("sim_results", {}); sc = pd.DataFrame(cached.get("schedule", []))
         if not m.empty and s: return m, s, sc
-    st.markdown("### ⚾ Loading fresh data... (Hybrid v20)"); pb = st.progress(0)
+    st.markdown("### ⚾ Loading fresh data... (Hybrid v21)"); pb = st.progress(0)
+    
+    # Fetch Active Rosters (Keeps dynamic sync active)
     fetch_team_statuses(); pb.progress(20)
+    
     std = fetch_standings(); pb.progress(40); sch = fetch_schedule(); pb.progress(60)
     mst = build_master(std)
     mst = compute_buyer_seller(mst)
