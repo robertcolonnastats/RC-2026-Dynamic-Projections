@@ -58,6 +58,7 @@ N_SIMULATIONS            = 1_000  # Optimized for speed (vectorized engine)
 RANDOM_SEED              = 42
 CACHE_DIR                = "data/cache"
 CACHE_FILE               = "data/cache/latest.json"
+CACHE_VERSION            = "v8-pecota-ilwarp"   # bump this to invalidate old caches
 MLB_API_BASE             = "https://statsapi.mlb.com/api/v1"
 
 TEAM_INFO = {
@@ -158,7 +159,18 @@ def is_cache_valid() -> bool:
     mtime = os.path.getmtime(CACHE_FILE)
     now_est = datetime.now(EST)
     midnight = now_est.replace(hour=0, minute=0, second=0, microsecond=0)
-    return mtime >= midnight.timestamp()
+    if mtime < midnight.timestamp():
+        return False
+    # Version check — if code was updated, invalidate old cache
+    try:
+        with open(CACHE_FILE, "r") as f:
+            data = json.load(f)
+        if data.get("cache_version") != CACHE_VERSION:
+            print(f"Cache version mismatch ({data.get('cache_version')} vs {CACHE_VERSION}) — forcing fresh load")
+            return False
+    except Exception:
+        return False
+    return True
 
 def load_cache() -> dict | None:
     if not is_cache_valid():
@@ -172,6 +184,7 @@ def load_cache() -> dict | None:
 def save_cache(payload: dict):
     _ensure_cache_dir()
     try:
+        payload["cache_version"] = CACHE_VERSION
         with open(CACHE_FILE, "w") as f:
             json.dump(payload, f, default=str)
     except Exception as e:
