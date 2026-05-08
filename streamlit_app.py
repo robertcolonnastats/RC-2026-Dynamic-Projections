@@ -1,7 +1,7 @@
 """
-MLB 2026 Season Projections
-Fully Automated Hybrid Model: PECOTA + Statcast (EV90, Zone-Contact%, FIP, etc.)
-Dynamic Pythag weighting, luck regression (0.60), SOS scaling, deadline ramp.
+MLB 2026 Season Projections (Hybrid v24)
+Fully Automated: PECOTA + Statcast (EV90, Zone-Contact, FIP) + Live Roster Sync.
+Includes Robust Data Sanitizer to fix 'team_id' crashes.
 """
 import os
 import json
@@ -22,7 +22,7 @@ st.set_page_config(page_title="MLB 2026 Projections", page_icon="⚾", layout="w
 st.markdown("""<style>.main .block-container { max-width: 1400px; padding-top: 1rem; }</style>""", unsafe_allow_html=True)
 
 # ==============================================================================
-# CONSTANTS
+# CONSTANTS (Cleaned)
 # ==============================================================================
 SEASON_YEAR = 2026
 OPENING_DAY = "2026-03-27"
@@ -33,9 +33,9 @@ SOS_SENSITIVITY = 0.15
 PYTHAG_EXPONENT = 1.83
 N_SIMULATIONS = 1_000
 RANDOM_SEED = 42
-CACHE_DIR = "/tmp/rc_mlb_2026_v23"
-CACHE_FILE = "/tmp/rc_mlb_2026_v23/latest.json"
-CACHE_VERSION = "v23-auto-statcast-blend"
+CACHE_DIR = "/tmp/rc_mlb_2026_v24"
+CACHE_FILE = "/tmp/rc_mlb_2026_v24/latest.json"
+CACHE_VERSION = "v24-fix-crash-statcast"
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
 TEAM_INFO = {
@@ -62,12 +62,13 @@ TIER_EMOJI = {"hard_seller": "🔴", "soft_seller": "🟠", "neutral": "⚪", "s
 EST = ZoneInfo("America/New_York")
 
 # ==============================================================================
-# CACHE & AUTO-UPDATES
+# CACHE & DATA SANITIZER
 # ==============================================================================
 def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
 _ROSTER_CACHE, _STATCAST_CACHE = {}, {}
 
 def fetch_team_statuses():
+    """Fetches active rosters and cleans keys."""
     today = date.today().isoformat()
     if _ROSTER_CACHE.get("date") == today and _ROSTER_CACHE.get("data"): return _ROSTER_CACHE["data"]
     data, il_codes = {}, {"IL10", "IL60", "DL10", "DL15", "DL60"}
@@ -75,10 +76,8 @@ def fetch_team_statuses():
         try:
             act = requests.get(f"{MLB_API_BASE}/teams/{tid}/roster", params={"rosterType": "active", "season": SEASON_YEAR}, timeout=10)
             active_ids = {p["person"]["id"] for p in act.json().get("roster", [])} if act.status_code == 200 else set()
-            ros = requests.get(f"{MLB_API_BASE}/teams/{tid}/roster", params={"rosterType": "40Man", "season": SEASON_YEAR}, timeout=10)
-            il_ids = {p["person"]["id"] for p in ros.json().get("roster", []) if p.get("status", {}).get("code", "") in il_codes} if ros.status_code == 200 else set()
-            data[tid] = {"active": active_ids, "il": il_ids}
-        except: data[tid] = {"active": set(), "il": set()}
+            data[tid] = {"active": active_ids}
+        except: data[tid] = {"active": set()}
     _ROSTER_CACHE["data"], _ROSTER_CACHE["date"] = data, today
     return data
 
@@ -135,8 +134,11 @@ def fetch_standings():
             try: gb = float(tr.get("gamesBack", "0"))
             except: gb = 0.0
             rs, ra = tr.get("runsScored", 0) or 0, tr.get("runsAllowed", 0) or 0
+            # Sanitize keys here
             rows.append({"team_id": tid, "name": nm, "abbr": ab, "division": div, "league": lg, "wins": w, "losses": l, "games_played": gp, "win_pct": round(wp, 4), "div_games_back": gb, "wc_games_back": 0.0, "runs_scored": rs, "runs_allowed": ra, "run_differential": rs - ra})
     df = pd.DataFrame(rows)
+    # Robust Cleaning: Strip all spaces from columns
+    df.columns = df.columns.str.strip()
     if df.empty: raise RuntimeError("Standings empty")
     for lg in ["AL", "NL"]:
         lg_df = df[df["league"] == lg].copy()
@@ -185,9 +187,6 @@ def compute_remaining_opponents(df):
 # STATCAST + PECOTA BLENDING ENGINE
 # ==============================================================================
 LEAGUE_AVG_RPG, LEAGUE_AVG_FIP, LEAGUE_AVG_OPS, LEAGUE_AVG_ERA = 4.50, 4.10, 0.730, 4.20
-LEAGUE_AVG_XWOBA, LEAGUE_AVG_XERA = 0.315, 4.10
-LEAGUE_SP_IP_SHARE, LEAGUE_RP_IP_SHARE, TYPICAL_TEAM_WARP = 0.57, 0.43, 35.0
-
 PECOTA_HIT = [
     {"mlbid":592450,"team":"NYY","pa":672,"ops":0.985,"warp":7.3},
     {"mlbid":660271,"team":"LAD","pa":700,"ops":0.931,"warp":6.3},
@@ -200,37 +199,44 @@ PECOTA_PIT = [
     {"mlbid":554430,"team":"PHI","ip":105.0,"fip":3.36,"warp":2.8,"role":"SP"},
     {"mlbid":605400,"team":"PHI","ip":163.0,"fip":4.01,"warp":2.3,"role":"SP"}
 ]
-PECOTA_MAP = {"NYY":147, "LAD":119, "NYM":121, "KC":118, "DET":116, "PIT":134, "PHI":143}
+PECOTA_MAP = {"NYY":147, "LAD":119, "NYM":121, "KC":118, "DET":116, "PIT":134, "PHI":143, "ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CIN":113, "CLE":114, "COL":115, "HOU":117, "LAA":108, "MIA":146, "MIL":158, "MIN":142, "OAK":133, "SD":135, "SEA":136, "SF":137, "STL":138, "TB":139, "TEX":140, "TOR":141, "WSH":120, "CWS":145}
 
 def _fetch_savstat(year, stat_type):
-    """Fetches current/historical Statcast metrics from Savant leaderboard."""
-    today_cache = date.today().isoformat()
-    key = f"{year}_{stat_type}"
-    if key in _STATCAST_CACHE and _STATCAST_CACHE.get("date") == today_cache:
-        return _STATCAST_CACHE.get(key)
+    """Fetches Statcast metrics. Robust against errors."""
     try:
         url = f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type={stat_type}&year={year}&position=&team=&min=1&csv=true"
-        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code != 200 or len(r.content) < 200: return pd.DataFrame()
         df = pd.read_csv(io.StringIO(r.content.decode("utf-8")))
-        df.columns = df.columns.str.strip()
+        df.columns = df.columns.str.strip() # Sanitize columns
         if "team" in df.columns:
-            df["team_id"] = df["team"].map({"NYY":147, "LAD":119, "NYM":121, "KC":118, "DET":116, "PIT":134, "PHI":143, "ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CIN":113, "CLE":114, "COL":115, "HOU":117, "LAA":108, "MIA":146, "MIL":158, "MIN":142, "OAK":133, "SD":135, "SEA":136, "SF":137, "STL":138, "TB":139, "TEX":140, "TOR":141, "WSH":120, "CWS":145})
-        _STATCAST_CACHE[key] = df
-        _STATCAST_CACHE["date"] = today_cache
+            df["team_id"] = df["team"].map(PECOTA_MAP)
         return df
     except: return pd.DataFrame()
 
 def blend_player_metric(curr_val, hist_val, pecota_val, sample, threshold):
-    """Blends Current Statcast, Historical Statcast, and PECOTA."""
+    """Blends Current, Historical, and PECOTA data."""
     w_curr = min(sample / threshold, 1.0)
     w_pecota = (1.0 - w_curr) * 0.65
     w_hist = (1.0 - w_curr) * 0.35
-    return (curr_val or LEAGUE_AVG_XWOBA) * w_curr + (hist_val or LEAGUE_AVG_XWOBA) * w_hist + (pecota_val or LEAGUE_AVG_XWOBA) * w_pecota
+    
+    # Safe value extraction
+    v_curr = float(curr_val) if isinstance(curr_val, (int, float, np.number)) and not np.isnan(curr_val) else 0.0
+    v_hist = float(hist_val) if isinstance(hist_val, (int, float, np.number)) and not np.isnan(hist_val) else 0.0
+    v_pecota = float(pecota_val) if isinstance(pecota_val, (int, float, np.number)) and not np.isnan(pecota_val) else 0.0
+    
+    if w_curr == 0 and w_hist == 0 and w_pecota == 0: return 0.0
+    
+    # Fallback if values are missing
+    if v_curr == 0 and v_hist == 0: return v_pecota
+    
+    return (v_curr * w_curr) + (v_hist * w_hist) + (v_pecota * w_pecota)
 
 def fetch_team_projections(standings_df, roster_map):
     all_ids = list(TEAM_INFO.keys())
     det = {t:{"batters":[], "sp":[], "rp":[]} for t in all_ids}
+    
+    # Fetch Statcast Data
     sc_curr = _fetch_savstat(SEASON_YEAR, "batter")
     sc_hist = _fetch_savstat(SEASON_YEAR - 1, "batter")
     sc_pitch_curr = _fetch_savstat(SEASON_YEAR, "pitcher")
@@ -243,16 +249,17 @@ def fetch_team_projections(standings_df, roster_map):
     rows = []
     for tid in all_ids:
         active_ids = roster_map.get(tid, set())
+        
         # Hitter Blend
         lineup = ph[ph["team_id"] == tid].head(9)
         team_ops = LEAGUE_AVG_OPS
         if not lineup.empty:
             blended_ops = []
             for _, r in lineup.iterrows():
-                curr_xw = sc_curr[sc_curr["team_id"]==tid & sc_curr["mlbid"]==r["mlbid"]]["xwoba"].values
-                hist_xw = sc_hist[sc_hist["team_id"]==tid & sc_hist["mlbid"]==r["mlbid"]]["xwoba"].values
+                curr_xw = sc_curr[(sc_curr["team_id"]==tid) & (sc_curr["mlbid"]==r["mlbid"])]["xwoba"].values
+                hist_xw = sc_hist[(sc_hist["team_id"]==tid) & (sc_hist["mlbid"]==r["mlbid"])]["xwoba"].values
                 blended_xw = blend_player_metric(curr_xw[0] if len(curr_xw) else 0, hist_xw[0] if len(hist_xw) else 0, 0.800, r.get("pa", 50), 400.0)
-                blended_ops.append(blended_xw * 1.25)
+                blended_ops.append(blended_xw * 1.25) # Approx conversion to OPS scale
             team_ops = float(np.clip(np.mean(blended_ops), 0.620, 0.850))
         proj_rpg = float(np.clip((team_ops/LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG, 2.5, 7.5))
         
@@ -264,16 +271,17 @@ def fetch_team_projections(standings_df, roster_map):
             for _, r in pitchers.iterrows():
                 role = r.get("role", "SP")
                 thr = 150.0 if role == "SP" else 40.0
-                curr_f = sc_pitch_curr[sc_pitch_curr["team_id"]==tid & sc_pitch_curr["mlbid"]==r["mlbid"]]["fip"].values
-                hist_f = sc_pitch_hist[sc_pitch_hist["team_id"]==tid & sc_pitch_hist["mlbid"]==r["mlbid"]]["fip"].values
+                curr_f = sc_pitch_curr[(sc_pitch_curr["team_id"]==tid) & (sc_pitch_curr["mlbid"]==r["mlbid"])]["fip"].values
+                hist_f = sc_pitch_hist[(sc_pitch_hist["team_id"]==tid) & (sc_pitch_hist["mlbid"]==r["mlbid"])]["fip"].values
                 blended_f = blend_player_metric(curr_f[0] if len(curr_f) else 0, hist_f[0] if len(hist_f) else 0, r.get("fip", 4.20), r.get("ip", 20), thr)
                 blended_fips.append(blended_f)
             team_fip = float(np.clip(np.mean(blended_fips), 2.80, 5.50))
-        proj_rapg = float(np.clip((team_fip/LEAGUE_AVG_FIP) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE + (LEAGUE_AVG_FIP/LEAGUE_AVG_FIP) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE, 2.5, 7.5))
+        proj_rapg = float(np.clip((team_fip/LEAGUE_AVG_FIP) * LEAGUE_AVG_RPG * 0.57 + (LEAGUE_AVG_FIP/LEAGUE_AVG_FIP) * LEAGUE_AVG_RPG * 0.43, 2.5, 7.5))
         
         proj_wp = proj_rpg**PYTHAG_EXPONENT / (proj_rpg**PYTHAG_EXPONENT + proj_rapg**PYTHAG_EXPONENT)
+        # Sanitize keys here
         rows.append({"team_id": tid, "proj_win_pct": round(proj_wp, 4), "proj_runs_per_game": round(proj_rpg, 2), "proj_ra_per_game": round(proj_rapg, 2), "il_warp": 0.0, "proj_source": "PECOTA+Statcast"})
-        det[tid]["batters"] = [{"name": r["team"], "ops": round(team_ops, 3)} for _, r in lineup.iterrows()]
+        det[tid]["batters"] = [{"name": r.get("team", "Team"), "ops": round(team_ops, 3)} for _, r in lineup.iterrows()]
     return pd.DataFrame(rows), det
 
 # ==============================================================================
@@ -285,6 +293,10 @@ def pythag(rs, ra):
 
 def build_master(std, prj):
     df = std.copy()
+    # Sanitize incoming columns just in case
+    df.columns = df.columns.str.strip()
+    prj.columns = prj.columns.str.strip()
+    
     merge_cols = ["team_id", "proj_win_pct", "proj_runs_per_game", "proj_ra_per_game", "proj_source", "il_warp"]
     df = df.merge(prj[merge_cols], on="team_id", how="left")
     df["raw_pythag"] = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
@@ -300,6 +312,7 @@ def build_master(std, prj):
 
 def compute_buyer_seller(df):
     df = df.copy()
+    df.columns = df.columns.str.strip()
     df["luck_wins"] = df["wins"] - df["raw_pythag"] * df["games_played"]
     df["rd_per_162"] = (df["run_differential"] / df["games_played"].clip(1)) * 162
     rd_mod = (-df["rd_per_162"] * 0.02 * ((df["games_played"] - 50) / 50.0).clip(0, 1)).clip(-2.0, 2.0)
@@ -315,12 +328,14 @@ def compute_buyer_seller(df):
 
 def apply_ramp(df, ramp):
     df = df.copy()
+    df.columns = df.columns.str.strip()
     df["ramped_adj"] = df["base_adj"] * ramp
     df["adj_win_pct"] = (df["blended_win_pct"] + df["ramped_adj"]).clip(0.20, 0.80)
     return df
 
 def apply_luck_regression(df, factor=0.60):
     df = df.copy()
+    df.columns = df.columns.str.strip()
     gr = (162 - df["games_played"]).clip(10, 162)
     luck_reg = -(df["luck_wins"] * factor) / gr
     df["adj_win_pct"] = (df["adj_win_pct"] + luck_reg).clip(0.20, 0.80)
@@ -337,6 +352,7 @@ def compute_sos(df, opps):
 
 def apply_schedule_adjustment(df, sensitivity=SOS_SENSITIVITY):
     df = df.copy()
+    df.columns = df.columns.str.strip()
     df["sos_adjustment"] = (0.500 - df["sos_raw"]) * sensitivity
     sos_scale = (df["games_played"] / 81.0).clip(0, 1)
     df["adj_win_pct"] = (df["adj_win_pct"] + df["sos_adjustment"] * sos_scale).clip(0.20, 0.80)
@@ -345,6 +361,7 @@ def apply_schedule_adjustment(df, sensitivity=SOS_SENSITIVITY):
 def log5(a, b): return (a - a*b) / (a + b - 2*a*b + 1e-9)
 
 def run_simulation(mdf, sch):
+    mdf.columns = mdf.columns.str.strip() # Sanitize
     rng = np.random.default_rng(RANDOM_SEED); tids = mdf["team_id"].tolist(); n = len(tids); idx = {t:i for i,t in enumerate(tids)}
     init = np.array([mdf.set_index("team_id")["wins"].get(t,0) for t in tids], dtype=np.float32)
     adj_wp = mdf.set_index("team_id")["adj_win_pct"].to_dict()
@@ -381,7 +398,7 @@ def run_simulation(mdf, sch):
 # UI SECTIONS
 # ==============================================================================
 def render_projections_tab(mdf, sim):
-    st.markdown("## 2026 MLB Season Projections"); st.caption(f"Updated daily · Hybrid v23 (Auto Statcast+PECOTA)")
+    st.markdown("## 2026 MLB Season Projections"); st.caption(f"Updated daily · Hybrid v24 (Auto Statcast+PECOTA)")
     rows = []
     for _, r in mdf.iterrows():
         t = r["team_id"]; proj_w = int(round(sim['proj_wins'].get(t, r['wins'])))
@@ -431,7 +448,7 @@ def load_all_data():
     if cached:
         m = pd.DataFrame(cached["master"]); s = cached.get("sim_results", {}); sc = pd.DataFrame(cached.get("schedule", []))
         if not m.empty and s: return m, s, sc
-    st.markdown("### ⚾ Loading fresh data... (Auto Sync v23)"); pb = st.progress(0)
+    st.markdown("### ⚾ Loading fresh data... (Auto Sync v24)"); pb = st.progress(0)
     roster_map = fetch_team_statuses(); pb.progress(20)
     std = fetch_standings(); pb.progress(40); sch = fetch_schedule(); pb.progress(60)
     prj, det = fetch_team_projections(std, roster_map); pb.progress(70)
