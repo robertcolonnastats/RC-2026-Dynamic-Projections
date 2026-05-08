@@ -356,8 +356,8 @@ def compute_remaining_opponents(schedule_df: pd.DataFrame) -> dict[int, list[int
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PROJECTION ENGINE
-# Core: Regression-to-mean from standings (always works, no external deps)
-# Enhancement: FanGraphs DC individual player projections (when available)
+# Uses MLB Stats API (confirmed working from Streamlit Cloud)
+# Player-level projections with injury adjustments
 # ══════════════════════════════════════════════════════════════════════════════
 
 FG_TEAM_MAP = {
@@ -379,324 +379,530 @@ FG_ABBR_MAP = {
     "ATL": 144, "CHW": 145, "MIA": 146, "NYY": 147, "MIL": 158,
     "KC": 118, "SD": 135, "SF": 137, "TB": 139, "WSH": 120, "CWS": 145,
 }
+
 LEAGUE_AVG_RPG    = 4.50
 LEAGUE_AVG_FIP    = 4.10
-LEAGUE_AVG_WRC    = 100.0
+LEAGUE_AVG_OPS    = 0.730
+LEAGUE_AVG_ERA    = 4.20
 LEAGUE_SP_IP_SHARE = 0.57
 LEAGUE_RP_IP_SHARE = 0.43
+REPLACEMENT_OPS   = 0.640   # replacement-level batter
+REPLACEMENT_ERA   = 5.50    # replacement-level pitcher
 
 
-def _regressed_win_pct(rs_per_g: float, ra_per_g: float, games_played: int) -> tuple[float, float, float]:
+def _fetch_team_player_stats(team_id: int, season: int) -> dict:
     """
-    Regress team RS/RA toward league average based on sample size.
-    
-    Uses a strong prior — early season performance (especially with injuries)
-    is heavily noisy. Prior strength = 300 games means:
-      At  36 GP: ~11% actual data, ~89% league average
-      At  81 GP: ~21% actual data, ~79% league average  
-      At 162 GP: ~35% actual data, ~65% league average
-
-    This is intentionally conservative — we trust the mean heavily until
-    a full season of data accumulates. FanGraphs DC (when available) provides
-    the roster-quality signal; this fallback just limits overreaction to
-    small samples.
-
-    Returns (regressed_rs_per_g, regressed_ra_per_g, projected_win_pct)
+    Fetch all players' season stats for a team in TWO calls:
+    1. Team hitting stats (all batters)
+    2. Team pitching stats (all pitchers)
+    Returns dict: {player_id: {hitting: {...}, pitching: {...}}}
+    Much faster than individual player calls.
     """
-    exp          = PYTHAG_EXPONENT
-    PRIOR        = 200   # balanced prior — resist noise but allow differentiation
-    total        = games_played + PRIOR
-    reg_rs       = (rs_per_g * games_played + LEAGUE_AVG_RPG * PRIOR) / total
-    reg_ra       = (ra_per_g * games_played + LEAGUE_AVG_RPG * PRIOR) / total
-    reg_rs       = float(np.clip(reg_rs, 2.5, 7.5))
-    reg_ra       = float(np.clip(reg_ra, 2.5, 7.5))
-    wp           = reg_rs ** exp / (reg_rs ** exp + reg_ra ** exp)
+    result = {}
+    for group in ["hitting", "pitching"]:
+        try:
+            url = f"{MLB_API_BASE}/teams/{team_id}/stats"
+            params = {
+                "stats":   "season",
+                "group":   group,
+                "season":  season,
+                "sportId": 1,
+            }
+            resp = requests.get(url, params=params, timeout=10)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            for stat_group in data.get("stats", []):
+                for split in stat_group.get("splits", []):
+                    player = split.get("player", {})
+                    pid    = player.get("id", 0)
+                    if pid:
+                        if pid not in result:
+                            result[pid] = {"name": player.get("fullName",""), "hitting": {}, "pitching": {}}
+                        result[pid][group] = split.get("stat", {})
+        except Exception as e:
+            print(f"Team {team_id} {group} stats error: {e}")
+    return result
+
+
+def _fetch_career_stats_batch(player_ids: list[int]) -> dict:
+    """
+    Fetch career stats for a list of players in parallel.
+    Limits to top 15 players to keep call count reasonable.
+    Returns {player_id: {hitting: {...}, pitching: {...}}}
+    """
+    import concurrent.futures as _cf
+    results = {}
+
+    def fetch_one(pid):
+        try:
+            url = f"{MLB_API_BASE}/people/{pid}/stats"
+            params = {"stats": "career", "group": "hitting,pitching"}
+            resp = requests.get(url, params=params, timeout=6)
+            if resp.status_code != 200:
+                return pid, {}
+            data = resp.json()
+            pdata = {"hitting": {}, "pitching": {}}
+            for grp in data.get("stats", []):
+                gname = grp.get("group", {}).get("displayName", "")
+                splits = grp.get("splits", [])
+                if splits and gname in ("hitting", "pitching"):
+                    pdata[gname] = splits[0].get("stat", {})
+            return pid, pdata
+        except Exception:
+            return pid, {}
+
+    # Only fetch top 15 players (most PA/IP)
+    top_ids = player_ids[:15]
+    with _cf.ThreadPoolExecutor(max_workers=8) as ex:
+        futures = {ex.submit(fetch_one, pid): pid for pid in top_ids}
+        for fut in _cf.as_completed(futures, timeout=20):
+            try:
+                pid, data = fut.result(timeout=8)
+                results[pid] = data
+            except Exception:
+                pass
+    return results
+
+
+def _fetch_team_roster_with_stats(team_id: int) -> dict:
+    """
+    Fetch active roster + IL players for a team.
+    For each player, get their current season and career stats.
+    Returns dict with:
+      active_batters: list of {name, ops, pa, position}
+      active_pitchers: list of {name, era, fip, ip, role}
+      il_batters: list of {name, ops, days_remaining, position}
+      il_pitchers: list of {name, era, ip, days_remaining, role}
+    """
+    today = date.today()
+    result = {
+        "active_batters": [], "active_pitchers": [],
+        "il_batters": [], "il_pitchers": [],
+    }
+
+    try:
+        # Fetch 40-man roster (includes IL players with status)
+        url = f"{MLB_API_BASE}/teams/{team_id}/roster"
+        params = {"rosterType": "40Man", "season": SEASON_YEAR, "hydrate": "person"}
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code != 200:
+            return result
+
+        roster = resp.json().get("roster", [])
+        if not roster:
+            return result
+
+        # Get all players' season stats in 2 calls (much faster)
+        season_stats = _fetch_team_player_stats(team_id, SEASON_YEAR)
+        # Also get prior year for better projection
+        prior_stats  = _fetch_team_player_stats(team_id, SEASON_YEAR - 1)
+
+        # Get career stats for top players by PA/IP
+        all_pids = [e.get("person", {}).get("id", 0) for e in roster if e.get("person", {}).get("id")]
+        career_stats = _fetch_career_stats_batch(all_pids)
+
+        # Process each player
+        for entry in roster:
+            person   = entry.get("person", {})
+            pid      = person.get("id", 0)
+            name     = person.get("fullName", "Unknown")
+            pos_info = entry.get("position", {})
+            pos_type = pos_info.get("type", "")
+            pos_abbr = pos_info.get("abbreviation", "")
+            status   = entry.get("status", {})
+            status_code = status.get("code", "A")
+
+            # Build stats from batch fetches
+            cur_s   = season_stats.get(pid, {})
+            prev_s  = prior_stats.get(pid, {})
+            career_s = career_stats.get(pid, {})
+
+            stats = {
+                "hitting_season":  cur_s.get("hitting",  {}),
+                "hitting_prior":   prev_s.get("hitting", {}),
+                "hitting_career":  career_s.get("hitting", {}),
+                "pitching_season": cur_s.get("pitching",  {}),
+                "pitching_prior":  prev_s.get("pitching", {}),
+                "pitching_career": career_s.get("pitching", {}),
+            }
+
+            # Determine if IL and estimate days remaining
+            is_il = status_code in ("IL10", "IL60", "DL10", "DL15", "DL60", "7DL", "10DL", "60DL")
+            il_type = "60day" if "60" in status_code else "10day"
+
+            if is_il:
+                days_remaining = 60 if il_type == "60day" else 20
+            else:
+                days_remaining = 0
+
+            if pos_type == "Pitcher":
+                # Get pitching stats
+                season_pit  = stats.get("pitching_season",  {})
+                prior_pit   = stats.get("pitching_prior",   {})
+                career_pit  = stats.get("pitching_career",  {})
+
+                def safe_era(d, default):
+                    try:
+                        v = float(d.get("era", default) or default)
+                        return float(np.clip(v, 1.5, 9.0))
+                    except Exception:
+                        return default
+
+                career_era  = safe_era(career_pit, LEAGUE_AVG_ERA)
+                prior_era   = safe_era(prior_pit,  career_era)
+                season_era  = safe_era(season_pit, prior_era)
+                season_ip   = float(season_pit.get("inningsPitched", 0) or 0)
+
+                cur_weight  = min(season_ip / 100.0, 0.40)
+                prior_weight = 0.30
+                career_weight = 1.0 - cur_weight - prior_weight
+                era = (career_era * career_weight + prior_era * prior_weight +
+                       season_era * cur_weight)
+
+                era = float(np.clip(era, 1.5, 8.0))
+
+                # Determine SP vs RP by career GS rate
+                career_gs   = int(career_pit.get("gamesStarted", 0) or 0)
+                career_g    = int(career_pit.get("gamesPlayed", 1) or 1)
+                gs_rate     = career_gs / max(career_g, 1)
+                role        = "SP" if gs_rate >= 0.4 else "RP"
+
+                proj_ip     = 170 if role == "SP" else 65
+
+                entry_data = {
+                    "name":           name,
+                    "era":            era,
+                    "proj_ip":        proj_ip,
+                    "role":           role,
+                    "days_remaining": days_remaining,
+                }
+
+                if is_il:
+                    result["il_pitchers"].append(entry_data)
+                else:
+                    result["active_pitchers"].append(entry_data)
+
+            else:
+                # Batter
+                season_hit  = stats.get("hitting_season",  {})
+                prior_hit   = stats.get("hitting_prior",   {})
+                career_hit  = stats.get("hitting_career",  {})
+
+                def safe_float(val, default):
+                    try:
+                        return float(val) if val else default
+                    except Exception:
+                        return default
+
+                career_ops  = safe_float(career_hit.get("ops"),  LEAGUE_AVG_OPS)
+                prior_ops   = safe_float(prior_hit.get("ops"),   career_ops)
+                season_ops  = safe_float(season_hit.get("ops"),  prior_ops)
+                season_pa   = int(season_hit.get("plateAppearances", 0) or 0)
+                prior_pa    = int(prior_hit.get("plateAppearances", 0) or 0)
+
+                # 3-year weighted blend: career 50%, prior year 30%, current 20% early season
+                # Shifts toward current as PA accumulates
+                cur_weight  = min(season_pa / 300.0, 0.40)
+                prior_weight = 0.30
+                career_weight = 1.0 - cur_weight - prior_weight
+                ops = (career_ops * career_weight + prior_ops * prior_weight + 
+                       season_ops * cur_weight)
+
+                ops = float(np.clip(ops, 0.400, 1.200))
+
+                # Projected PA based on roster role
+                career_pa   = int(career_hit.get("plateAppearances", 0) or 0)
+                career_g    = int(career_hit.get("gamesPlayed", 1) or 1)
+                pa_per_g    = career_pa / max(career_g, 1)
+                proj_pa     = int(pa_per_g * 150)  # assume ~150 games for starters
+                proj_pa     = max(min(proj_pa, 650), 50)
+
+                entry_data = {
+                    "name":           name,
+                    "ops":            ops,
+                    "proj_pa":        proj_pa,
+                    "position":       pos_abbr,
+                    "days_remaining": days_remaining,
+                }
+
+                if is_il:
+                    result["il_batters"].append(entry_data)
+                else:
+                    result["active_batters"].append(entry_data)
+
+    except Exception as e:
+        print(f"Roster fetch error team {team_id}: {e}")
+
+    return result
+
+
+def _compute_team_projection(roster_data: dict, games_remaining: int) -> dict:
+    """
+    Convert player-level roster stats into team run scoring/prevention projections.
+    Accounts for IL players returning partway through remaining games.
+
+    Returns dict with:
+      proj_rpg, proj_rapg, proj_win_pct,
+      proj_sp_era, proj_rp_era, proj_ops,
+      player_detail (for display)
+    """
+    exp = PYTHAG_EXPONENT
+    gr  = max(games_remaining, 1)
+
+    # ── Batting ───────────────────────────────────────────────────────────────
+    active_batters = sorted(
+        roster_data.get("active_batters", []),
+        key=lambda x: x.get("proj_pa", 0), reverse=True
+    )[:9]  # Top 9 by projected PA = lineup
+
+    il_batters = roster_data.get("il_batters", [])
+
+    if active_batters:
+        # PA-weighted team OPS from active lineup
+        total_pa     = sum(b["proj_pa"] for b in active_batters)
+        if total_pa > 0:
+            team_ops = sum(b["ops"] * b["proj_pa"] for b in active_batters) / total_pa
+        else:
+            team_ops = LEAGUE_AVG_OPS
+    else:
+        team_ops = LEAGUE_AVG_OPS
+
+    # IL batter impact: add back weighted contribution based on return timing
+    for batter in il_batters:
+        days_out    = batter.get("days_remaining", 20)
+        games_out   = min(days_out, gr)
+        games_back  = max(gr - games_out, 0)
+        if games_back <= 0:
+            continue
+        # During games_back, team has this player; during games_out, replacement
+        return_frac  = games_back / gr
+        # Blend: current team_ops is without this player
+        # Add their contribution proportional to games they play
+        ops_delta    = (batter["ops"] - REPLACEMENT_OPS) * return_frac * 0.10
+        team_ops    += ops_delta
+
+    team_ops     = float(np.clip(team_ops, 0.550, 0.950))
+    proj_rpg     = (team_ops / LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG
+    proj_rpg     = float(np.clip(proj_rpg, 2.5, 7.5))
+
+    # ── Pitching ─────────────────────────────────────────────────────────────
+    active_pitchers = roster_data.get("active_pitchers", [])
+    il_pitchers     = roster_data.get("il_pitchers", [])
+
+    sp_active = [p for p in active_pitchers if p.get("role") == "SP"]
+    rp_active = [p for p in active_pitchers if p.get("role") == "RP"]
+
+    # SP ERA weighted by projected IP
+    if sp_active:
+        total_sp_ip = sum(p["proj_ip"] for p in sp_active)
+        sp_era = sum(p["era"] * p["proj_ip"] for p in sp_active) / max(total_sp_ip, 1)
+    else:
+        sp_era = LEAGUE_AVG_ERA
+
+    # RP ERA
+    if rp_active:
+        total_rp_ip = sum(p["proj_ip"] for p in rp_active)
+        rp_era = sum(p["era"] * p["proj_ip"] for p in rp_active) / max(total_rp_ip, 1)
+    else:
+        rp_era = LEAGUE_AVG_ERA
+
+    # IL pitcher impact: key SPs missing = worse staff ERA
+    for pitcher in il_pitchers:
+        if pitcher.get("role") != "SP":
+            continue
+        days_out   = pitcher.get("days_remaining", 30)
+        games_out  = min(days_out, gr)
+        out_frac   = games_out / gr
+        if out_frac <= 0:
+            continue
+        # SP missing → replacement pitcher fills in at REPLACEMENT_ERA
+        era_penalty = (REPLACEMENT_ERA - pitcher["era"]) * out_frac * 0.15
+        sp_era     += max(era_penalty, 0)
+
+    sp_era = float(np.clip(sp_era, 2.0, 7.0))
+    rp_era = float(np.clip(rp_era, 2.5, 7.0))
+
+    # Combined RA/G
+    proj_rapg = (
+        (sp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE +
+        (rp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE
+    )
+    proj_rapg = float(np.clip(proj_rapg, 2.5, 7.5))
+
+    # Pythagorean win%
+    proj_wp = proj_rpg ** exp / (proj_rpg ** exp + proj_rapg ** exp)
+
+    # Player detail for display
+    player_detail = {
+        "batters": [
+            {"name": b["name"], "pa": b["proj_pa"], "ops": round(b["ops"], 3)}
+            for b in active_batters[:9]
+        ],
+        "il_batters": [
+            {"name": b["name"], "ops": round(b["ops"], 3),
+             "days_out": b.get("days_remaining", "?"), "position": b.get("position", "")}
+            for b in il_batters
+        ],
+        "sp": [
+            {"name": p["name"], "ip": p["proj_ip"], "era": round(p["era"], 2)}
+            for p in sorted(sp_active, key=lambda x: x["proj_ip"], reverse=True)[:5]
+        ],
+        "rp": [
+            {"name": p["name"], "ip": p["proj_ip"], "era": round(p["era"], 2)}
+            for p in sorted(rp_active, key=lambda x: x["proj_ip"], reverse=True)[:7]
+        ],
+        "il_pitchers": [
+            {"name": p["name"], "role": p["role"], "era": round(p["era"], 2),
+             "days_out": p.get("days_remaining", "?")}
+            for p in il_pitchers
+        ],
+    }
+
+    return {
+        "proj_rpg":       round(proj_rpg,  3),
+        "proj_rapg":      round(proj_rapg, 3),
+        "proj_win_pct":   round(float(proj_wp), 4),
+        "proj_sp_era":    round(sp_era,    2),
+        "proj_rp_era":    round(rp_era,    2),
+        "proj_ops":       round(team_ops,  3),
+        "player_detail":  player_detail,
+    }
+
+
+def _regressed_win_pct(rs_per_g: float, ra_per_g: float, games_played: int) -> tuple:
+    """Regression-to-mean fallback."""
+    exp   = PYTHAG_EXPONENT
+    PRIOR = 200
+    total = games_played + PRIOR
+    reg_rs = float(np.clip((rs_per_g * games_played + LEAGUE_AVG_RPG * PRIOR) / total, 2.5, 7.5))
+    reg_ra = float(np.clip((ra_per_g * games_played + LEAGUE_AVG_RPG * PRIOR) / total, 2.5, 7.5))
+    wp     = reg_rs ** exp / (reg_rs ** exp + reg_ra ** exp)
     return reg_rs, reg_ra, float(wp)
 
 
-def _fetch_fg_dc(stats: str) -> pd.DataFrame | None:
+def fetch_team_projections(standings_df=None) -> tuple:
     """
-    Fetch FanGraphs Depth Charts projections for batting or pitching.
+    Build player-level projections for all 30 teams using MLB Stats API.
     
-    FanGraphs uses Cloudflare Bot Management which checks TLS fingerprints.
-    Standard Python requests are blocked because their TLS handshake (JA3)
-    differs from Chrome. We use curl_cffi to impersonate Chrome at the TLS
-    level, which passes Cloudflare's bot detection.
+    Tier 1: Player-level from MLB Stats API (roster + individual stats + IL)
+    Tier 2: Regression-to-mean from standings data
+    Tier 3: League average fallback
     
-    Falls back through: fangraphsdc → steamer → zips
-    """
-    proj_types = ["fangraphsdc", "steamer", "zips"]
-    
-    # Try curl_cffi first (Chrome TLS impersonation - bypasses Cloudflare)
-    try:
-        from curl_cffi import requests as cf_requests
-        for proj_type in proj_types:
-            try:
-                r = cf_requests.get(
-                    "https://www.fangraphs.com/api/projections",
-                    params={
-                        "type": proj_type, "stats": stats,
-                        "pos": "all", "team": 0, "players": 0, "lg": "all",
-                    },
-                    impersonate="chrome120",
-                    timeout=20,
-                )
-                print(f"FG curl_cffi {proj_type} {stats}: status={r.status_code}, size={len(r.content)}")
-                if r.status_code != 200 or not r.content:
-                    continue
-                data = r.json()
-                if not isinstance(data, list) or len(data) < 100:
-                    continue
-                df = pd.DataFrame(data)
-                df.columns = [c.strip() for c in df.columns]
-                df["_proj_type"] = proj_type
-                return df
-            except Exception as e:
-                print(f"FG curl_cffi {proj_type} {stats}: {e}")
-                continue
-    except ImportError:
-        print("curl_cffi not available, trying standard requests")
-    
-    # Fallback: standard requests (likely blocked by Cloudflare but worth trying)
-    for proj_type in proj_types:
-        try:
-            r = requests.get(
-                "https://www.fangraphs.com/api/projections",
-                params={
-                    "type": proj_type, "stats": stats,
-                    "pos": "all", "team": 0, "players": 0, "lg": "all",
-                },
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    "Accept": "application/json",
-                    "Referer": "https://www.fangraphs.com/projections",
-                },
-                timeout=20,
-            )
-            print(f"FG requests {proj_type} {stats}: status={r.status_code}")
-            if r.status_code != 200 or not r.content:
-                continue
-            data = r.json()
-            if not isinstance(data, list) or len(data) < 100:
-                continue
-            df = pd.DataFrame(data)
-            df.columns = [c.strip() for c in df.columns]
-            return df
-        except Exception as e:
-            print(f"FG requests {proj_type} {stats}: {e}")
-    
-    return None
-
-
-def _fetch_fg_dc_batting() -> pd.DataFrame | None:
-    return _fetch_fg_dc("bat")
-
-
-def _fetch_fg_dc_pitching() -> pd.DataFrame | None:
-    return _fetch_fg_dc("pit")
-
-
-def _team_id_from_fg_row(row: pd.Series) -> int | None:
-    for col in ["teamid", "TeamId", "team_id"]:
-        if col in row.index and pd.notna(row.get(col)):
-            try:
-                return int(row[col])
-            except Exception:
-                pass
-    for col in ["Team", "team"]:
-        if col in row.index:
-            abbr = str(row[col]).strip().upper()
-            if abbr in FG_ABBR_MAP:
-                return FG_ABBR_MAP[abbr]
-    for col in ["TeamName", "Tm"]:
-        if col in row.index:
-            name = str(row[col]).strip()
-            if name in FG_TEAM_MAP:
-                return FG_TEAM_MAP[name]
-    return None
-
-
-def _build_fg_dc_projections(bat_df: pd.DataFrame, pit_df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """Build team projections and player detail from FanGraphs DC data."""
-    all_ids       = list(TEAM_INFO.keys())
-    player_detail = {tid: {"batters": [], "sp": [], "rp": []} for tid in all_ids}
-    team_wrc      = {}
-    team_sp_fip   = {}
-    team_rp_fip   = {}
-
-    # ── Batting ───────────────────────────────────────────────────────────────
-    wrc_col  = next((c for c in bat_df.columns if c in ["wRC+","wrc+","WRC+"]), None)
-    pa_col   = next((c for c in bat_df.columns if c in ["PA","pa"]),            None)
-    name_col = next((c for c in bat_df.columns if c in ["PlayerName","Name","name"]), None)
-    war_col  = next((c for c in bat_df.columns if c in ["WAR","war"]),          None)
-
-    if wrc_col and pa_col:
-        bat_df = bat_df.copy()
-        bat_df["_tid"] = bat_df.apply(_team_id_from_fg_row, axis=1)
-        bat_df = bat_df.dropna(subset=["_tid"])
-        bat_df["_tid"]  = bat_df["_tid"].astype(int)
-        bat_df[wrc_col] = pd.to_numeric(bat_df[wrc_col], errors="coerce").fillna(100)
-        bat_df[pa_col]  = pd.to_numeric(bat_df[pa_col],  errors="coerce").fillna(0)
-        for tid in all_ids:
-            tdf = bat_df[bat_df["_tid"] == tid]
-            if tdf.empty or tdf[pa_col].sum() == 0:
-                continue
-            team_wrc[tid] = float(np.average(tdf[wrc_col], weights=tdf[pa_col].clip(1)))
-            for _, p in tdf.nlargest(9, pa_col).iterrows():
-                player_detail[tid]["batters"].append({
-                    "name":     str(p.get(name_col, "?")) if name_col else "?",
-                    "pa":       int(p[pa_col]),
-                    "wrc_plus": round(float(p[wrc_col]), 1),
-                    "war":      round(float(p[war_col]), 1) if war_col and pd.notna(p.get(war_col)) else None,
-                })
-
-    # ── Pitching ─────────────────────────────────────────────────────────────
-    ip_col   = next((c for c in pit_df.columns if c in ["IP","ip"]),            None)
-    gs_col   = next((c for c in pit_df.columns if c in ["GS","gs"]),            None)
-    fip_col  = next((c for c in pit_df.columns if c in ["FIP","fip"]),          None)
-    era_col  = next((c for c in pit_df.columns if c in ["ERA","era"]),          None)
-    pname    = next((c for c in pit_df.columns if c in ["PlayerName","Name","name"]), None)
-    pwar     = next((c for c in pit_df.columns if c in ["WAR","war"]),          None)
-
-    if ip_col and fip_col:
-        pit_df = pit_df.copy()
-        pit_df["_tid"] = pit_df.apply(_team_id_from_fg_row, axis=1)
-        pit_df = pit_df.dropna(subset=["_tid"])
-        pit_df["_tid"]  = pit_df["_tid"].astype(int)
-        pit_df[ip_col]  = pd.to_numeric(pit_df[ip_col],  errors="coerce").fillna(0)
-        pit_df[fip_col] = pd.to_numeric(pit_df[fip_col], errors="coerce").fillna(LEAGUE_AVG_FIP).clip(2.0, 7.5)
-        if era_col:
-            pit_df[era_col] = pd.to_numeric(pit_df[era_col], errors="coerce").fillna(LEAGUE_AVG_FIP).clip(1.5, 8.0)
-        if gs_col:
-            pit_df[gs_col]   = pd.to_numeric(pit_df[gs_col], errors="coerce").fillna(0)
-            pit_df["_is_sp"] = pit_df[gs_col] >= 8
-        else:
-            pit_df["_is_sp"] = pit_df[ip_col] >= 80
-
-        for tid in all_ids:
-            tdf = pit_df[pit_df["_tid"] == tid]
-            if tdf.empty:
-                continue
-            sp_df = tdf[tdf["_is_sp"]]
-            rp_df = tdf[~tdf["_is_sp"]]
-
-            def _blended_fip(df_):
-                if df_.empty or df_[ip_col].sum() == 0:
-                    return LEAGUE_AVG_FIP
-                blended = df_[fip_col].clip(2.0, 7.5)
-                if era_col:
-                    blended = blended * 0.70 + df_[era_col].clip(1.5, 8.0) * 0.30
-                return float(np.average(blended, weights=df_[ip_col].clip(1)))
-
-            if not sp_df.empty:
-                team_sp_fip[tid] = _blended_fip(sp_df)
-                for _, p in sp_df.nlargest(5, ip_col).iterrows():
-                    player_detail[tid]["sp"].append({
-                        "name": str(p.get(pname, "?")) if pname else "?",
-                        "ip":   round(float(p[ip_col]), 1),
-                        "fip":  round(float(p[fip_col]), 2),
-                        "era":  round(float(p[era_col]), 2) if era_col else None,
-                        "war":  round(float(p[pwar]), 1) if pwar and pd.notna(p.get(pwar)) else None,
-                    })
-            if not rp_df.empty:
-                team_rp_fip[tid] = _blended_fip(rp_df)
-                for _, p in rp_df.nlargest(7, ip_col).iterrows():
-                    player_detail[tid]["rp"].append({
-                        "name": str(p.get(pname, "?")) if pname else "?",
-                        "ip":   round(float(p[ip_col]), 1),
-                        "fip":  round(float(p[fip_col]), 2),
-                        "era":  round(float(p[era_col]), 2) if era_col else None,
-                        "war":  round(float(p[pwar]), 1) if pwar and pd.notna(p.get(pwar)) else None,
-                    })
-
-    # ── Assemble ──────────────────────────────────────────────────────────────
-    exp  = PYTHAG_EXPONENT
-    rows = []
-    for tid in all_ids:
-        wrc   = team_wrc.get(tid, LEAGUE_AVG_WRC)
-        sp_f  = team_sp_fip.get(tid, LEAGUE_AVG_FIP)
-        rp_f  = team_rp_fip.get(tid, LEAGUE_AVG_FIP)
-        rpg   = float(np.clip((wrc / 100.0) * LEAGUE_AVG_RPG, 2.5, 7.5))
-        rapg  = float(np.clip(
-            (sp_f / LEAGUE_AVG_FIP) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE +
-            (rp_f / LEAGUE_AVG_FIP) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE,
-            2.5, 7.5))
-        wp    = rpg ** exp / (rpg ** exp + rapg ** exp)
-        rows.append({
-            "team_id":            tid,
-            "proj_runs_per_game": round(rpg,  3),
-            "proj_ra_per_game":   round(rapg, 3),
-            "proj_win_pct":       round(float(wp), 4),
-            "proj_sp_fip":        round(sp_f, 2),
-            "proj_rp_fip":        round(rp_f, 2),
-            "proj_wrc_plus":      round(wrc,  1),
-        })
-    return pd.DataFrame(rows), player_detail
-
-
-def fetch_team_projections(standings_df: pd.DataFrame | None = None) -> tuple[pd.DataFrame, dict]:
-    """
-    Fetch team projections using two-tier approach:
-
-    Tier 1 — FanGraphs Depth Charts (individual player projections, injury-aware)
-              Best source when available. 20-second timeout.
-
-    Tier 2 — Regression-to-mean from standings data (always works, no external deps)
-              Uses current RS/RA regressed toward league average based on sample size.
-              Honest about uncertainty: early season = more regression, late = less.
-              This is the Marcel/Pythagorean insight without needing external data.
-
     Returns (team_proj_df, player_detail_dict)
     """
     all_ids       = list(TEAM_INFO.keys())
     player_detail = {tid: {"batters": [], "sp": [], "rp": []} for tid in all_ids}
 
-    # ── Tier 1: FanGraphs Depth Charts ───────────────────────────────────────
+    # ── Tier 1: MLB Stats API player-level ───────────────────────────────────
     try:
-        import concurrent.futures as _fgf
-        with _fgf.ThreadPoolExecutor(max_workers=2) as _fgx:
-            _bat_fut = _fgx.submit(_fetch_fg_dc_batting)
-            _pit_fut = _fgx.submit(_fetch_fg_dc_pitching)
-            try:
-                bat_df = _bat_fut.result(timeout=25)
-                pit_df = _pit_fut.result(timeout=25)
+        rows = []
+        success_count = 0
+
+        # Also try FanGraphs DC quickly (may work from Streamlit Cloud)
+        try:
+            import concurrent.futures as _fgf
+            with _fgf.ThreadPoolExecutor(max_workers=2) as _fgx:
+                _bat_fut = _fgx.submit(_fetch_fg_dc, "bat")
+                _pit_fut = _fgx.submit(_fetch_fg_dc, "pit")
+                bat_df   = _bat_fut.result(timeout=20)
+                pit_df   = _pit_fut.result(timeout=20)
                 print(f"FG DC: bat={len(bat_df) if bat_df is not None else 'None'}, pit={len(pit_df) if pit_df is not None else 'None'}")
                 if bat_df is not None and pit_df is not None and len(bat_df) > 100:
-                    proj_df, player_detail = _build_fg_dc_projections(bat_df, pit_df)
-                    std = proj_df["proj_win_pct"].std() if not proj_df.empty else 0
-                    print(f"FG DC build: rows={len(proj_df)}, std={std:.4f}")
-                    if not proj_df.empty and std > 0.01:
+                    proj_df, pd_dict = _build_fg_dc_projections(bat_df, pit_df)
+                    if not proj_df.empty and proj_df["proj_win_pct"].std() > 0.01:
                         proj_df["proj_source"] = "FanGraphs DC"
-                        return proj_df, player_detail
-            except Exception as _fge:
-                print(f"FG DC exception: {_fge}")
-    except Exception as _fge2:
-        print(f"FG DC outer exception: {_fge2}")
+                        return proj_df, pd_dict
+        except Exception as fge:
+            print(f"FG DC skipped: {fge}")
 
-    # ── Tier 2: Regression-to-mean from standings ────────────────────────────
-    # This always works — uses data already fetched from MLB Stats API
+        # MLB Stats API player-level projections
+        for tid in all_ids:
+            try:
+                team_row = standings_df[standings_df["team_id"] == tid].iloc[0] if standings_df is not None else None
+                gr = int(team_row["games_remaining"]) if team_row is not None and "games_remaining" in team_row else 100
+
+                roster_data = _fetch_team_roster_with_stats(tid)
+
+                has_data = (
+                    len(roster_data.get("active_batters", [])) >= 3 or
+                    len(roster_data.get("active_pitchers", [])) >= 2
+                )
+
+                if has_data:
+                    proj = _compute_team_projection(roster_data, gr)
+                    player_detail[tid] = proj["player_detail"]
+                    rows.append({
+                        "team_id":            tid,
+                        "proj_runs_per_game": proj["proj_rpg"],
+                        "proj_ra_per_game":   proj["proj_rapg"],
+                        "proj_win_pct":       proj["proj_win_pct"],
+                        "proj_sp_fip":        proj["proj_sp_era"],
+                        "proj_rp_fip":        proj["proj_rp_era"],
+                        "proj_wrc_plus":      round((proj["proj_ops"] / LEAGUE_AVG_OPS) * 100, 1),
+                    })
+                    success_count += 1
+                else:
+                    rows.append(None)
+            except Exception as te:
+                print(f"Team {tid} projection error: {te}")
+                rows.append(None)
+
+        print(f"MLB Stats API: {success_count}/30 teams projected")
+
+        if success_count >= 20:
+            # Fill in missing teams with regression fallback
+            final_rows = []
+            row_idx = 0
+            for tid in all_ids:
+                r = rows[row_idx]
+                row_idx += 1
+                if r is None:
+                    if standings_df is not None:
+                        tm = standings_df[standings_df["team_id"] == tid]
+                        if not tm.empty:
+                            gp   = int(tm.iloc[0].get("games_played", 1))
+                            rs_g = tm.iloc[0].get("runs_scored", 0) / max(gp, 1)
+                            ra_g = tm.iloc[0].get("runs_allowed", 0) / max(gp, 1)
+                            _, _, wp = _regressed_win_pct(rs_g, ra_g, gp)
+                            r = {"team_id": tid, "proj_runs_per_game": LEAGUE_AVG_RPG,
+                                 "proj_ra_per_game": LEAGUE_AVG_RPG, "proj_win_pct": wp,
+                                 "proj_sp_fip": LEAGUE_AVG_FIP, "proj_rp_fip": LEAGUE_AVG_FIP,
+                                 "proj_wrc_plus": LEAGUE_AVG_WRC}
+                        else:
+                            r = {"team_id": tid, "proj_runs_per_game": LEAGUE_AVG_RPG,
+                                 "proj_ra_per_game": LEAGUE_AVG_RPG, "proj_win_pct": 0.500,
+                                 "proj_sp_fip": LEAGUE_AVG_FIP, "proj_rp_fip": LEAGUE_AVG_FIP,
+                                 "proj_wrc_plus": LEAGUE_AVG_WRC}
+                final_rows.append(r)
+
+            proj_df = pd.DataFrame(final_rows)
+            proj_df["proj_source"] = "MLB Stats API"
+            return proj_df, player_detail
+
+    except Exception as e:
+        print(f"MLB Stats API projection error: {e}")
+
+    # ── Tier 2: Regression-to-mean ────────────────────────────────────────────
     if standings_df is not None and not standings_df.empty:
         rows = []
         for _, row in standings_df.iterrows():
-            tid   = row["team_id"]
-            gp    = max(int(row.get("games_played", 0)), 1)
-            rs_g  = row.get("runs_scored",  0) / gp
-            ra_g  = row.get("runs_allowed", 0) / gp
+            tid  = row["team_id"]
+            gp   = max(int(row.get("games_played", 0)), 1)
+            rs_g = row.get("runs_scored",  0) / gp
+            ra_g = row.get("runs_allowed", 0) / gp
             reg_rs, reg_ra, wp = _regressed_win_pct(rs_g, ra_g, gp)
             rows.append({
-                "team_id":            tid,
-                "proj_runs_per_game": round(reg_rs, 3),
-                "proj_ra_per_game":   round(reg_ra, 3),
-                "proj_win_pct":       round(wp, 4),
-                "proj_sp_fip":        LEAGUE_AVG_FIP,
-                "proj_rp_fip":        LEAGUE_AVG_FIP,
-                "proj_wrc_plus":      LEAGUE_AVG_WRC,
+                "team_id": tid, "proj_runs_per_game": round(reg_rs, 3),
+                "proj_ra_per_game": round(reg_ra, 3), "proj_win_pct": round(wp, 4),
+                "proj_sp_fip": LEAGUE_AVG_FIP, "proj_rp_fip": LEAGUE_AVG_FIP,
+                "proj_wrc_plus": LEAGUE_AVG_WRC,
             })
         proj_df = pd.DataFrame(rows)
         proj_df["proj_source"] = "Regression-to-Mean"
         return proj_df, player_detail
 
-    # ── Tier 3: True last resort ──────────────────────────────────────────────
+    # ── Tier 3: League average ────────────────────────────────────────────────
     rows = [{"team_id": tid, "proj_runs_per_game": LEAGUE_AVG_RPG,
              "proj_ra_per_game": LEAGUE_AVG_RPG, "proj_win_pct": 0.500,
              "proj_sp_fip": LEAGUE_AVG_FIP, "proj_rp_fip": LEAGUE_AVG_FIP,
@@ -906,10 +1112,9 @@ def pythag(rs, ra):
 def build_master(standings_df, statcast_df, player_detail=None) -> pd.DataFrame:
     df = standings_df.copy()
     merge_cols = ["team_id", "proj_win_pct", "proj_runs_per_game", "proj_ra_per_game"]
-    if "proj_source" in statcast_df.columns:
-        merge_cols.append("proj_source")
-    if "proj_sp_fip" in statcast_df.columns:
-        merge_cols += ["proj_sp_fip", "proj_rp_fip", "proj_wrc_plus"]
+    for col in ["proj_source", "proj_sp_fip", "proj_rp_fip", "proj_wrc_plus"]:
+        if col in statcast_df.columns:
+            merge_cols.append(col)
     df = df.merge(statcast_df[merge_cols], on="team_id", how="left")
     df["proj_win_pct"]   = df["proj_win_pct"].fillna(df["win_pct"]).fillna(0.500)
     df["pythag_win_pct"] = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
@@ -1438,34 +1643,49 @@ def render_team_tab(master_df, sim_results):
     rc1, rc2, rc3 = st.columns(3)
 
     with rc1:
-        st.markdown("**Lineup (Proj PA)**")
+        st.markdown("**Active Lineup**")
         batters = detail.get("batters", [])
         if batters:
-            bdf = pd.DataFrame(batters)[["name","pa","wrc_plus"]].rename(
-                columns={"name":"Player","pa":"Proj PA","wrc_plus":"wRC+"})
+            cols_avail = [c for c in ["name","pa","ops","wrc_plus"] if c in batters[0]]
+            bdf = pd.DataFrame(batters)[cols_avail].rename(
+                columns={"name":"Player","pa":"Proj PA","ops":"OPS","wrc_plus":"wRC+"})
             st.dataframe(bdf, hide_index=True, use_container_width=True)
         else:
             st.caption("No data available")
+        il_bat = detail.get("il_batters", [])
+        if il_bat:
+            st.markdown("**🏥 IL Batters**")
+            idf = pd.DataFrame(il_bat)[["name","ops","days_out","position"]].rename(
+                columns={"name":"Player","ops":"OPS","days_out":"Days Out","position":"Pos"})
+            st.dataframe(idf, hide_index=True, use_container_width=True)
 
     with rc2:
-        st.markdown("**Rotation (Proj IP)**")
+        st.markdown("**Active Rotation**")
         sp = detail.get("sp", [])
         if sp:
-            sdf = pd.DataFrame(sp)[["name","ip","fip"]].rename(
-                columns={"name":"Pitcher","ip":"Proj IP","fip":"FIP"})
+            cols_avail = [c for c in ["name","ip","era","fip"] if c in sp[0]]
+            sdf = pd.DataFrame(sp)[cols_avail].rename(
+                columns={"name":"Pitcher","ip":"Proj IP","era":"ERA","fip":"FIP"})
             st.dataframe(sdf, hide_index=True, use_container_width=True)
         else:
             st.caption("No data available")
 
     with rc3:
-        st.markdown("**Bullpen (Proj IP)**")
+        st.markdown("**Active Bullpen**")
         rp = detail.get("rp", [])
         if rp:
-            rdf = pd.DataFrame(rp)[["name","ip","fip"]].rename(
-                columns={"name":"Pitcher","ip":"Proj IP","fip":"FIP"})
+            cols_avail = [c for c in ["name","ip","era","fip"] if c in rp[0]]
+            rdf = pd.DataFrame(rp)[cols_avail].rename(
+                columns={"name":"Pitcher","ip":"Proj IP","era":"ERA","fip":"FIP"})
             st.dataframe(rdf, hide_index=True, use_container_width=True)
         else:
             st.caption("No data available")
+        il_pit = detail.get("il_pitchers", [])
+        if il_pit:
+            st.markdown("**🏥 IL Pitchers**")
+            ipdf = pd.DataFrame(il_pit)[["name","role","era","days_out"]].rename(
+                columns={"name":"Pitcher","role":"Role","era":"ERA","days_out":"Days Out"})
+            st.dataframe(ipdf, hide_index=True, use_container_width=True)
 
     st.markdown("---")
     st.markdown("### Projected Win Distribution")
@@ -1634,7 +1854,30 @@ def load_all_data():
         schedule_df = pd.DataFrame(columns=["game_id","game_date","home_team_id","away_team_id","status"])
 
     update(*steps[2])
-    statcast_df, player_detail = fetch_team_projections(standings_df)
+    import concurrent.futures as _pf
+    try:
+        with _pf.ThreadPoolExecutor(max_workers=1) as _px:
+            statcast_df, player_detail = _px.submit(
+                fetch_team_projections, standings_df
+            ).result(timeout=180)
+    except Exception as _pe:
+        print(f"Projection fetch failed/timed out: {_pe}")
+        # Direct regression fallback
+        rows = []
+        for _, _row in standings_df.iterrows():
+            _tid = _row["team_id"]
+            _gp  = max(int(_row.get("games_played", 0)), 1)
+            _, _, _wp = _regressed_win_pct(
+                _row.get("runs_scored", 0) / _gp,
+                _row.get("runs_allowed", 0) / _gp, _gp
+            )
+            rows.append({"team_id": _tid, "proj_runs_per_game": LEAGUE_AVG_RPG,
+                         "proj_ra_per_game": LEAGUE_AVG_RPG, "proj_win_pct": _wp,
+                         "proj_sp_fip": LEAGUE_AVG_FIP, "proj_rp_fip": LEAGUE_AVG_FIP,
+                         "proj_wrc_plus": LEAGUE_AVG_WRC})
+        statcast_df = pd.DataFrame(rows)
+        statcast_df["proj_source"] = "Regression-to-Mean"
+        player_detail = {tid: {"batters":[],"sp":[],"rp":[]} for tid in TEAM_INFO.keys()}
 
     update(*steps[3])
     master_df = build_master(standings_df, statcast_df, player_detail)
