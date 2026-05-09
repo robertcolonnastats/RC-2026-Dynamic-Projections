@@ -387,17 +387,21 @@ def fetch_team_projections(standings_df, roster_map):
         
         pecota_ops = LEAGUE_AVG_OPS
         if not ph_team.empty:
-            ph_team["adj_pa"] = ph_team["pa"].fillna(0)
+            # 🔒 SAFE WEIGHT CALCULATION - avoids in-place DataFrame modification
+            weights = ph_team["pa"].fillna(0).copy()
             il_mask = ph_team["mlbid"].isin(il_ids)
-            ph_team.loc[il_mask, "adj_pa"] *= (ROSTER_WEIGHT_IL / ROSTER_WEIGHT_ACTIVE)
             active_mask = ph_team["mlbid"].isin(active_ids)
             other_mask = ~il_mask & ~active_mask
-            ph_team.loc[other_mask, "adj_pa"] *= (ROSTER_WEIGHT_OTHER / ROSTER_WEIGHT_ACTIVE)
-            valid = ph_team["adj_pa"] > 0
+            
+            weights[il_mask] *= (ROSTER_WEIGHT_IL / ROSTER_WEIGHT_ACTIVE)
+            weights[other_mask] *= (ROSTER_WEIGHT_OTHER / ROSTER_WEIGHT_ACTIVE)
+            
+            valid = weights > 0
             if valid.any():
                 ops_vals = ph_team.loc[valid, "ops"].fillna(LEAGUE_AVG_OPS).values
-                weights = ph_team.loc[valid, "adj_pa"].values
-                pecota_ops = float(np.average(ops_vals, weights=weights))
+                weights_arr = weights[valid].values
+                pecota_ops = float(np.average(ops_vals, weights=weights_arr))
+                
         pecota_ops = float(np.clip(pecota_ops, 0.620, 0.850))
         
         cur_pa = float(team_pa.get(tid, 0))
@@ -410,7 +414,10 @@ def fetch_team_projections(standings_df, roster_map):
             cur_xwoba = d["stat"] * wt + LEAGUE_AVG_XWOBA * (1 - wt)
         elif isinstance(mlb_ops, dict) and tid in mlb_ops:
             cur_xwoba = float(mlb_ops[tid]) * 0.43
-        xwoba = (w_cur * cur_xwoba + w_prior * PRIOR_HIST_2025_WEIGHT * h25b.get(tid, LEAGUE_AVG_XWOBA) + w_prior * PRIOR_HIST_2024_WEIGHT * h24b.get(tid, LEAGUE_AVG_XWOBA) + w_prior * PRIOR_PECOTA_WEIGHT * LEAGUE_AVG_XWOBA)
+            
+        xwoba = (w_cur * cur_xwoba + w_prior * PRIOR_HIST_2025_WEIGHT * h25b.get(tid, LEAGUE_AVG_XWOBA) + 
+                 w_prior * PRIOR_HIST_2024_WEIGHT * h24b.get(tid, LEAGUE_AVG_XWOBA) + w_prior * PRIOR_PECOTA_WEIGHT * LEAGUE_AVG_XWOBA)
+                 
         team_ops = float(np.clip(pecota_ops * (1 + (xwoba / LEAGUE_AVG_XWOBA - 1) * STATCAST_INFLUENCE), 0.620, 0.850))
         proj_rpg = float(np.clip((team_ops / LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG, 2.5, 7.5))
         
@@ -424,6 +431,53 @@ def fetch_team_projections(standings_df, roster_map):
             blend = (df["fip"].fillna(LEAGUE_AVG_FIP) * 0.7 + df["era"].fillna(LEAGUE_AVG_ERA) * 0.3).clip(2, 7.5).values
             if cip.sum() > 0: return float(np.average(blend, weights=cip))
             return float(LEAGUE_AVG_ERA)
+            
+        sp_base = float(np.clip(staff_era(sp_df, "SP"), 2.80, 5.50))
+        rp_base = float(np.clip(staff_era(rp_df, "RP"), 3.00, 5.50))
+        
+        cur_ip = float(team_ip.get(tid, 0))
+        w_cur_ip = min(cur_ip / IP_FULL_WEIGHT_SP, 1.0)
+        w_prior_ip = 1.0 - w_cur_ip
+        cur_xera = LEAGUE_AVG_XERA
+        if isinstance(cur_pit, dict) and tid in cur_pit:
+            d = cur_pit[tid]
+            wt = min(d.get("sample", 0) / IP_FULL_WEIGHT_SP, 1.0)
+            cur_xera = d["stat"] * wt + LEAGUE_AVG_XERA * (1 - wt)
+        elif isinstance(mlb_era, dict) and tid in mlb_era:
+            cur_xera = float(mlb_era[tid])
+            
+        xera = (w_cur_ip * cur_xera + w_prior_ip * PRIOR_HIST_2025_WEIGHT * h25p.get(tid, LEAGUE_AVG_XERA) + 
+                w_prior_ip * PRIOR_HIST_2024_WEIGHT * h24p.get(tid, LEAGUE_AVG_XERA) + w_prior_ip * PRIOR_PECOTA_WEIGHT * LEAGUE_AVG_XERA)
+                
+        sc_adj = (xera / LEAGUE_AVG_XERA - 1) * STATCAST_INFLUENCE
+        sp_era = float(np.clip(sp_base * (1 + sc_adj), 2.80, 5.50))
+        rp_era = float(np.clip(rp_base * (1 + sc_adj), 3.00, 5.50))
+        proj_rapg = float(np.clip((sp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE + 
+                                  (rp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE, 2.5, 7.5))
+        proj_wp = float(proj_rpg**PYTHAG_EXPONENT / (proj_rpg**PYTHAG_EXPONENT + proj_rapg**PYTHAG_EXPONENT))
+        
+        il_warp = 0.0
+        if not ph.empty and len(il_ids) > 0:
+            il_players = ph[(ph["team_id"] == tid) & (ph["mlbid"].isin(il_ids))]
+            if not il_players.empty:
+                il_warp = float(il_players["warp"].fillna(0).clip(lower=0).sum())
+        
+        # 🔒 STRICT SCALAR SANITIZATION BEFORE APPENDING
+        rows.append({
+            "team_id": int(tid),
+            "proj_runs_per_game": round(float(np.clip(proj_rpg, 2.5, 7.5)), 3),
+            "proj_ra_per_game": round(float(np.clip(proj_rapg, 2.5, 7.5)), 3),
+            "proj_win_pct": round(float(np.clip(proj_wp, 0.0, 1.0)), 4),
+            "il_warp": round(float(np.clip(il_warp, 0.0, None)), 2),
+            "proj_source": "PECOTA+Statcast"
+        })
+        
+    prj = pd.DataFrame(rows)
+    if not prj.empty:
+        for c in prj.columns:
+            prj[c] = pd.to_numeric(prj[c], errors="coerce").fillna(0.0)
+        prj["team_id"] = prj["team_id"].astype(int)
+    return prj
             
         sp_base = float(np.clip(staff_era(sp_df, "SP"), 2.80, 5.50))
         rp_base = float(np.clip(staff_era(rp_df, "RP"), 3.00, 5.50))
@@ -481,25 +535,28 @@ def pythag(rs, ra):
 
 def build_master(std, prj):
     df = std.copy()
+    # 🔒 SAFE TYPE COERCION BEFORE MERGE
     df["team_id"] = pd.to_numeric(df["team_id"], errors="coerce").fillna(0).astype(int)
     prj["team_id"] = pd.to_numeric(prj["team_id"], errors="coerce").fillna(0).astype(int)
+    
     df = df.merge(prj[["team_id","proj_win_pct","proj_runs_per_game","proj_ra_per_game","proj_source","il_warp"]], on="team_id", how="left")
     
-    # 🔒 FORCE FLOAT ON NUMERIC COLUMNS PREVENTS PANDAS dtype COLLISIONS
+    # 🔒 FORCE FLOAT ON NUMERIC COLUMNS (PREVENTS OBJECT/ARRAY CONTAMINATION)
     for c in ["proj_win_pct","proj_runs_per_game","proj_ra_per_game","il_warp","win_pct"]:
         if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0).astype(float)
             
     df["pythag_win_pct"] = df.apply(lambda r: pythag(float(r["runs_scored"]), float(r["runs_allowed"])), axis=1).astype(float)
     gp = df["games_played"].clip(0, 162).astype(float)
     df["pythag_win_pct"] = (df["pythag_win_pct"] * (gp / (gp + PYTHAG_REGRESSION_PA)) + 0.500 * (PYTHAG_REGRESSION_PA / (gp + PYTHAG_REGRESSION_PA))).astype(float)
+    
     base_proj_w = (PROJ_WEIGHT_MAX - (gp / 162.0) * (PROJ_WEIGHT_MAX - PROJ_WEIGHT_MIN)).clip(PROJ_WEIGHT_MIN, PROJ_WEIGHT_MAX)
     il_frac = (df["il_warp"] / TYPICAL_TEAM_WARP).clip(0.0, MAX_IL_FRAC)
     adj_pyth_w = (1.0 - base_proj_w) * (1.0 - il_frac)
     adj_proj_w = 1.0 - adj_pyth_w
+    
     df["blended_win_pct"] = (df["proj_win_pct"].fillna(0.5) * adj_proj_w + df["pythag_win_pct"] * adj_pyth_w).clip(0.20, 0.80).astype(float)
     df["games_remaining"] = (162.0 - gp).clip(0, 162).astype(float)
     return df
-
 def compute_buyer_seller(df):
     df = df.copy()
     df["pythag_expected_wins"] = (df["pythag_win_pct"] * df["games_played"]).astype(float)
