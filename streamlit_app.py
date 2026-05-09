@@ -60,11 +60,11 @@ PRIOR_HIST_2025_WEIGHT   = 0.30
 PRIOR_HIST_2024_WEIGHT   = 0.20
 
 # ── Statcast influence ────────────────────────────────────────────────────────
-STATCAST_INFLUENCE       = 1.00
+STATCAST_INFLUENCE       = 2.00
 
 # ── Active roster weights ─────────────────────────────────────────────────────
 ROSTER_WEIGHT_ACTIVE     = 600.0
-ROSTER_WEIGHT_IL         = 10.0
+ROSTER_WEIGHT_IL         = 100.0
 ROSTER_WEIGHT_OTHER      = 300.0
 
 # ── IL WARP adjustment ────────────────────────────────────────────────────────
