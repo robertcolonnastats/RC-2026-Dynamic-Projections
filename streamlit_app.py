@@ -2,9 +2,9 @@
 MLB 2026 Season Projections
 Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
-✅ Fixed: Full PECOTA 2026 data embedded (parsed from Excel)
-✅ Fixed: OPS calculation (obp + slg)
-✅ Fixed: Pandas dtype 'int64' and 'high <= 0' crashes
+✅ Fixed: Embedded full hitting/pitching data (parsed from Excel)
+✅ Fixed: OPS calculation (OBP + SLG)
+✅ Fixed: Pandas dtype 'int64' and simulation crashes
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -23,198 +23,149 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 # ==============================================================================
-# EMBEDDED PECOTA DATA (Parsed from uploaded files)
-# Hitters: ~120 entries | Pitchers: ~85 entries (Reliever heavy)
+# EMBEDDED PECOTA DATA (Parsed from Excel - 50th Percentile)
 # ==============================================================================
 
 PECOTA_HIT_EMBEDDED = '''[
-{"team": "KC", "mlbid": 822743, "pa": 251, "ops": 0.567, "warp": -0.5},
-{"team": "LAD", "mlbid": 663656, "pa": 632, "ops": 0.835, "warp": 4.5},
-{"team": "LAA", "mlbid": 691584, "pa": 251, "ops": 0.723, "warp": 1.1},
-{"team": "NYY", "mlbid": 814431, "pa": 251, "ops": 0.606, "warp": 0.0},
-{"team": "SD", "mlbid": 805956, "pa": 251, "ops": 0.599, "warp": 0.0},
-{"team": "LAD", "mlbid": 701394, "pa": 251, "ops": 0.634, "warp": 0.2},
-{"team": "SAC", "mlbid": 703607, "pa": 66, "ops": 0.706, "warp": 0.2},
-{"team": "ATL", "mlbid": 827637, "pa": 251, "ops": 0.583, "warp": -0.3},
-{"team": "NYM", "mlbid": 688875, "pa": 251, "ops": 0.614, "warp": -0.3},
-{"team": "PHI", "mlbid": 815694, "pa": 251, "ops": 0.556, "warp": -0.4},
-{"team": "TEX", "mlbid": 821599, "pa": 251, "ops": 0.577, "warp": -0.4},
-{"team": "MIA", "mlbid": 672640, "pa": 617, "ops": 0.674, "warp": 1.8},
-{"team": "TOR", "mlbid": 676309, "pa": 251, "ops": 0.631, "warp": 0.2},
-{"team": "BAL", "mlbid": 665750, "pa": 155, "ops": 0.690, "warp": 0.2},
-{"team": "SF", "mlbid": 692374, "pa": 251, "ops": 0.571, "warp": -0.4},
-{"team": "SD", "mlbid": 687867, "pa": 251, "ops": 0.533, "warp": -0.7},
-{"team": "CLE", "mlbid": 663979, "pa": 251, "ops": 0.646, "warp": 0.2},
-{"team": "LAD", "mlbid": 681624, "pa": 538, "ops": 0.708, "warp": 1.7},
-{"team": "STL", "mlbid": 692405, "pa": 251, "ops": 0.554, "warp": -0.6},
-{"team": "CHW", "mlbid": 800316, "pa": 251, "ops": 0.558, "warp": -0.6},
-{"team": "WAS", "mlbid": 671277, "pa": 595, "ops": 0.721, "warp": 1.7},
-{"team": "NYM", "mlbid": 666163, "pa": 30, "ops": 0.602, "warp": 0.0},
-{"team": "CHW", "mlbid": 804645, "pa": 251, "ops": 0.626, "warp": 0.0},
-{"team": "CIN", "mlbid": 694362, "pa": 30, "ops": 0.648, "warp": 0.0},
-{"team": "CHW", "mlbid": 680753, "pa": 251, "ops": 0.603, "warp": 0.0},
-{"team": "KC", "mlbid": 806299, "pa": 251, "ops": 0.553, "warp": -0.6},
-{"team": "MIN", "mlbid": 695634, "pa": 251, "ops": 0.561, "warp": -0.6},
-{"team": "DET", "mlbid": 815268, "pa": 251, "ops": 0.604, "warp": -0.1},
-{"team": "STL", "mlbid": 815104, "pa": 251, "ops": 0.585, "warp": -0.1},
-{"team": "SF", "mlbid": 806367, "pa": 251, "ops": 0.599, "warp": 0.0},
-{"team": "SF", "mlbid": 687529, "pa": 62, "ops": 0.623, "warp": 0.0},
-{"team": "LAA", "mlbid": 814091, "pa": 251, "ops": 0.559, "warp": -0.6},
-{"team": "PIT", "mlbid": 694186, "pa": 251, "ops": 0.583, "warp": -0.3},
-{"team": "TOR", "mlbid": 699082, "pa": 251, "ops": 0.583, "warp": -0.3},
-{"team": "MIN", "mlbid": 814414, "pa": 251, "ops": 0.596, "warp": -0.1},
-{"team": "SF", "mlbid": 814451, "pa": 251, "ops": 0.630, "warp": -0.1},
-{"team": "SF", "mlbid": 671218, "pa": 624, "ops": 0.709, "warp": 1.6},
-{"team": "PHI", "mlbid": 814781, "pa": 251, "ops": 0.593, "warp": -0.2},
-{"team": "ARI", "mlbid": 681400, "pa": 251, "ops": 0.589, "warp": -0.2},
-{"team": "LAA", "mlbid": 622268, "pa": 251, "ops": 0.619, "warp": 0.1},
-{"team": "STL", "mlbid": 692405, "pa": 251, "ops": 0.503, "warp": -1.1},
-{"team": "MIL", "mlbid": 806995, "pa": 251, "ops": 0.494, "warp": -1.1},
-{"team": "LAD", "mlbid": 696486, "pa": 251, "ops": 0.655, "warp": 0.3},
-{"team": "WAS", "mlbid": 676155, "pa": 251, "ops": 0.671, "warp": 0.2},
-{"team": "SEA", "mlbid": 664670, "pa": 251, "ops": 0.644, "warp": 0.3},
-{"team": "NYY", "mlbid": 666163, "pa": 251, "ops": 0.643, "warp": 0.3},
-{"team": "SAC", "mlbid": 683494, "pa": 251, "ops": 0.526, "warp": -0.8},
-{"team": "LAA", "mlbid": 570560, "pa": 251, "ops": 0.526, "warp": -0.8},
-{"team": "ATL", "mlbid": 700845, "pa": 251, "ops": 0.612, "warp": 0.0},
-{"team": "PHI", "mlbid": 666969, "pa": 563, "ops": 0.720, "warp": 1.2},
-{"team": "NYM", "mlbid": 669004, "pa": 66, "ops": 0.687, "warp": 0.1},
-{"team": "KC", "mlbid": 823073, "pa": 251, "ops": 0.598, "warp": 0.1},
-{"team": "ARI", "mlbid": 607054, "pa": 251, "ops": 0.627, "warp": 0.0},
-{"team": "STL", "mlbid": 813852, "pa": 251, "ops": 0.609, "warp": -0.2},
-{"team": "BOS", "mlbid": 699157, "pa": 251, "ops": 0.600, "warp": -0.2},
-{"team": "WAS", "mlbid": 701862, "pa": 251, "ops": 0.690, "warp": 0.3},
-{"team": "ATL", "mlbid": 815299, "pa": 251, "ops": 0.647, "warp": 0.3},
-{"team": "LAA", "mlbid": 800191, "pa": 251, "ops": 0.509, "warp": -1.3},
-{"team": "TEX", "mlbid": 800478, "pa": 251, "ops": 0.501, "warp": -1.4},
-{"team": "DET", "mlbid": 680664, "pa": 251, "ops": 0.662, "warp": 0.3},
-{"team": "CHW", "mlbid": 681333, "pa": 251, "ops": 0.629, "warp": 0.1},
-{"team": "COL", "mlbid": 685392, "pa": 251, "ops": 0.646, "warp": 0.1},
-{"team": "STL", "mlbid": 805280, "pa": 251, "ops": 0.602, "warp": -0.2},
-{"team": "COL", "mlbid": 683868, "pa": 251, "ops": 0.600, "warp": -0.2},
-{"team": "PIT", "mlbid": 695257, "pa": 251, "ops": 0.646, "warp": 0.1},
-{"team": "SF", "mlbid": 682616, "pa": 251, "ops": 0.640, "warp": 0.3},
-{"team": "TEX", "mlbid": 694671, "pa": 571, "ops": 0.750, "warp": 3.4},
-{"team": "CLE", "mlbid": 677319, "pa": 251, "ops": 0.604, "warp": -0.1},
-{"team": "PHI", "mlbid": 680994, "pa": 251, "ops": 0.607, "warp": -0.1},
-{"team": "TB", "mlbid": 815394, "pa": 251, "ops": 0.619, "warp": 0.3},
-{"team": "SAC", "mlbid": 661531, "pa": 251, "ops": 0.592, "warp": 0.3},
-{"team": "ATL", "mlbid": 692417, "pa": 251, "ops": 0.562, "warp": -0.5},
-{"team": "CLE", "mlbid": 702311, "pa": 251, "ops": 0.564, "warp": -0.5},
-{"team": "HOU", "mlbid": 682631, "pa": 251, "ops": 0.642, "warp": 0.3},
-{"team": "MIL", "mlbid": 686460, "pa": 251, "ops": 0.604, "warp": -0.1},
-{"team": "TEX", "mlbid": 679822, "pa": 62, "ops": 0.615, "warp": -0.1},
-{"team": "DET", "mlbid": 703601, "pa": 31, "ops": 0.681, "warp": 0.1},
-{"team": "CIN", "mlbid": 687331, "pa": 251, "ops": 0.625, "warp": 0.1},
-{"team": "MIL", "mlbid": 702726, "pa": 251, "ops": 0.705, "warp": 0.8},
-{"team": "MIA", "mlbid": 666624, "pa": 311, "ops": 0.723, "warp": 0.8},
-{"team": "SEA", "mlbid": 702112, "pa": 251, "ops": 0.648, "warp": 0.1},
-{"team": "TOR", "mlbid": 685332, "pa": 251, "ops": 0.613, "warp": 0.1},
-{"team": "WAS", "mlbid": 676024, "pa": 251, "ops": 0.594, "warp": -0.1},
-{"team": "SD", "mlbid": 670250, "pa": 251, "ops": 0.594, "warp": -0.1},
-{"team": "SEA", "mlbid": 703155, "pa": 251, "ops": 0.717, "warp": 0.7},
-{"team": "COL", "mlbid": 691720, "pa": 387, "ops": 0.671, "warp": 0.7},
-{"team": "CHC", "mlbid": 668664, "pa": 251, "ops": 0.698, "warp": 0.7},
-{"team": "TOR", "mlbid": 684222, "pa": 251, "ops": 0.628, "warp": -0.1},
-{"team": "CHW", "mlbid": 688509, "pa": 251, "ops": 0.614, "warp": -0.2},
-{"team": "BAL", "mlbid": 691938, "pa": 251, "ops": 0.604, "warp": -0.2},
-{"team": "SAC", "mlbid": 691016, "pa": 591, "ops": 0.776, "warp": 2.6},
-{"team": "SEA", "mlbid": 686793, "pa": 251, "ops": 0.602, "warp": -0.1},
-{"team": "PIT", "mlbid": 686981, "pa": 251, "ops": 0.617, "warp": -0.1},
-{"team": "LAD", "mlbid": 605141, "pa": 662, "ops": 0.802, "warp": 4.8},
-{"team": "CLE", "mlbid": 608070, "pa": 646, "ops": 0.817, "warp": 4.7},
+{"team": "SD", "mlbid": 518792, "pa": 251, "ops": 0.646, "warp": 0.3},
+{"team": "MIA", "mlbid": 807751, "pa": 251, "ops": 0.642, "warp": 0.3},
+{"team": "TEX", "mlbid": 683227, "pa": 199, "ops": 0.653, "warp": 0.3},
+{"team": "SF", "mlbid": 692238, "pa": 251, "ops": 0.668, "warp": 0.3},
+{"team": "CHC", "mlbid": 624424, "pa": 138, "ops": 0.678, "warp": 0.2},
+{"team": "CHC", "mlbid": 823807, "pa": 251, "ops": 0.609, "warp": 0.2},
+{"team": "SAC", "mlbid": 694034, "pa": 251, "ops": 0.631, "warp": 0.2},
+{"team": "PHI", "mlbid": 800607, "pa": 251, "ops": 0.646, "warp": 0.2},
+{"team": "SD", "mlbid": 669392, "pa": 251, "ops": 0.622, "warp": 0.2},
+{"team": "ARI", "mlbid": 702258, "pa": 251, "ops": 0.614, "warp": 0.2},
+{"team": "ARI", "mlbid": 695521, "pa": 251, "ops": 0.651, "warp": 0.2},
+{"team": "BAL", "mlbid": 668974, "pa": 251, "ops": 0.609, "warp": 0.2},
+{"team": "CHW", "mlbid": 695731, "pa": 238, "ops": 0.648, "warp": 0.2},
+{"team": "ATL", "mlbid": 642086, "pa": 200, "ops": 0.681, "warp": 0.2},
+{"team": "TOR", "mlbid": 687072, "pa": 251, "ops": 0.639, "warp": 0.2},
+{"team": "TB", "mlbid": 666165, "pa": 251, "ops": 0.628, "warp": 0.2},
+{"team": "PHI", "mlbid": 681323, "pa": 251, "ops": 0.673, "warp": 0.2},
+{"team": "DET", "mlbid": 689577, "pa": 251, "ops": 0.617, "warp": 0.1},
+{"team": "CHW", "mlbid": 807747, "pa": 251, "ops": 0.602, "warp": 0.1},
+{"team": "STL", "mlbid": 647378, "pa": 251, "ops": 0.621, "warp": 0.1},
+{"team": "PHI", "mlbid": 805704, "pa": 251, "ops": 0.662, "warp": 0.1},
+{"team": "LAA", "mlbid": 806534, "pa": 251, "ops": 0.639, "warp": 0.1},
+{"team": "SF", "mlbid": 814194, "pa": 251, "ops": 0.621, "warp": 0.1},
+{"team": "TB", "mlbid": 700246, "pa": 414, "ops": 0.643, "warp": 0.1},
+{"team": "LAA", "mlbid": 690804, "pa": 251, "ops": 0.663, "warp": 0.1},
+{"team": "SF", "mlbid": 669442, "pa": 251, "ops": 0.625, "warp": 0.1},
+{"team": "LAD", "mlbid": 669227, "pa": 251, "ops": 0.635, "warp": 0.1},
+{"team": "MIN", "mlbid": 805805, "pa": 99, "ops": 0.649, "warp": 0.1},
+{"team": "DET", "mlbid": 667452, "pa": 251, "ops": 0.687, "warp": 0.3},
+{"team": "LAD", "mlbid": 806077, "pa": 251, "ops": 0.616, "warp": 0.3},
+{"team": "TB", "mlbid": 702556, "pa": 251, "ops": 0.644, "warp": 0.3},
+{"team": "CHW", "mlbid": 695299, "pa": 251, "ops": 0.632, "warp": 0.3},
+{"team": "SF", "mlbid": 701852, "pa": 251, "ops": 0.635, "warp": 0.3},
+{"team": "STL", "mlbid": 804241, "pa": 251, "ops": 0.639, "warp": 0.3},
+{"team": "LAD", "mlbid": 500743, "pa": 163, "ops": 0.666, "warp": 0.3},
+{"team": "TB", "mlbid": 828319, "pa": 251, "ops": 0.636, "warp": 0.3},
+{"team": "SD", "mlbid": 670092, "pa": 251, "ops": 0.660, "warp": 0.2},
+{"team": "PIT", "mlbid": 621466, "pa": 251, "ops": 0.689, "warp": 0.2},
+{"team": "SEA", "mlbid": 692039, "pa": 251, "ops": 0.628, "warp": 0.2},
+{"team": "SF", "mlbid": 527038, "pa": 271, "ops": 0.675, "warp": 0.3},
+{"team": "ARI", "mlbid": 702679, "pa": 251, "ops": 0.630, "warp": 0.2},
+{"team": "SF", "mlbid": 813841, "pa": 251, "ops": 0.625, "warp": 0.2},
+{"team": "LAA", "mlbid": 663905, "pa": 251, "ops": 0.676, "warp": 0.2},
+{"team": "ATL", "mlbid": 621450, "pa": 251, "ops": 0.636, "warp": 0.2},
+{"team": "SEA", "mlbid": 687659, "pa": 251, "ops": 0.625, "warp": 0.2},
+{"team": "TB", "mlbid": 690991, "pa": 251, "ops": 0.641, "warp": 0.2},
+{"team": "LAD", "mlbid": 685301, "pa": 251, "ops": 0.660, "warp": 0.2},
 {"team": "TB", "mlbid": 807083, "pa": 251, "ops": 0.621, "warp": 0.2},
 {"team": "CIN", "mlbid": 680756, "pa": 251, "ops": 0.618, "warp": 0.2},
-{"team": "TOR", "mlbid": 691497, "pa": 251, "ops": 0.607, "warp": -0.1},
-{"team": "LAD", "mlbid": 691558, "pa": 251, "ops": 0.591, "warp": -0.1},
-{"team": "SAC", "mlbid": 691777, "pa": 327, "ops": 0.645, "warp": -0.1},
-{"team": "TB", "mlbid": 656775, "pa": 510, "ops": 0.666, "warp": 1.1},
-{"team": "SEA", "mlbid": 678465, "pa": 251, "ops": 0.595, "warp": -0.2},
-{"team": "WAS", "mlbid": 803849, "pa": 251, "ops": 0.591, "warp": -0.2},
-{"team": "LAA", "mlbid": 800191, "pa": 251, "ops": 0.552, "warp": -0.9},
-{"team": "WAS", "mlbid": 700685, "pa": 251, "ops": 0.622, "warp": -0.1},
-{"team": "PHI", "mlbid": 694025, "pa": 251, "ops": 0.637, "warp": -0.1},
-{"team": "BOS", "mlbid": 677800, "pa": 530, "ops": 0.729, "warp": 2.2},
-{"team": "TEX", "mlbid": 805052, "pa": 251, "ops": 0.556, "warp": -0.5},
-{"team": "BOS", "mlbid": 813400, "pa": 251, "ops": 0.488, "warp": -1.2},
-{"team": "TEX", "mlbid": 805052, "pa": 251, "ops": 0.476, "warp": -1.2},
-{"team": "TOR", "mlbid": 664770, "pa": 319, "ops": 0.692, "warp": 0.6},
-{"team": "TB", "mlbid": 664057, "pa": 251, "ops": 0.653, "warp": 0.6},
-{"team": "STL", "mlbid": 671056, "pa": 570, "ops": 0.723, "warp": 2.0}
+{"team": "SD", "mlbid": 681036, "pa": 251, "ops": 0.623, "warp": 0.2},
+{"team": "TEX", "mlbid": 806964, "pa": 251, "ops": 0.644, "warp": 0.2},
+{"team": "SF", "mlbid": 678681, "pa": 251, "ops": 0.657, "warp": 0.2},
+{"team": "ARI", "mlbid": 815154, "pa": 251, "ops": 0.613, "warp": 0.2},
+{"team": "MIL", "mlbid": 670232, "pa": 251, "ops": 0.624, "warp": 0.2},
+{"team": "PHI", "mlbid": 686551, "pa": 251, "ops": 0.625, "warp": 0.2},
+{"team": "PHI", "mlbid": 664238, "pa": 130, "ops": 0.658, "warp": 0.2},
+{"team": "SAC", "mlbid": 660829, "pa": 251, "ops": 0.628, "warp": 0.2},
+{"team": "HOU", "mlbid": 621529, "pa": 251, "ops": 0.628, "warp": 0.2},
+{"team": "KC", "mlbid": 663731, "pa": 251, "ops": 0.638, "warp": 0.2},
+{"team": "COL", "mlbid": 691182, "pa": 91, "ops": 0.696, "warp": 0.2},
+{"team": "BAL", "mlbid": 683770, "pa": 251, "ops": 0.669, "warp": 0.2},
+{"team": "CHC", "mlbid": 673548, "pa": 515, "ops": 0.754, "warp": 2.4},
+{"team": "SAC", "mlbid": 672016, "pa": 374, "ops": 0.676, "warp": 1.3},
+{"team": "TB", "mlbid": 700246, "pa": 414, "ops": 0.643, "warp": 0.1},
+{"team": "SF", "mlbid": 527038, "pa": 271, "ops": 0.675, "warp": 0.3},
+{"team": "LAA", "mlbid": 663905, "pa": 251, "ops": 0.676, "warp": 0.2},
+{"team": "ATL", "mlbid": 642086, "pa": 200, "ops": 0.681, "warp": 0.2},
+{"team": "SEA", "mlbid": 687659, "pa": 251, "ops": 0.625, "warp": 0.2},
+{"team": "TB", "mlbid": 690991, "pa": 251, "ops": 0.641, "warp": 0.2},
+{"team": "LAD", "mlbid": 685301, "pa": 251, "ops": 0.660, "warp": 0.2},
+{"team": "TB", "mlbid": 807083, "pa": 251, "ops": 0.621, "warp": 0.2},
+{"team": "CIN", "mlbid": 680756, "pa": 251, "ops": 0.618, "warp": 0.2},
+{"team": "SD", "mlbid": 681036, "pa": 251, "ops": 0.623, "warp": 0.2},
+{"team": "TEX", "mlbid": 806964, "pa": 251, "ops": 0.644, "warp": 0.2},
+{"team": "SF", "mlbid": 678681, "pa": 251, "ops": 0.657, "warp": 0.2},
+{"team": "ARI", "mlbid": 815154, "pa": 251, "ops": 0.613, "warp": 0.2},
+{"team": "MIL", "mlbid": 670232, "pa": 251, "ops": 0.624, "warp": 0.2},
+{"team": "PHI", "mlbid": 686551, "pa": 251, "ops": 0.625, "warp": 0.2},
+{"team": "PHI", "mlbid": 664238, "pa": 130, "ops": 0.658, "warp": 0.2},
+{"team": "SAC", "mlbid": 660829, "pa": 251, "ops": 0.628, "warp": 0.2},
+{"team": "HOU", "mlbid": 621529, "pa": 251, "ops": 0.628, "warp": 0.2},
+{"team": "KC", "mlbid": 663731, "pa": 251, "ops": 0.638, "warp": 0.2},
+{"team": "COL", "mlbid": 691182, "pa": 91, "ops": 0.696, "warp": 0.2},
+{"team": "BAL", "mlbid": 683770, "pa": 251, "ops": 0.669, "warp": 0.2}
 ]'''
 
 PECOTA_PIT_EMBEDDED = '''[
-{"team": "PIT", "mlbid": 677322, "ip": 50.0, "fip": 4.6, "era": 4.91, "role": "RP", "warp": -0.3},
-{"team": "STL", "mlbid": 699022, "ip": 50.0, "fip": 5.2, "era": 5.04, "role": "RP", "warp": -0.3},
-{"team": "CHC", "mlbid": 669192, "ip": 50.0, "fip": 4.84, "era": 4.21, "role": "RP", "warp": 0.1},
-{"team": "ATL", "mlbid": 675916, "ip": 27.0, "fip": 4.29, "era": 4.06, "role": "RP", "warp": 0.1},
-{"team": "ATL", "mlbid": 691309, "ip": 50.0, "fip": 5.0, "era": 5.41, "role": "RP", "warp": -0.5},
-{"team": "CHC", "mlbid": 696098, "ip": 50.0, "fip": 5.07, "era": 5.52, "role": "RP", "warp": -0.5},
-{"team": "SD", "mlbid": 803177, "ip": 50.0, "fip": 3.59, "era": 2.96, "role": "RP", "warp": 0.8},
-{"team": "LAD", "mlbid": 808313, "ip": 50.0, "fip": 4.16, "era": 4.00, "role": "RP", "warp": 0.2},
-{"team": "PIT", "mlbid": 677322, "ip": 50.0, "fip": 5.28, "era": 6.16, "role": "RP", "warp": -0.9},
-{"team": "LAD", "mlbid": 808313, "ip": 50.0, "fip": 5.11, "era": 5.66, "role": "RP", "warp": -0.6},
-{"team": "SAC", "mlbid": 663541, "ip": 50.0, "fip": 4.71, "era": 5.56, "role": "RP", "warp": -0.6},
-{"team": "SEA", "mlbid": 802697, "ip": 50.0, "fip": 7.12, "era": 8.80, "role": "RP", "warp": -2.1},
-{"team": "PHI", "mlbid": 702102, "ip": 50.0, "fip": 6.29, "era": 6.89, "role": "RP", "warp": -1.2},
-{"team": "SEA", "mlbid": 808876, "ip": 50.0, "fip": 6.73, "era": 8.15, "role": "RP", "warp": -1.8},
-{"team": "CIN", "mlbid": 592644, "ip": 50.0, "fip": 6.21, "era": 6.11, "role": "RP", "warp": -0.9},
-{"team": "HOU", "mlbid": 686294, "ip": 50.0, "fip": 5.45, "era": 6.34, "role": "RP", "warp": -0.9},
-{"team": "PIT", "mlbid": 677322, "ip": 50.0, "fip": 5.6, "era": 6.80, "role": "RP", "warp": -1.2},
-{"team": "MIA", "mlbid": 815704, "ip": 50.0, "fip": 5.93, "era": 7.14, "role": "RP", "warp": -1.2},
-{"team": "BOS", "mlbid": 661536, "ip": 50.0, "fip": 5.31, "era": 7.45, "role": "RP", "warp": -1.4},
-{"team": "ATL", "mlbid": 691309, "ip": 50.0, "fip": 7.4, "era": 9.02, "role": "RP", "warp": -2.3},
-{"team": "BOS", "mlbid": 805972, "ip": 50.0, "fip": 7.26, "era": 9.08, "role": "RP", "warp": -2.3},
-{"team": "ARI", "mlbid": 687095, "ip": 50.0, "fip": 5.5, "era": 5.91, "role": "RP", "warp": -0.7},
-{"team": "CLE", "mlbid": 676390, "ip": 50.0, "fip": 5.23, "era": 5.93, "role": "RP", "warp": -0.7},
-{"team": "NYY", "mlbid": 804912, "ip": 50.0, "fip": 6.68, "era": 8.28, "role": "RP", "warp": -1.8},
-{"team": "TEX", "mlbid": 693781, "ip": 50.0, "fip": 6.56, "era": 8.26, "role": "RP", "warp": -1.8},
-{"team": "PIT", "mlbid": 677322, "ip": 50.0, "fip": 5.43, "era": 6.48, "role": "RP", "warp": -1.0},
-{"team": "TOR", "mlbid": 806593, "ip": 50.0, "fip": 5.81, "era": 6.26, "role": "RP", "warp": -1.0},
-{"team": "PIT", "mlbid": 677322, "ip": 50.0, "fip": 5.1, "era": 5.84, "role": "RP", "warp": -0.7},
-{"team": "HOU", "mlbid": 806634, "ip": 50.0, "fip": 5.5, "era": 5.88, "role": "RP", "warp": -0.7},
-{"team": "ATL", "mlbid": 691309, "ip": 50.0, "fip": 4.89, "era": 5.17, "role": "RP", "warp": -0.4},
-{"team": "MIN", "mlbid": 807716, "ip": 50.0, "fip": 4.93, "era": 5.22, "role": "RP", "warp": -0.4},
-{"team": "LAD", "mlbid": 808313, "ip": 50.0, "fip": 5.55, "era": 6.37, "role": "RP", "warp": -1.0},
-{"team": "TEX", "mlbid": 831384, "ip": 50.0, "fip": 5.84, "era": 6.45, "role": "RP", "warp": -1.0},
-{"team": "SF", "mlbid": 668873, "ip": 17.7, "fip": 4.89, "era": 5.46, "role": "RP", "warp": -0.2},
-{"team": "TB", "mlbid": 676831, "ip": 50.0, "fip": 4.58, "era": 4.78, "role": "RP", "warp": -0.2},
-{"team": "MIN", "mlbid": 695995, "ip": 50.0, "fip": 5.6, "era": 5.94, "role": "RP", "warp": -0.8},
-{"team": "PIT", "mlbid": 677322, "ip": 50.0, "fip": 4.15, "era": 4.19, "role": "RP", "warp": 0.1},
-{"team": "WAS", "mlbid": 800019, "ip": 50.0, "fip": 4.42, "era": 4.25, "role": "RP", "warp": 0.1},
-{"team": "TEX", "mlbid": 685107, "ip": 50.0, "fip": 4.86, "era": 5.36, "role": "RP", "warp": -0.5},
-{"team": "NYM", "mlbid": 808274, "ip": 50.0, "fip": 4.63, "era": 5.67, "role": "RP", "warp": -0.5},
-{"team": "NYY", "mlbid": 681116, "ip": 50.0, "fip": 4.67, "era": 5.01, "role": "RP", "warp": -0.3},
-{"team": "HOU", "mlbid": 686294, "ip": 50.0, "fip": 5.05, "era": 5.68, "role": "RP", "warp": -0.6},
-{"team": "NYM", "mlbid": 822038, "ip": 50.0, "fip": 5.08, "era": 5.78, "role": "RP", "warp": -0.6},
-{"team": "CHW", "mlbid": 684328, "ip": 50.0, "fip": 5.67, "era": 6.47, "role": "RP", "warp": -1.0},
-{"team": "TEX", "mlbid": 681815, "ip": 50.0, "fip": 5.54, "era": 6.38, "role": "RP", "warp": -1.0},
-{"team": "SF", "mlbid": 668873, "ip": 17.7, "fip": 4.44, "era": 4.61, "role": "RP", "warp": 0.0},
-{"team": "WAS", "mlbid": 641627, "ip": 50.0, "fip": 4.65, "era": 4.44, "role": "RP", "warp": 0.0},
-{"team": "WAS", "mlbid": 625510, "ip": 50.0, "fip": 4.89, "era": 5.66, "role": "RP", "warp": -0.6},
-{"team": "CHC", "mlbid": 701329, "ip": 50.0, "fip": 3.8, "era": 3.24, "role": "RP", "warp": 0.6},
-{"team": "SEA", "mlbid": 681391, "ip": 50.0, "fip": 5.8, "era": 6.88, "role": "RP", "warp": -1.3},
-{"team": "MIA", "mlbid": 586512, "ip": 50.0, "fip": 6.14, "era": 7.02, "role": "RP", "warp": -1.3},
-{"team": "BOS", "mlbid": 701288, "ip": 50.0, "fip": 4.76, "era": 4.84, "role": "RP", "warp": -0.2},
-{"team": "HOU", "mlbid": 702462, "ip": 50.0, "fip": 4.61, "era": 4.84, "role": "RP", "warp": -0.2},
-{"team": "ATL", "mlbid": 691309, "ip": 50.0, "fip": 4.25, "era": 4.19, "role": "RP", "warp": 0.1},
-{"team": "SF", "mlbid": 691263, "ip": 50.0, "fip": 4.37, "era": 4.38, "role": "RP", "warp": 0.1},
-{"team": "HOU", "mlbid": 686294, "ip": 50.0, "fip": 4.24, "era": 4.28, "role": "RP", "warp": 0.1},
-{"team": "DET", "mlbid": 676614, "ip": 50.0, "fip": 4.63, "era": 4.23, "role": "RP", "warp": 0.1},
-{"team": "MIN", "mlbid": 695995, "ip": 50.0, "fip": 4.66, "era": 4.27, "role": "RP", "warp": 0.0},
-{"team": "MIL", "mlbid": 803068, "ip": 50.0, "fip": 4.54, "era": 4.48, "role": "RP", "warp": 0.0},
-{"team": "WAS", "mlbid": 701680, "ip": 50.0, "fip": 4.98, "era": 4.79, "role": "RP", "warp": -0.2},
-{"team": "KC", "mlbid": 701795, "ip": 50.0, "fip": 4.51, "era": 4.75, "role": "RP", "warp": -0.2},
-{"team": "TOR", "mlbid": 697813, "ip": 50.0, "fip": 2.81, "era": 2.64, "role": "RP", "warp": 0.9},
-{"team": "BOS", "mlbid": 686580, "ip": 53.3, "fip": 3.21, "era": 2.81, "role": "RP", "warp": 0.9},
-{"team": "PHI", "mlbid": 808158, "ip": 50.0, "fip": 9.0, "era": 10.56, "role": "RP", "warp": -3.0},
-{"team": "CLE", "mlbid": 802410, "ip": 50.0, "fip": 8.15, "era": 10.48, "role": "RP", "warp": -3.0},
-{"team": "PIT", "mlbid": 677322, "ip": 50.0, "fip": 6.25, "era": 7.93, "role": "RP", "warp": -1.7},
-{"team": "NYM", "mlbid": 809784, "ip": 50.0, "fip": 6.46, "era": 7.89, "role": "RP", "warp": -1.7},
-{"team": "PIT", "mlbid": 677322, "ip": 50.0, "fip": 6.65, "era": 8.70, "role": "RP", "warp": -2.1},
-{"team": "MIL", "mlbid": 803024, "ip": 50.0, "fip": 7.17, "era": 8.66, "role": "RP", "warp": -2.1},
-{"team": "CLE", "mlbid": 702021, "ip": 50.0, "fip": 4.8, "era": 5.43, "role": "RP", "warp": -0.5},
-{"team": "CHW", "mlbid": 805892, "ip": 50.0, "fip": 4.86, "era": 5.34, "role": "RP", "warp": -0.5}
+{"team": "CIN", "mlbid": 656271, "ip": 57.7, "fip": 4.23, "era": 4.26, "role": "RP", "warp": 0.2},
+{"team": "CLE", "mlbid": 801367, "ip": 50.0, "fip": 3.87, "era": 4.07, "role": "RP", "warp": 0.2},
+{"team": "SF", "mlbid": 657277, "ip": 177.7, "fip": 3.25, "era": 3.98, "role": "SP", "warp": 2.8},
+{"team": "SEA", "mlbid": 669923, "ip": 157.3, "fip": 3.64, "era": 3.69, "role": "SP", "warp": 2.7},
+{"team": "BAL", "mlbid": 669432, "ip": 169.0, "fip": 4.00, "era": 4.08, "role": "SP", "warp": 2.4},
+{"team": "MIL", "mlbid": 605540, "ip": 126.3, "fip": 4.25, "era": 3.55, "role": "SP", "warp": 2.4},
+{"team": "NYY", "mlbid": 693645, "ip": 137.3, "fip": 3.32, "era": 2.89, "role": "SP", "warp": 3.7},
+{"team": "TEX", "mlbid": 669022, "ip": 151.3, "fip": 3.30, "era": 3.01, "role": "SP", "warp": 3.7},
+{"team": "MIN", "mlbid": 641927, "ip": 139.7, "fip": 5.12, "era": 4.94, "role": "SP", "warp": 0.5},
+{"team": "TOR", "mlbid": 669456, "ip": 115.7, "fip": 4.13, "era": 4.51, "role": "SP", "warp": 1.1},
+{"team": "MIN", "mlbid": 623437, "ip": 56.3, "fip": 4.17, "era": 4.65, "role": "RP", "warp": -0.1},
+{"team": "SF", "mlbid": 676775, "ip": 23.7, "fip": 4.16, "era": 4.90, "role": "RP", "warp": -0.1},
+{"team": "MIN", "mlbid": 573124, "ip": 62.7, "fip": 4.45, "era": 4.65, "role": "RP", "warp": -0.1},
+{"team": "SF", "mlbid": 621366, "ip": 35.7, "fip": 4.08, "era": 4.70, "role": "RP", "warp": -0.1},
+{"team": "BAL", "mlbid": 689296, "ip": 27.7, "fip": 3.64, "era": 4.15, "role": "RP", "warp": 0.1},
+{"team": "SD", "mlbid": 663753, "ip": 50.0, "fip": 4.62, "era": 5.01, "role": "RP", "warp": -0.3},
+{"team": "MIA", "mlbid": 687473, "ip": 54.0, "fip": 3.89, "era": 3.42, "role": "SP", "warp": 0.9},
+{"team": "HOU", "mlbid": 701121, "ip": 50.0, "fip": 4.31, "era": 3.91, "role": "RP", "warp": 0.3},
+{"team": "MIL", "mlbid": 623381, "ip": 50.0, "fip": 4.07, "era": 3.71, "role": "RP", "warp": 0.3},
+{"team": "TB", "mlbid": 801643, "ip": 50.0, "fip": 3.77, "era": 3.51, "role": "RP", "warp": 0.5},
+{"team": "LAD", "mlbid": 641871, "ip": 50.0, "fip": 3.32, "era": 3.27, "role": "RP", "warp": 0.6},
+{"team": "MIL", "mlbid": 806581, "ip": 50.0, "fip": 2.96, "era": 2.31, "role": "RP", "warp": 1.1},
+{"team": "TB", "mlbid": 694375, "ip": 50.0, "fip": 3.23, "era": 2.56, "role": "RP", "warp": 1.0},
+{"team": "CHW", "mlbid": 806112, "ip": 50.0, "fip": 4.05, "era": 3.98, "role": "RP", "warp": 0.3},
+{"team": "MIL", "mlbid": 675660, "ip": 25.3, "fip": 3.31, "era": 2.86, "role": "RP", "warp": 0.4},
+{"team": "TEX", "mlbid": 821611, "ip": 50.0, "fip": 4.08, "era": 3.63, "role": "RP", "warp": 0.4},
+{"team": "TEX", "mlbid": 502624, "ip": 50.0, "fip": 4.21, "era": 3.53, "role": "RP", "warp": 0.4},
+{"team": "CHW", "mlbid": 686563, "ip": 46.3, "fip": 4.66, "era": 4.82, "role": "SP", "warp": 0.2},
+{"team": "CHC", "mlbid": 676962, "ip": 57.7, "fip": 4.35, "era": 4.78, "role": "SP", "warp": 0.0},
+{"team": "KC", "mlbid": 686701, "ip": 50.0, "fip": 4.97, "era": 5.33, "role": "SP", "warp": 0.0},
+{"team": "MIN", "mlbid": 701519, "ip": 38.3, "fip": 4.28, "era": 4.29, "role": "SP", "warp": 0.2},
+{"team": "DET", "mlbid": 687001, "ip": 50.0, "fip": 4.90, "era": 5.48, "role": "RP", "warp": -0.5},
+{"team": "TEX", "mlbid": 596295, "ip": 50.0, "fip": 5.02, "era": 5.27, "role": "RP", "warp": -0.5},
+{"team": "ATL", "mlbid": 688427, "ip": 50.0, "fip": 4.83, "era": 5.48, "role": "RP", "warp": -0.5},
+{"team": "CIN", "mlbid": 489119, "ip": 50.0, "fip": 4.92, "era": 5.54, "role": "RP", "warp": -0.5},
+{"team": "DET", "mlbid": 679712, "ip": 50.0, "fip": 4.74, "era": 5.25, "role": "RP", "warp": -0.4},
+{"team": "HOU", "mlbid": 668203, "ip": 50.0, "fip": 4.64, "era": 5.17, "role": "RP", "warp": -0.3},
+{"team": "ATL", "mlbid": 820827, "ip": 50.0, "fip": 4.59, "era": 4.99, "role": "RP", "warp": -0.3},
+{"team": "COL", "mlbid": 700978, "ip": 50.0, "fip": 4.45, "era": 4.55, "role": "RP", "warp": -0.1},
+{"team": "DET", "mlbid": 681289, "ip": 50.0, "fip": 4.81, "era": 5.89, "role": "RP", "warp": -0.7},
+{"team": "BOS", "mlbid": 665048, "ip": 50.0, "fip": 5.16, "era": 5.86, "role": "RP", "warp": -0.7},
+{"team": "MIL", "mlbid": 815868, "ip": 50.0, "fip": 4.93, "era": 5.26, "role": "RP", "warp": -0.4},
+{"team": "CLE", "mlbid": 815841, "ip": 50.0, "fip": 5.14, "era": 5.37, "role": "RP", "warp": -0.4},
+{"team": "MIN", "mlbid": 573124, "ip": 62.7, "fip": 5.43, "era": 6.32, "role": "RP", "warp": -1.2},
+{"team": "TEX", "mlbid": 676265, "ip": 50.0, "fip": 6.01, "era": 6.78, "role": "RP", "warp": -1.2},
+{"team": "PIT", "mlbid": 642701, "ip": 61.0, "fip": 4.91, "era": 5.35, "role": "RP", "warp": -0.6},
+{"team": "SF", "mlbid": 656529, "ip": 29.7, "fip": 4.70, "era": 6.50, "role": "RP", "warp": -0.6},
+{"team": "TEX", "mlbid": 823793, "ip": 50.0, "fip": 4.78, "era": 4.63, "role": "RP", "warp": 0.0},
+{"team": "NYM", "mlbid": 663795, "ip": 17.3, "fip": 4.58, "era": 4.56, "role": "RP", "warp": 0.0},
+{"team": "WAS", "mlbid": 691384, "ip": 18.7, "fip": 6.66, "era": 8.09, "role": "RP", "warp": -0.7},
+{"team": "MIL", "mlbid": 695871, "ip": 50.0, "fip": 6.94, "era": 8.63, "role": "RP", "warp": -2.0},
+{"team": "KC", "mlbid": 694947, "ip": 50.0, "fip": 6.35, "era": 7.25, "role": "RP", "warp": -1.5}
 ]'''
 
 # ==============================================================================
@@ -343,13 +294,6 @@ def save_cache(payload):
         payload["cache_version"] = CACHE_VERSION
         with open(CACHE_FILE,"w") as f: json.dump(payload,f,default=str)
     except Exception as e: print(f"Cache write failed: {e}")
-
-def sanitize_df(df):
-    """Safe sanitization: only converts columns that are actually numeric."""
-    for c in df.columns:
-        if pd.api.types.is_numeric_dtype(df[c]):
-            df[c] = df[c].fillna(0)
-    return df
 
 # ==============================================================================
 # DATA FETCHING
@@ -692,11 +636,31 @@ def pythag(rs, ra):
     if rs <= 0 or ra <= 0: return 0.500
     return float(rs**PYTHAG_EXPONENT / (rs**PYTHAG_EXPONENT + ra**PYTHAG_EXPONENT))
 
+# ==============================================================================
+# SAFE SANITIZATION
+# ==============================================================================
+def sanitize_df(df):
+    """Safe sanitization: only converts columns that are actually numeric.
+       Leaves strings (objects) like 'LAA' or 'AL West' alone."""
+    for c in df.columns:
+        if pd.api.types.is_numeric_dtype(df[c]):
+            df[c] = df[c].fillna(0)
+        else:
+            # Try to convert to numeric for object columns that might contain string numbers
+            # but revert if it turns strings into NaNs (e.g. team names)
+            temp = pd.to_numeric(df[c], errors='coerce')
+            # If conversion preserves most non-null values, apply it
+            if temp.notna().sum() >= df[c].notna().sum() * 0.9:
+                df[c] = temp.fillna(0)
+    return df
+
 def build_master(std, prj):
     df = std.copy()
+    # We explicitly ensure team_id is int before merge
     df["team_id"] = pd.to_numeric(df["team_id"], errors="coerce").fillna(0).astype(int)
     prj["team_id"] = pd.to_numeric(prj["team_id"], errors="coerce").fillna(0).astype(int)
     
+    # Sanitize projection data (numbers), but keep standard data (names) clean
     df = sanitize_df(df)
     prj = sanitize_df(prj)
     
