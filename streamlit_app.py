@@ -465,16 +465,30 @@ def fetch_team_projections(standings_df, roster_map):
             if not il_players.empty:
                 il_warp = float(il_players["warp"].fillna(0).clip(lower=0).sum())
                 
+                # Calculate scalars explicitly to prevent array leakage
+        safe_rpg = float(np.clip((team_ops/LEAGUE_AVG_OPS)*LEAGUE_AVG_RPG, 2.5, 7.5))
+        safe_rapg = float(np.clip((sp_era/LEAGUE_AVG_ERA)*LEAGUE_AVG_RPG*LEAGUE_SP_IP_SHARE +
+                                  (rp_era/LEAGUE_AVG_ERA)*LEAGUE_AVG_RPG*LEAGUE_RP_IP_SHARE, 2.5, 7.5))
+        safe_wp = float(safe_rpg**PYTHAG_EXPONENT / (safe_rpg**PYTHAG_EXPONENT + safe_rapg**PYTHAG_EXPONENT))
+        safe_il = 0.0
+        if not ph.empty and len(il_ids) > 0:
+            safe_il = float(ph[(ph["team_id"]==tid) & (ph["mlbid"].isin(il_ids))]["warp"].fillna(0).clip(lower=0).sum())
+            
         rows.append({
             "team_id": int(tid),
-            "proj_runs_per_game": round(float(proj_rpg), 3),
-            "proj_ra_per_game": round(float(proj_rapg), 3),
-            "proj_win_pct": round(float(proj_wp), 4),
-            "il_warp": round(float(il_warp), 2),
+            "proj_runs_per_game": round(safe_rpg, 3),
+            "proj_ra_per_game": round(safe_rapg, 3),
+            "proj_win_pct": round(safe_wp, 4),
+            "il_warp": round(safe_il, 2),
             "proj_source": "PECOTA+Statcast"
         })
         
-    return pd.DataFrame(rows)
+        prj = pd.DataFrame(rows)
+    if not prj.empty:
+        prj["team_id"] = prj["team_id"].astype(int)
+        for c in ["proj_runs_per_game","proj_ra_per_game","proj_win_pct","il_warp"]:
+            prj[c] = pd.to_numeric(prj[c], errors="coerce").fillna(0.0).astype(float)
+    return prj
 
 def pythag(rs, ra):
     if rs <= 0 or ra <= 0: return 0.500
