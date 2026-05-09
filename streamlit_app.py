@@ -97,7 +97,7 @@ ADJ_HARD_BUYER           = +0.07
 ADJ_SCALE                =  0.015
 
 # ── Luck regression & SoS ────────────────────────────────────────────────────
-LUCK_REGRESSION_FACTOR   = 0.40
+LUCK_REGRESSION_FACTOR   = 1.50
 SOS_SENSITIVITY          = 0.15
 
 # ==============================================================================
