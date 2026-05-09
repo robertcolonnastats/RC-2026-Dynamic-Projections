@@ -64,8 +64,8 @@ STATCAST_INFLUENCE       = 2.00
 
 # ── Active roster weights ─────────────────────────────────────────────────────
 ROSTER_WEIGHT_ACTIVE     = 600.0
-ROSTER_WEIGHT_IL         = 100.0
-ROSTER_WEIGHT_OTHER      = 300.0
+ROSTER_WEIGHT_IL         = 25.0
+ROSTER_WEIGHT_OTHER      = 100.0
 
 # ── IL WARP adjustment ────────────────────────────────────────────────────────
 TYPICAL_TEAM_WARP        = 35.0
