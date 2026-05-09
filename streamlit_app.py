@@ -716,7 +716,7 @@ A player with 40 PA gets 10% current Statcast weight. A player with 400 PA gets 
 
 **Step 3 — Pythagorean blend (IL-adjusted):**
 
-Pythagorean Win% = RS^1.83 / (RS^1.83 + RA^1.83), then regressed toward .500:
+Pythagorean Win% = RS^1.83 / (RS^1.83 + RA^1.83):
 ```
 Pythag_W = GP / (GP + 80)   # Tango regression
 ```
