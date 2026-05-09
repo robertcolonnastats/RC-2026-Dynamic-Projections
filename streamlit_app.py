@@ -500,15 +500,24 @@ def build_master(std, prj):
     prj["team_id"] = pd.to_numeric(prj["team_id"], errors="coerce").fillna(0).astype(int)
     
     df = df.merge(prj[["team_id","proj_win_pct","proj_runs_per_game","proj_ra_per_game","proj_source","il_warp"]], on="team_id", how="left")
+    
+    # 🔒 FORCE FLOAT ON NUMERIC COLUMNS PREVENTS PANDAS dtype COLLISIONS
+    float_cols = ["proj_win_pct","proj_runs_per_game","proj_ra_per_game","il_warp",
+                  "games_played","runs_scored","runs_allowed","win_pct","pythag_win_pct","wc_games_back"]
+    for c in float_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0).astype(float)
+            
     df["pythag_win_pct"] = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
-    gp = df["games_played"].clip(0, 162).astype(float)
-    df["pythag_win_pct"] = df["pythag_win_pct"] * (gp / (gp + PYTHAG_REGRESSION_PA)) + 0.500 * (PYTHAG_REGRESSION_PA / (gp + PYTHAG_REGRESSION_PA))
-    base_proj_w = (PROJ_WEIGHT_MAX - (gp / 162.0) * (PROJ_WEIGHT_MAX - PROJ_WEIGHT_MIN)).clip(PROJ_WEIGHT_MIN, PROJ_WEIGHT_MAX)
-    il_frac = (df["il_warp"] / TYPICAL_TEAM_WARP).clip(0.0, MAX_IL_FRAC)
-    adj_pyth_w = (1.0 - base_proj_w) * (1.0 - il_frac)
-    adj_proj_w = 1.0 - adj_pyth_w
-    df["blended_win_pct"] = (df["proj_win_pct"].fillna(0.5) * adj_proj_w + df["pythag_win_pct"] * adj_pyth_w).clip(0.20, 0.80)
-    df["games_remaining"] = (162 - gp).clip(0, 162)
+    gp = df["games_played"].clip(0, 162)
+    df["pythag_win_pct"] = df["pythag_win_pct"]*(gp/(gp+PYTHAG_REGRESSION_PA)) + 0.500*(PYTHAG_REGRESSION_PA/(gp+PYTHAG_REGRESSION_PA))
+    base_proj_w = (PROJ_WEIGHT_MAX-(gp/162.0)*(PROJ_WEIGHT_MAX-PROJ_WEIGHT_MIN)).clip(PROJ_WEIGHT_MIN, PROJ_WEIGHT_MAX)
+    il_frac = (df["il_warp"]/TYPICAL_TEAM_WARP).clip(0.0, MAX_IL_FRAC)
+    adj_pyth_w = (1.0-base_proj_w)*(1.0-il_frac)
+    adj_proj_w = 1.0-adj_pyth_w
+    df["blended_win_pct"] = (df["proj_win_pct"]*adj_proj_w+df["pythag_win_pct"]*adj_pyth_w).clip(0.20,0.80)
+    # 🔒 EXPLICIT FLOAT CAST PREVENTS int64 ASSIGNMENT ERROR
+    df["games_remaining"] = (162.0 - gp).clip(0, 162).astype(float)
     return df
 
 def compute_buyer_seller(df):
@@ -660,7 +669,7 @@ def render_deadline_tab(mdf, sim):
                            text=(comp["PO Delta"] * 100).round(1).apply(lambda v: f"{v:+.1f}%"), textposition="outside"))
     fig.update_layout(title="Playoff Odds Change: Pre vs Post Deadline", plot_bgcolor="rgba(0,0,0,0)", height=420)
     fig.add_hline(y=0, line_dash="dash")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 def render_team_tab(mdf, sim):
     opts = sorted([(r["name"], int(r["team_id"])) for _, r in mdf.iterrows()])
@@ -731,7 +740,7 @@ def render_team_tab(mdf, sim):
     fig = go.Figure(go.Scatter(x=x, y=y, fill="tozeroy", line=dict(color="#636efa")))
     fig.add_vline(x=pw, line_dash="dash", line_color="#ef553b", annotation_text=f"Proj: {pw:.1f}W", annotation_position="top right")
     fig.update_layout(xaxis_title="Final Wins", height=300, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", yaxis=dict(showticklabels=False), showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 def render_methodology_tab():
     st.markdown("## 📖 Methodology & Model Architecture")
@@ -801,7 +810,7 @@ def load_all_data():
     try:
         prj = fetch_team_projections(std, roster_map)
         if prj.empty: raise ValueError("empty")
-    except Exception as e:
+        except Exception as e:
         st.warning(f"Projection fallback: {e}")
         rows = []
         for _, row in std.iterrows():
@@ -809,8 +818,14 @@ def load_all_data():
             rs = float(row.get("runs_scored", 0))
             ra = float(row.get("runs_allowed", 0))
             wp = pythag(rs / gp if gp > 0 else 0, ra / gp if gp > 0 else 0) if gp > 0 else 0.500
-            rows.append({"team_id": int(row["team_id"]), "proj_win_pct": round(float(wp), 4), "proj_runs_per_game": LEAGUE_AVG_RPG,
-                         "proj_ra_per_game": LEAGUE_AVG_RPG, "proj_source": "Regression", "il_warp": 0.0})
+            rows.append({
+                "team_id": int(row["team_id"]),
+                "proj_win_pct": round(float(wp), 4),
+                "proj_runs_per_game": float(LEAGUE_AVG_RPG),
+                "proj_ra_per_game": float(LEAGUE_AVG_RPG),
+                "proj_source": "Regression",
+                "il_warp": 0.0
+            })
         prj = pd.DataFrame(rows)
     up(70, "Computing adjustments")
     mst = build_master(std, prj)
