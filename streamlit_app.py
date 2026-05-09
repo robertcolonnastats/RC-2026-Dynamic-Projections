@@ -60,7 +60,7 @@ PRIOR_HIST_2025_WEIGHT   = 0.20
 PRIOR_HIST_2024_WEIGHT   = 0.10
 
 # ── Statcast influence ────────────────────────────────────────────────────────
-STATCAST_INFLUENCE       = 0.30
+STATCAST_INFLUENCE       = 1.00
 
 # ── Active roster weights ─────────────────────────────────────────────────────
 ROSTER_WEIGHT_ACTIVE     = 600.0
@@ -98,7 +98,7 @@ ADJ_SCALE                =  0.015
 
 # ── Luck regression & SoS ────────────────────────────────────────────────────
 LUCK_REGRESSION_FACTOR   = 1.50
-SOS_SENSITIVITY          = 0.15
+SOS_SENSITIVITY          = 0.05
 
 # ==============================================================================
 # TEAM INFO
