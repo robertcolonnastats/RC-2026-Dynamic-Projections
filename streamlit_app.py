@@ -2,8 +2,8 @@
 MLB 2026 Season Projections
 Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
-✅ Fixed: SyntaxError (invalid syntax)
-✅ Fixed: Dtype array leakage into int64 columns
+✅ Fixed: Invalid value '[125.5 125.5 125.5]' for dtype 'int64' (strict dtype enforcement)
+✅ Fixed: SyntaxError & fallback logic
 ✅ Fixed: Streamlit use_container_width deprecation
 ✅ Fixed: Full depth-chart PECOTA weighting
 """
@@ -111,7 +111,7 @@ TIER_EMOJI  = {"hard_seller":"🔴","soft_seller":"🟠","neutral":"⚪","soft_b
 EST = ZoneInfo("America/New_York")
 
 # ==============================================================================
-# UTILS
+# UTILS & CACHE
 # ==============================================================================
 def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -276,11 +276,8 @@ def _load_pecota_data():
         _PECOTA_HIT_DF = _PECOTA_HIT_DF.dropna(subset=["team_id"])
         _PECOTA_HIT_DF["team_id"] = _PECOTA_HIT_DF["team_id"].astype(int)
         for c in ["mlbid", "pa", "ops", "warp"]:
-            if c in _PECOTA_HIT_DF.columns:
-                _PECOTA_HIT_DF[c] = pd.to_numeric(_PECOTA_HIT_DF[c], errors="coerce")
-    except Exception as e:
-        st.error(f"Error loading embedded PECOTA hitters: {e}")
-        st.stop()
+            if c in _PECOTA_HIT_DF.columns: _PECOTA_HIT_DF[c] = pd.to_numeric(_PECOTA_HIT_DF[c], errors="coerce")
+    except Exception as e: st.error(f"Error loading embedded PECOTA hitters: {e}"); st.stop()
     try:
         pit_data = json.loads(PECOTA_PIT_EMBEDDED)
         _PECOTA_PIT_DF = pd.DataFrame(pit_data)
@@ -288,11 +285,8 @@ def _load_pecota_data():
         _PECOTA_PIT_DF = _PECOTA_PIT_DF.dropna(subset=["team_id"])
         _PECOTA_PIT_DF["team_id"] = _PECOTA_PIT_DF["team_id"].astype(int)
         for c in ["mlbid", "ip", "fip", "era", "warp"]:
-            if c in _PECOTA_PIT_DF.columns:
-                _PECOTA_PIT_DF[c] = pd.to_numeric(_PECOTA_PIT_DF[c], errors="coerce")
-    except Exception as e:
-        st.error(f"Error loading embedded PECOTA pitchers: {e}")
-        st.stop()
+            if c in _PECOTA_PIT_DF.columns: _PECOTA_PIT_DF[c] = pd.to_numeric(_PECOTA_PIT_DF[c], errors="coerce")
+    except Exception as e: st.error(f"Error loading embedded PECOTA pitchers: {e}"); st.stop()
     return _PECOTA_HIT_DF, _PECOTA_PIT_DF
 
 def _fetch_statcast_hist(year,stat_type):
@@ -393,7 +387,6 @@ def fetch_team_projections(standings_df, roster_map):
         ph_team = ph[ph["team_id"]==tid].copy()
         pp_team = pp[pp["team_id"]==tid].copy()
         
-        # Batting (Full Depth)
         pecota_ops = LEAGUE_AVG_OPS
         if not ph_team.empty:
             ph_team["adj_pa"] = ph_team["pa"].fillna(0)
@@ -431,7 +424,6 @@ def fetch_team_projections(standings_df, roster_map):
         team_ops = float(np.clip(pecota_ops * (1 + (xwoba / LEAGUE_AVG_XWOBA - 1) * STATCAST_INFLUENCE), 0.620, 0.850))
         proj_rpg = float(np.clip((team_ops / LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG, 2.5, 7.5))
         
-        # Pitching
         sp_df = pp_team[pp_team["role"] == "SP"].sort_values("ip", ascending=False)
         rp_df = pp_team[pp_team["role"] == "RP"].sort_values("ip", ascending=False)
         
@@ -440,8 +432,7 @@ def fetch_team_projections(standings_df, roster_map):
             cap = IP_FULL_WEIGHT_SP if role == "SP" else IP_FULL_WEIGHT_RP
             cip = df["ip"].clip(upper=cap).values
             blend = (df["fip"].fillna(LEAGUE_AVG_FIP) * 0.7 + df["era"].fillna(LEAGUE_AVG_ERA) * 0.3).clip(2, 7.5).values
-            if cip.sum() > 0:
-                return float(np.average(blend, weights=cip))
+            if cip.sum() > 0: return float(np.average(blend, weights=cip))
             return float(LEAGUE_AVG_ERA)
             
         sp_base = float(np.clip(staff_era(sp_df, "SP"), 2.80, 5.50))
@@ -470,7 +461,6 @@ def fetch_team_projections(standings_df, roster_map):
                                    (rp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE, 2.5, 7.5))
         proj_wp = float(proj_rpg**PYTHAG_EXPONENT / (proj_rpg**PYTHAG_EXPONENT + proj_rapg**PYTHAG_EXPONENT))
         
-        # IL WARP
         il_warp = 0.0
         if not ph.empty and len(il_ids) > 0:
             il_players = ph[(ph["team_id"] == tid) & (ph["mlbid"].isin(il_ids))]
@@ -479,10 +469,10 @@ def fetch_team_projections(standings_df, roster_map):
                 
         rows.append({
             "team_id": int(tid),
-            "proj_runs_per_game": round(float(np.clip(proj_rpg, 2.5, 7.5)), 3),
-            "proj_ra_per_game": round(float(np.clip(proj_rapg, 2.5, 7.5)), 3),
-            "proj_win_pct": round(float(np.clip(proj_wp, 0.0, 1.0)), 4),
-            "il_warp": round(float(np.clip(il_warp, 0.0, None)), 2),
+            "proj_runs_per_game": round(float(proj_rpg), 3),
+            "proj_ra_per_game": round(float(proj_rapg), 3),
+            "proj_win_pct": round(float(proj_wp), 4),
+            "il_warp": round(float(il_warp), 2),
             "proj_source": "PECOTA+Statcast"
         })
         
@@ -499,36 +489,33 @@ def build_master(std, prj):
     
     df = df.merge(prj[["team_id","proj_win_pct","proj_runs_per_game","proj_ra_per_game","proj_source","il_warp"]], on="team_id", how="left")
     
-    # 🔒 FORCE FLOAT ON NUMERIC COLUMNS PREVENTS PANDAS dtype COLLISIONS
-    float_cols = ["proj_win_pct","proj_runs_per_game","proj_ra_per_game","il_warp",
-                  "games_played","runs_scored","runs_allowed","win_pct"]
-    for c in float_cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0).astype(float)
+    # 🔒 STRICT DTYPE ENFORCEMENT PREVENTS ARRAY LEAKAGE
+    for c in ["proj_win_pct","proj_runs_per_game","proj_ra_per_game","il_warp","win_pct"]:
+        if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0).astype(float)
             
-    df["pythag_win_pct"] = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
+    df["pythag_win_pct"] = df.apply(lambda r: pythag(float(r["runs_scored"]), float(r["runs_allowed"])), axis=1).astype(float)
     gp = df["games_played"].clip(0, 162).astype(float)
-    df["pythag_win_pct"] = df["pythag_win_pct"] * (gp / (gp + PYTHAG_REGRESSION_PA)) + 0.500 * (PYTHAG_REGRESSION_PA / (gp + PYTHAG_REGRESSION_PA))
+    df["pythag_win_pct"] = (df["pythag_win_pct"] * (gp / (gp + PYTHAG_REGRESSION_PA)) + 0.500 * (PYTHAG_REGRESSION_PA / (gp + PYTHAG_REGRESSION_PA))).astype(float)
     base_proj_w = (PROJ_WEIGHT_MAX - (gp / 162.0) * (PROJ_WEIGHT_MAX - PROJ_WEIGHT_MIN)).clip(PROJ_WEIGHT_MIN, PROJ_WEIGHT_MAX)
     il_frac = (df["il_warp"] / TYPICAL_TEAM_WARP).clip(0.0, MAX_IL_FRAC)
     adj_pyth_w = (1.0 - base_proj_w) * (1.0 - il_frac)
     adj_proj_w = 1.0 - adj_pyth_w
-    df["blended_win_pct"] = (df["proj_win_pct"].fillna(0.5) * adj_proj_w + df["pythag_win_pct"] * adj_pyth_w).clip(0.20, 0.80)
+    df["blended_win_pct"] = (df["proj_win_pct"].fillna(0.5) * adj_proj_w + df["pythag_win_pct"] * adj_pyth_w).clip(0.20, 0.80).astype(float)
     df["games_remaining"] = (162.0 - gp).clip(0, 162).astype(float)
     return df
 
 def compute_buyer_seller(df):
     df = df.copy()
-    df["pythag_expected_wins"] = df["pythag_win_pct"] * df["games_played"]
-    df["luck_wins"] = df["wins"] - df["pythag_expected_wins"]
-    df["rd_per_162"] = (df["run_differential"] / df["games_played"].clip(1)) * 162
+    df["pythag_expected_wins"] = (df["pythag_win_pct"] * df["games_played"]).astype(float)
+    df["luck_wins"] = (df["wins"].astype(float) - df["pythag_expected_wins"]).astype(float)
+    df["rd_per_162"] = ((df["run_differential"] / df["games_played"].clip(1)) * 162).astype(float)
     rd_mod = (-df["rd_per_162"] * RD_SENSITIVITY * ((df["games_played"] - RD_DAMPENER_START_GP) / 50.0).clip(0, 1)).clip(-2.0, 2.0)
-    luck_mod = df["luck_wins"] * LUCK_SENSITIVITY * ((df["games_played"] - LUCK_DAMPENER_START_GP) / 60.0).clip(0, 1)
+    luck_mod = (df["luck_wins"] * LUCK_SENSITIVITY * ((df["games_played"] - LUCK_DAMPENER_START_GP) / 60.0).clip(0, 1)).astype(float)
     pre = df["wc_games_back"] + rd_mod + luck_mod
     damp = df["games_played"].apply(lambda g: 0.5 if g <= 30 else 0.75 if g <= 55 else 0.9 if g <= 81 else 1.0)
     dp = min(max((date.today() - date(SEASON_YEAR, 4, 1)).days / max((date(SEASON_YEAR, 6, 15) - date(SEASON_YEAR, 4, 1)).days, 1), 0.4), 1.0)
-    df["adjusted_score"] = pre * damp * dp
-    df["base_adj"] = np.clip(-df["adjusted_score"] * ADJ_SCALE, ADJ_HARD_SELLER, ADJ_HARD_BUYER)
+    df["adjusted_score"] = (pre * damp * dp).astype(float)
+    df["base_adj"] = pd.Series(np.clip(-df["adjusted_score"].values * ADJ_SCALE, ADJ_HARD_SELLER, ADJ_HARD_BUYER), index=df.index).astype(float)
     df["tier"] = df["adjusted_score"].apply(lambda s:
         "hard_seller" if s >= TIER_HARD_SELLER else "soft_seller" if s >= TIER_SOFT_SELLER else
         "neutral" if s >= TIER_SOFT_BUYER else "soft_buyer" if s >= TIER_HARD_BUYER else "hard_buyer")
@@ -537,30 +524,30 @@ def compute_buyer_seller(df):
 
 def apply_ramp(df, ramp):
     df = df.copy()
-    df["ramped_adj"] = df["base_adj"] * ramp
-    df["adj_win_pct"] = (df["blended_win_pct"] + df["ramped_adj"]).clip(0.20, 0.80)
+    df["ramped_adj"] = (df["base_adj"] * ramp).astype(float)
+    df["adj_win_pct"] = (df["blended_win_pct"] + df["ramped_adj"]).clip(0.20, 0.80).astype(float)
     return df
 
 def apply_luck_regression(df):
     df = df.copy()
-    gr = (162 - df["games_played"]).clip(10, 162)
-    df["adj_win_pct"] = (df["adj_win_pct"] - (df["luck_wins"] * LUCK_REGRESSION_FACTOR) / gr).clip(0.20, 0.80)
+    gr = (162.0 - df["games_played"].astype(float)).clip(10, 162)
+    df["adj_win_pct"] = (df["adj_win_pct"] - (df["luck_wins"] * LUCK_REGRESSION_FACTOR) / gr).clip(0.20, 0.80).astype(float)
     return df
 
 def compute_sos(df, opps):
     if not opps: return df.assign(sos_raw=0.5, sos_label="Average")
     wp = df.set_index("team_id")["adj_win_pct"]
     sos = {t: float(np.mean([wp.get(int(o), 0.5) for o in opps.get(int(t), [])])) if opps.get(int(t)) else 0.5 for t in df["team_id"]}
-    df["sos_raw"] = df["team_id"].map(sos)
+    df["sos_raw"] = df["team_id"].map(sos).astype(float)
     p33, p67 = df["sos_raw"].quantile([0.33, 0.67])
     df["sos_label"] = df["sos_raw"].apply(lambda v: "Easy" if v <= p33 else "Hard" if v > p67 else "Average")
     return df
 
 def apply_schedule_adjustment(df):
     df = df.copy()
-    df["sos_adjustment"] = (0.500 - df["sos_raw"]) * SOS_SENSITIVITY
-    sos_scale = (df["games_played"] / 81.0).clip(0, 1)
-    df["adj_win_pct"] = (df["adj_win_pct"] + df["sos_adjustment"] * sos_scale).clip(0.20, 0.80)
+    df["sos_adjustment"] = ((0.500 - df["sos_raw"]) * SOS_SENSITIVITY).astype(float)
+    sos_scale = (df["games_played"].astype(float) / 81.0).clip(0, 1)
+    df["adj_win_pct"] = (df["adj_win_pct"] + df["sos_adjustment"] * sos_scale).clip(0.20, 0.80).astype(float)
     return df
 
 def log5(a, b): return (a - a * b) / (a + b - 2 * a * b + 1e-9)
