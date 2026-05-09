@@ -634,7 +634,7 @@ def render_team_tab(mdf,sim):
     m5.metric("WS%",f"{sim.get('ws_odds',{}).get(tid,0):.2%}")
     m6.metric("SoS",r.get("sos_label","—"))
     pre_po=sim.get("pre_deadline_playoff_odds",{}).get(tid,0); post_po=sim.get("playoff_odds",{}).get(tid,0)
-    pre_ws=sim.get("pre_deadline_ws_odds",{}).get(tid,0); post_ws=sim.get("ws_odds',{}).get(tid,0)
+    pre_ws=sim.get("pre_deadline_ws_odds",{}).get(tid,0); post_ws=sim.get("ws_odds",{}).get(tid,0)
     pre_dv=sim.get("pre_deadline_division_odds",{}).get(tid,0); post_dv=sim.get("division_odds",{}).get(tid,0)
     st.markdown("### Deadline Impact")
     d1,d2,d3=st.columns(3)
