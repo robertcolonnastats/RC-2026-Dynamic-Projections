@@ -712,7 +712,7 @@ No aging curve applied — PECOTA already prices in age and development.
 | 2024 historical | 20% of prior weight | 20% of prior weight |
 | PECOTA (prior) | 45% of prior weight | 45% of prior weight |
 
-A called-up rookie with 40 PA gets 10% current Statcast weight. A full-timer with 400 PA gets 100%.
+A player with 40 PA gets 10% current Statcast weight. A player with 400 PA gets 100%. Scale from 40 PA to 100 PA.
 
 **Step 3 — Pythagorean blend (IL-adjusted):**
 
