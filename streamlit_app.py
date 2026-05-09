@@ -55,12 +55,12 @@ IP_FULL_WEIGHT_SP        = 150
 IP_FULL_WEIGHT_RP        = 40
 
 # ── Prior signal split ────────────────────────────────────────────────────────
-PRIOR_PECOTA_WEIGHT      = 0.45
-PRIOR_HIST_2025_WEIGHT   = 0.35
-PRIOR_HIST_2024_WEIGHT   = 0.20
+PRIOR_PECOTA_WEIGHT      = 0.55
+PRIOR_HIST_2025_WEIGHT   = 0.30
+PRIOR_HIST_2024_WEIGHT   = 0.15
 
 # ── Statcast influence ────────────────────────────────────────────────────────
-STATCAST_INFLUENCE       = 0.30
+STATCAST_INFLUENCE       = 0.50
 
 # ── Active roster weights ─────────────────────────────────────────────────────
 ROSTER_WEIGHT_ACTIVE     = 600.0
