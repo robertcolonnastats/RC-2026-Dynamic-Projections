@@ -1,7 +1,7 @@
 """
-MLB 2026 Season Projections (Hybrid v27.1 - Strict Dependencies)
-Fully Automated: PECOTA + Statcast (EV90, Zone-Contact, FIP) + Live Roster Sync.
-Strict Data Dependency: No graceful fallbacks. If APIs fail, app stops with explicit error.
+MLB 2026 Season Projections (Hybrid v27.2 - Strict + Single Export)
+Fully Automated: PECOTA + Statcast + Live Roster Sync.
+Strict Data Dependency + Single CSV Export for all 30 teams.
 """
 import os
 import io
@@ -36,7 +36,7 @@ N_SIMULATIONS = 1_000
 RANDOM_SEED = 42
 CACHE_DIR = "/tmp/rc_mlb_2026_v27"
 CACHE_FILE = "/tmp/rc_mlb_2026_v27/latest.json"
-CACHE_VERSION = "v27.1-strict-safe-indexing"
+CACHE_VERSION = "v27.2-strict-export"
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
 TEAM_INFO = {
@@ -188,11 +188,10 @@ def save_cache(payload):
     except Exception as e: print(f"Cache write failed: {e}")
 
 # ==============================================================================
-# PROJECTION ENGINE (PECOTA + Statcast Blend)
+# PROJECTION ENGINE
 # ==============================================================================
 LEAGUE_AVG_RPG, LEAGUE_AVG_FIP, LEAGUE_AVG_OPS = 4.50, 4.10, 0.730
 
-# PECOTA Data
 PECOTA_HIT = [
     {"mlbid":592450,"team":"NYY","pa":672,"ops":0.985,"warp":7.3},
     {"mlbid":660271,"team":"LAD","pa":700,"ops":0.931,"warp":6.3},
@@ -225,18 +224,15 @@ def blend_player_metric(curr_val, hist_val, pecota_val, sample, threshold):
     w_curr = min(sample / threshold, 1.0)
     w_pecota = (1.0 - w_curr) * 0.65
     w_hist = (1.0 - w_curr) * 0.35
-    
     v_curr = float(curr_val) if isinstance(curr_val, (int, float, np.number)) else 0.0
     v_hist = float(hist_val) if isinstance(hist_val, (int, float, np.number)) else 0.0
     v_pecota = float(pecota_val) if isinstance(pecota_val, (int, float, np.number)) else 0.0
-    
     return (v_curr * w_curr) + (v_hist * w_hist) + (v_pecota * w_pecota)
 
 def fetch_team_projections(standings_df, roster_map):
     all_ids = list(TEAM_INFO.keys())
     det = {t:{"batters":[], "sp":[], "rp":[]} for t in all_ids}
     
-    # Fetch Statcast Data (Strict)
     sc_curr = _fetch_savstat(SEASON_YEAR, "batter")
     sc_hist = _fetch_savstat(SEASON_YEAR - 1, "batter")
     sc_pitch_curr = _fetch_savstat(SEASON_YEAR, "pitcher")
@@ -244,7 +240,6 @@ def fetch_team_projections(standings_df, roster_map):
     
     ph = pd.DataFrame(PECOTA_HIT).assign(team_id=lambda x: x["team"].map(PECOTA_MAP)).dropna(subset=["team_id"])
     pp = pd.DataFrame(PECOTA_PIT).assign(team_id=lambda x: x["team"].map(PECOTA_MAP)).dropna(subset=["team_id"])
-    
     if "mlbid" in ph.columns: ph["mlbid"] = ph["mlbid"].astype(int)
     if "mlbid" in pp.columns: pp["mlbid"] = pp["mlbid"].astype(int)
     
@@ -253,43 +248,38 @@ def fetch_team_projections(standings_df, roster_map):
         lineup = ph[ph["team_id"] == tid].head(9) if not ph.empty else pd.DataFrame()
         pitchers = pp[pp["team_id"] == tid] if not pp.empty else pd.DataFrame()
         
-        # Hitter Blend (Strict & Safe)
         team_ops = LEAGUE_AVG_OPS
         if not lineup.empty:
             blended_ops = []
             for _, r in lineup.iterrows():
-                curr_xw, hist_xw = 0, 0
-                # Safe DataFrame filtering
-                if not sc_curr.empty and "team_id" in sc_curr.columns and "mlbid" in sc_curr.columns:
+                curr_xw, hist_xw = 0.0, 0.0
+                # Safe filtering without .get()
+                if not sc_curr.empty and "team_id" in sc_curr.columns and "mlbid" in sc_curr.columns and "xwoba" in sc_curr.columns:
                     mask = (sc_curr["team_id"] == tid) & (sc_curr["mlbid"] == r["mlbid"])
-                    if "xwoba" in sc_curr.columns and mask.any(): curr_xw = sc_curr.loc[mask, "xwoba"].values[0]
+                    if mask.any(): curr_xw = float(sc_curr.loc[mask, "xwoba"].iloc[0])
                     
-                if not sc_hist.empty and "team_id" in sc_hist.columns and "mlbid" in sc_hist.columns:
+                if not sc_hist.empty and "team_id" in sc_hist.columns and "mlbid" in sc_hist.columns and "xwoba" in sc_hist.columns:
                     mask = (sc_hist["team_id"] == tid) & (sc_hist["mlbid"] == r["mlbid"])
-                    if "xwoba" in sc_hist.columns and mask.any(): hist_xw = sc_hist.loc[mask, "xwoba"].values[0]
+                    if mask.any(): hist_xw = float(sc_hist.loc[mask, "xwoba"].iloc[0])
                     
                 blended_xw = blend_player_metric(curr_xw, hist_xw, 0.800, r.get("pa", 50), 400.0)
                 blended_ops.append(blended_xw * 1.25)
             team_ops = float(np.clip(np.mean(blended_ops), 0.620, 0.850))
         proj_rpg = float(np.clip((team_ops/LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG, 2.5, 7.5))
         
-        # Pitcher Blend (Strict & Safe)
         team_fip = LEAGUE_AVG_FIP
         if not pitchers.empty:
             blended_fips = []
             for _, r in pitchers.iterrows():
                 role = r.get("role", "SP")
                 thr = 150.0 if role == "SP" else 40.0
-                curr_f, hist_f = 0, 0
-                
-                if not sc_pitch_curr.empty and "team_id" in sc_pitch_curr.columns and "mlbid" in sc_pitch_curr.columns:
+                curr_f, hist_f = 0.0, 0.0
+                if not sc_pitch_curr.empty and "team_id" in sc_pitch_curr.columns and "mlbid" in sc_pitch_curr.columns and "fip" in sc_pitch_curr.columns:
                     mask = (sc_pitch_curr["team_id"] == tid) & (sc_pitch_curr["mlbid"] == r["mlbid"])
-                    if "fip" in sc_pitch_curr.columns and mask.any(): curr_f = sc_pitch_curr.loc[mask, "fip"].values[0]
-                    
-                if not sc_pitch_hist.empty and "team_id" in sc_pitch_hist.columns and "mlbid" in sc_pitch_hist.columns:
+                    if mask.any(): curr_f = float(sc_pitch_curr.loc[mask, "fip"].iloc[0])
+                if not sc_pitch_hist.empty and "team_id" in sc_pitch_hist.columns and "mlbid" in sc_pitch_hist.columns and "fip" in sc_pitch_hist.columns:
                     mask = (sc_pitch_hist["team_id"] == tid) & (sc_pitch_hist["mlbid"] == r["mlbid"])
-                    if "fip" in sc_pitch_hist.columns and mask.any(): hist_f = sc_pitch_hist.loc[mask, "fip"].values[0]
-                    
+                    if mask.any(): hist_f = float(sc_pitch_hist.loc[mask, "fip"].iloc[0])
                 blended_f = blend_player_metric(curr_f, hist_f, r.get("fip", 4.20), r.get("ip", 20), thr)
                 blended_fips.append(blended_f)
             team_fip = float(np.clip(np.mean(blended_fips), 2.80, 5.50))
@@ -312,18 +302,13 @@ def build_master(std, prj):
     df = std.copy()
     df.columns = df.columns.str.strip()
     prj.columns = prj.columns.str.strip()
-    
     merge_cols = ["team_id", "proj_win_pct", "proj_runs_per_game", "proj_ra_per_game", "proj_source", "il_warp"]
     df = df.merge(prj[merge_cols], on="team_id", how="left")
     if "proj_win_pct" not in df.columns: raise ValueError("Projection data missing columns")
-    
     df["raw_pythag"] = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
     gp = df["games_played"].clip(0, 162)
-    
-    # Sliding Pythag Weight (No .500 anchor)
     pythag_w = gp / (gp + 80.0)
     talent_w = 1.0 - pythag_w
-    
     df["blended_win_pct"] = (df["proj_win_pct"] * talent_w + df["raw_pythag"] * pythag_w).clip(0.20, 0.80)
     df["games_remaining"] = (162 - gp).clip(0, 162)
     return df
@@ -418,11 +403,30 @@ def run_simulation(mdf, sch):
 # UI SECTIONS
 # ==============================================================================
 def render_projections_tab(mdf, sim):
-    st.markdown("## 2026 MLB Season Projections"); st.caption(f"Updated daily · Hybrid v27.1 (Strict Dependencies)")
+    st.markdown("## 2026 MLB Season Projections"); st.caption(f"Updated daily · Hybrid v27.2")
+    
+    # Export Button
+    export_df = mdf.copy()
+    export_df["Proj W"] = export_df["team_id"].map(lambda t: int(round(sim['proj_wins'].get(t, 0))))
+    export_df["Proj L"] = 162 - export_df["Proj W"]
+    export_df["Div%"] = export_df["team_id"].map(lambda t: f"{sim['division_odds'].get(t,0):.1%}")
+    export_df["Playoff%"] = export_df["team_id"].map(lambda t: f"{sim['playoff_odds'].get(t,0):.1%}")
+    export_df["WS%"] = export_df["team_id"].map(lambda t: f"{sim['ws_odds'].get(t,0):.2%}")
+    export_df["Status"] = export_df["tier_label"]
+    
+    csv_data = export_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="📥 Export Full Projections (All 30 Teams) to CSV",
+        data=csv_data,
+        file_name="mlb_2026_full_projections.csv",
+        mime="text/csv",
+        width="stretch"
+    )
+    
     rows = []
     for _, r in mdf.iterrows():
         t = r["team_id"]; proj_w = int(round(sim['proj_wins'].get(t, r['wins'])))
-        rows.append({"Team": r["abbr"], "League": r["league"], "Division": r["division"], "W": int(r["wins"]), "L": int(r["losses"]), "Win%": f"{r['win_pct']:.3f}", "Pythag%": f"{r['raw_pythag']:.3f}", "GB (WC)": f"{r['wc_games_back']:.1f}" if r["wc_games_back"] >0 else "—", "Proj W": proj_w, "Proj L": 162 - proj_w, "Div%": f"{sim['division_odds'].get(t,0):.1%}", "Playoff%": f"{sim['playoff_odds'].get(t,0):.1%}", "WS%": f"{sim['ws_odds'].get(t,0):.2%}", "Status": r.get("tier_label", "Neutral"), "tier": r.get("tier", "neutral"), "SoS": r.get("sos_label", "—")})
+        rows.append({"Team": r["abbr"], "League": r["league"], "Division": r["division"], "W": int(r["wins"]), "L": int(r["losses"]), "Win%": f"{r['win_pct']:.3f}", "Pythag%": f"{r['raw_pythag']:.3f}", "GB (WC)": f"{r['wc_games_back']:.1f}" if r["wc_games_back"] >0 else "—", "Proj W": proj_w, "Proj L": 162 - proj_w, "Status": r.get("tier_label", "Neutral"), "tier": r.get("tier", "neutral"), "SoS": r.get("sos_label", "—")})
     df = pd.DataFrame(rows); c1, c2 = st.columns(2)
     lf = c1.radio("League", ["All", "AL", "NL"], horizontal=True)
     if lf != "All": df = df[df["League"] == lf]
@@ -432,7 +436,7 @@ def render_projections_tab(mdf, sim):
     for d in sorted(df["Division"].unique()):
         dd = df[df["Division"]==d].sort_values("Proj W", ascending=False)
         dd["Status"] = dd.apply(lambda r: f"{TIER_EMOJI.get(r['tier'],'⚪')} {r['Status']}", axis=1)
-        st.markdown(f"### {d}"); st.dataframe(dd, hide_index=True, use_container_width=True)
+        st.markdown(f"### {d}"); st.dataframe(dd, hide_index=True, width="stretch")
 
 def render_deadline_tab(mdf, sim):
     st.markdown("## Trade Deadline Impact")
@@ -443,7 +447,7 @@ def render_deadline_tab(mdf, sim):
     colors = [TIER_COLORS.get(t, "#7f7f7f") for t in comp["tier"]]
     fig = go.Figure(go.Bar(x=comp["Team"], y=(comp["PO Delta"]*100).round(1), marker_color=colors, text=(comp["PO Delta"]*100).round(1).apply(lambda v: f"{v:+.1f}%"), textposition="outside"))
     fig.update_layout(title="Playoff Odds", plot_bgcolor="rgba(0,0,0,0)", height=400); fig.add_hline(y=0, line_dash="dash")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 def render_team_tab(mdf, sim):
     opts = sorted([(r["name"], r["team_id"]) for _, r in mdf.iterrows()]); sel = st.selectbox("Select Team", [o[0] for o in opts])
@@ -451,15 +455,9 @@ def render_team_tab(mdf, sim):
     st.markdown(f"## {r['name']} · {TIER_EMOJI.get(r.get('tier',''), '⚪')} {r.get('tier_label','')}")
     pw = sim["proj_wins"].get(tid, r["wins"]); ps = sim.get("proj_wins_std", {}).get(tid, 0)
     st.metric("Projected Wins", f"{pw:.1f}", f"±{ps:.1f}")
-    
     c1, c2 = st.columns(2)
-    with c1:
-        st.metric("Adj Win %", f"{r['adj_win_pct']:.3f}")
-        st.metric("Luck Regression", f"{-(r['luck_wins']*0.60)/r['games_remaining']:+.4f}")
-    with c2:
-        st.metric("SOS Adjustment", f"{r.get('sos_adjustment',0):+.4f}")
-        st.metric("Games Remaining", int(r['games_remaining']))
-    
+    with c1: st.metric("Adj Win %", f"{r['adj_win_pct']:.3f}"); st.metric("Luck Regression", f"{-(r['luck_wins']*0.60)/r['games_remaining']:+.4f}")
+    with c2: st.metric("SOS Adjustment", f"{r.get('sos_adjustment',0):+.4f}"); st.metric("Games Remaining", int(r['games_remaining']))
     st.markdown("---")
     st.markdown("### 🔍 Model Inputs")
     st.write(f"**Current Pythag**: {r['raw_pythag']:.3f} | **PECOTA Win%**: {r['proj_win_pct']:.3f}")
@@ -468,96 +466,39 @@ def render_team_tab(mdf, sim):
 def render_methodology_tab():
     st.markdown("## 📖 Methodology & Model Architecture")
     st.caption(f"Data last updated: {get_last_updated()}")
-    
     st.markdown("""
 # ⚾ MLB 2026 Projection Model: Architecture & Weighting Blueprint
-
 ## 1. Core Philosophy
 - **Hybrid Approach**: Blends preseason talent projections (PECOTA) with real-time performance metrics (Pythagorean expectation & Statcast).
 - **Sample-Size Aware**: Early season leans heavily on talent baselines; late season trusts actual run differential and results.
 - **Fully Automated**: Pulls live MLB API standings/schedules, active/IL rosters, and Baseball Savant Statcast data daily. Zero manual updates required.
 - **Strict Data Dependency**: The model requires successful connections to MLB and Savant APIs. Timeouts, rate limits, or malformed data will trigger explicit errors for immediate debugging and resolution.
-
 ## 2. Player-Level Talent Blending (Input Layer)
-Before team projections are calculated, individual player metrics are blended using current Statcast, historical Statcast (2024–2025), and PECOTA baselines.
-
-### 🔹 Metrics Used
 | Position | Primary Metrics | Why |
 |----------|----------------|-----|
 | **Hitters** | EV90, Zone-Contact%, Barrel%, K%, BB%, xwOBA | Best predictors of offensive value, contact quality, and plate discipline |
 | **Pitchers** | FIP, Zone-Contact% Allowed, K%, BB%, HardHit% Allowed, Barrel% Allowed | Normalizes luck on HRs, measures swing-and-miss and command stability |
-
 ### 🔹 Weighting Formula (Per Player)
 | Component | Weight Calculation | Notes |
 |-----------|-------------------|-------|
 | **Current Statcast (`W_curr`)** | `min(sample / threshold, 1.0)` | Scales linearly until full threshold is met |
-| **PECOTA Baseline (`W_pecota`)** | `(1.0 - W_curr) × 0.65` | 65% of non-current weight (accounts for aging, park factors, projected playing time) |
-| **Historical Statcast (`W_hist`)** | `(1.0 - W_curr) × 0.35` | 35% of non-current weight (verifies/tunes PECOTA with actual underlying skills) |
-
-### 🔹 Sample Thresholds
-| Role | Full Current Weight Threshold |
-|------|------------------------------|
-| **Hitters** | 400 PA |
-| **Starters** | 150 IP |
-| **Relievers** | 40 IP |
-
-**Final Player Metric**:  
-`Blended Metric = (Current × W_curr) + (Historical × W_hist) + (PECOTA × W_pecota)`
-
+| **PECOTA Baseline (`W_pecota`)** | `(1.0 - W_curr) × 0.65` | 65% of non-current weight |
+| **Historical Statcast (`W_hist`)** | `(1.0 - W_curr) × 0.35` | 35% of non-current weight |
+### 🔹 Sample Thresholds: **Hitters**: 400 PA | **Starters**: 150 IP | **Relievers**: 40 IP
+**Final Player Metric**: `Blended Metric = (Current × W_curr) + (Historical × W_hist) + (PECOTA × W_pecota)`
 ## 3. Team-Level Win Projection (Core Engine)
-Blends the aggregated team talent projection with the observed Pythagorean win%.
-
-### 🔹 Formulas & Weights
-1. **Observed Pythagorean Win%**:  
-   `Pythag = RS^1.83 / (RS^1.83 + RA^1.83)`
-2. **Pythag Weight** (Scales with games played):  
-   `Pythag_W = GP / (GP + 80)`  
-   *(At 38 GP: ~32% Pythag / 68% Talent. At 81 GP: 50/50. At 162 GP: ~67% Pythag)*
-3. **Core Blend**:  
-   `Blended Win% = (PECOTA Win% × (1 - Pythag_W)) + (Observed Pythag × Pythag_W)`
-   *(Clipped to 0.20 – 0.80 to prevent extreme outliers)*
-
-### 🔹 Roster/IL Integration
-- **Active Roster Filter**: Only players on the current active roster receive full weight. IL players are excluded from current/Statcast blending.
-- **Auto-Adjustment**: Trades, call-ups, and IL stints update daily via MLB API.
-
+`Blended Win% = (PECOTA Win% × (1 - Pythag_W)) + (Observed Pythag × Pythag_W)`
+Where `Pythag_W = GP / (GP + 80)` (Scales with games played. Clipped 0.20–0.80)
 ## 4. Dynamic & Contextual Adjustments
-Applied sequentially after the core blend.
-
-| Adjustment | Formula / Logic | Weight / Scale | Purpose |
-|------------|----------------|----------------|---------|
-| **Luck Regression** | `Luck_Wins = Actual_Wins - (Pythag × GP)`<br>`Adj = -(Luck_Wins × 0.60) / Games_Remaining` | Factor: **0.60** | Pulls teams toward run-differential expectation. Unlucky teams get boosted; lucky teams get regressed. |
-| **Strength of Schedule (SOS)** | `SOS_Raw = Avg(Proj Win% of remaining opponents)`<br>`Adj = (0.500 - SOS_Raw) × 0.15 × min(GP / 81, 1.0)` | Sensitivity: **0.15**<br>Scales 0% → 100% by GP 81 | Hard schedules lower win%; easy schedules raise it. Impact grows as season progresses. |
-| **Deadline Buyer/Seller** | Score = (WC GB + RD Trend + Luck Deviation) × Dampening<br>`Adj = -Score × 0.015` (capped ±0.12)<br>Ramp: 0% (May 20) → 100% (Jul 31) | Max Adj: **±0.12 win%** | Smoothly adjusts bubble teams. No binary jumps. Active only during trade window. |
-
-**Final Projected Win%**:  
-`Adj Win% = Blended Win% + Luck Reg + SOS + Deadline Adj`
-
-## 5. Monte Carlo Simulation & Playoff Odds
-- **Simulations**: 1,000 full-season replays per run.
-- **Game Probability**: `log5(A, B) = (A - A*B) / (A + B - 2*A*B)` using final `Adj Win%`.
-- **Playoff Rules**: 
-  - 3 Division Winners per league auto-qualify.
-  - Next 3 best records per league earn Wild Cards.
-  - Playoff bracket simulated randomly from qualified teams for World Series odds.
-- **Outputs**: Projected Wins (Mean ± Std Dev), Division %, Playoff %, World Series %.
-
-## 6. Data Pipeline & Automation
-| Source | Frequency | Purpose |
-|--------|-----------|---------|
-| **MLB Stats API** | Daily | Live standings, schedules, active/40-man rosters, IL codes |
-| **Baseball Savant CSV** | Daily | Current & historical Statcast metrics (EV90, Contact%, FIP, etc.) |
-| **PECOTA JSON** | Static (Preseason) | Talent baseline, projected PA/IP, OPS/FIP/WARP |
-| **Cache System** | Auto-clears at 12:00 AM EST | Stores daily projections. Invalidates automatically on code/version updates. |
-
-## 📝 Maintenance & Backup Notes
-- **Code Version**: Always check `CACHE_VERSION` constant to ensure cache invalidation after updates.
-- **Threshold Tweaks**: Change `400`, `150`, `40` in player blending to adjust how quickly current form overrides projections.
-- **Regression Constants**: 
-  - Pythag anchor: `80` in `GP / (GP + 80)`
-  - Luck factor: `0.60`
-  - SOS sensitivity: `0.15`
-- **Deadline Window**: Adjust `DEADLINE_RAMP_START` and `TRADE_DEADLINE` constants if dates shift.
+| Adjustment | Formula / Logic | Weight / Scale |
+|------------|----------------|----------------|
+| **Luck Regression** | `-(Luck_Wins × 0.60) / Games_Remaining` | Factor: **0.60** |
+| **SOS** | `(0.500 - SOS_Raw) × 0.15 × min(GP/81, 1.0)` | Sensitivity: **0.15** |
+| **Deadline Ramp** | Score-based, scales 0% → 100% (May 20 → Jul 31) | Max Adj: **±0.12 win%** |
+**Final Projected Win%**: `Adj Win% = Blended Win% + Luck Reg + SOS + Deadline Adj`
+## 5. Monte Carlo & Pipeline
+- **1,000 Simulations** using `log5` probability.
+- **APIs**: MLB Stats API (daily), Baseball Savant CSV (daily), PECOTA JSON (static).
 """)
 
 # ==============================================================================
@@ -568,7 +509,7 @@ def load_all_data():
     if cached:
         m = pd.DataFrame(cached["master"]); s = cached.get("sim_results", {}); sc = pd.DataFrame(cached.get("schedule", []))
         if not m.empty and s: return m, s, sc
-    st.markdown("### ⚾ Loading fresh data... (Strict Sync v27.1)"); pb = st.progress(0)
+    st.markdown("### ⚾ Loading fresh data... (Strict Sync v27.2)"); pb = st.progress(0)
     try:
         roster_map = fetch_team_statuses(); pb.progress(20)
         std = fetch_standings(); pb.progress(40); sch = fetch_schedule(); pb.progress(60)
