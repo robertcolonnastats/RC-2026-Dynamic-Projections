@@ -2,9 +2,10 @@
 MLB 2026 Season Projections
 Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
-✅ Fixed: Dtype mismatch error ([125.5 125.5 125.5] int64 error)
-✅ Fixed: SyntaxError (line 637)
-✅ Fixed: Depth chart logic (now uses full roster, not top 9)
+✅ Fixed: SyntaxError (invalid syntax)
+✅ Fixed: Dtype array leakage into int64 columns
+✅ Fixed: Streamlit use_container_width deprecation
+✅ Fixed: Full depth-chart PECOTA weighting
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -23,7 +24,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 # ==============================================================================
-# EMBEDDED PECOTA DATA (Mar 26, 2026 snapshot)
+# EMBEDDED PECOTA DATA
 # ==============================================================================
 PECOTA_HIT_EMBEDDED = '''[{"team": "SD", "mlbid": 518792, "pa": 251, "ops": 0.646, "warp": 0.3}, {"team": "MIA", "mlbid": 807751, "pa": 251, "ops": 0.642, "warp": 0.3}, {"team": "TEX", "mlbid": 683227, "pa": 199, "ops": 0.653, "warp": 0.3}, {"team": "SF", "mlbid": 692238, "pa": 251, "ops": 0.668, "warp": 0.3}, {"team": "CHC", "mlbid": 624424, "pa": 138, "ops": 0.678, "warp": 0.2}, {"team": "CHC", "mlbid": 823807, "pa": 251, "ops": 0.609, "warp": 0.2}, {"team": "SAC", "mlbid": 694034, "pa": 251, "ops": 0.631, "warp": 0.2}, {"team": "PHI", "mlbid": 800607, "pa": 251, "ops": 0.646, "warp": 0.2}, {"team": "SD", "mlbid": 669392, "pa": 251, "ops": 0.622, "warp": 0.2}, {"team": "ARI", "mlbid": 702258, "pa": 251, "ops": 0.614, "warp": 0.2}, {"team": "ARI", "mlbid": 695521, "pa": 251, "ops": 0.651, "warp": 0.2}, {"team": "BAL", "mlbid": 668974, "pa": 251, "ops": 0.609, "warp": 0.2}, {"team": "CHW", "mlbid": 695731, "pa": 238, "ops": 0.648, "warp": 0.2}, {"team": "ATL", "mlbid": 642086, "pa": 200, "ops": 0.681, "warp": 0.2}, {"team": "TOR", "mlbid": 687072, "pa": 251, "ops": 0.639, "warp": 0.2}, {"team": "TB", "mlbid": 666165, "pa": 251, "ops": 0.628, "warp": 0.2}, {"team": "PHI", "mlbid": 681323, "pa": 251, "ops": 0.673, "warp": 0.2}, {"team": "DET", "mlbid": 689577, "pa": 251, "ops": 0.617, "warp": 0.1}, {"team": "CHW", "mlbid": 807747, "pa": 251, "ops": 0.602, "warp": 0.1}, {"team": "STL", "mlbid": 647378, "pa": 251, "ops": 0.621, "warp": 0.1}, {"team": "PHI", "mlbid": 805704, "pa": 251, "ops": 0.662, "warp": 0.1}, {"team": "LAA", "mlbid": 806534, "pa": 251, "ops": 0.639, "warp": 0.1}, {"team": "SF", "mlbid": 814194, "pa": 251, "ops": 0.621, "warp": 0.1}, {"team": "TB", "mlbid": 700246, "pa": 414, "ops": 0.643, "warp": 0.1}, {"team": "LAA", "mlbid": 690804, "pa": 251, "ops": 0.663, "warp": 0.1}, {"team": "SF", "mlbid": 669442, "pa": 251, "ops": 0.625, "warp": 0.1}, {"team": "LAD", "mlbid": 669227, "pa": 251, "ops": 0.635, "warp": 0.1}, {"team": "MIN", "mlbid": 805805, "pa": 99, "ops": 0.649, "warp": 0.1}, {"team": "DET", "mlbid": 667452, "pa": 251, "ops": 0.687, "warp": 0.3}, {"team": "LAD", "mlbid": 806077, "pa": 251, "ops": 0.616, "warp": 0.3}, {"team": "TB", "mlbid": 702556, "pa": 251, "ops": 0.644, "warp": 0.3}, {"team": "CHW", "mlbid": 695299, "pa": 251, "ops": 0.632, "warp": 0.3}, {"team": "SF", "mlbid": 701852, "pa": 251, "ops": 0.635, "warp": 0.3}, {"team": "STL", "mlbid": 804241, "pa": 251, "ops": 0.639, "warp": 0.3}, {"team": "LAD", "mlbid": 500743, "pa": 163, "ops": 0.666, "warp": 0.3}, {"team": "TB", "mlbid": 828319, "pa": 251, "ops": 0.636, "warp": 0.3}, {"team": "SD", "mlbid": 670092, "pa": 251, "ops": 0.660, "warp": 0.2}, {"team": "PIT", "mlbid": 621466, "pa": 251, "ops": 0.689, "warp": 0.2}, {"team": "SEA", "mlbid": 692039, "pa": 251, "ops": 0.628, "warp": 0.2}, {"team": "SF", "mlbid": 527038, "pa": 271, "ops": 0.675, "warp": 0.3}, {"team": "ARI", "mlbid": 702679, "pa": 251, "ops": 0.630, "warp": 0.2}, {"team": "SF", "mlbid": 813841, "pa": 251, "ops": 0.625, "warp": 0.2}, {"team": "LAA", "mlbid": 663905, "pa": 251, "ops": 0.676, "warp": 0.2}, {"team": "ATL", "mlbid": 621450, "pa": 251, "ops": 0.636, "warp": 0.2}, {"team": "SEA", "mlbid": 687659, "pa": 251, "ops": 0.625, "warp": 0.2}, {"team": "TB", "mlbid": 690991, "pa": 251, "ops": 0.641, "warp": 0.2}, {"team": "LAD", "mlbid": 685301, "pa": 251, "ops": 0.660, "warp": 0.2}, {"team": "TB", "mlbid": 807083, "pa": 251, "ops": 0.621, "warp": 0.2}, {"team": "CIN", "mlbid": 680756, "pa": 251, "ops": 0.618, "warp": 0.2}, {"team": "SD", "mlbid": 681036, "pa": 251, "ops": 0.623, "warp": 0.2}, {"team": "TEX", "mlbid": 806964, "pa": 251, "ops": 0.644, "warp": 0.2}, {"team": "SF", "mlbid": 678681, "pa": 251, "ops": 0.657, "warp": 0.2}, {"team": "ARI", "mlbid": 815154, "pa": 251, "ops": 0.613, "warp": 0.2}, {"team": "MIL", "mlbid": 670232, "pa": 251, "ops": 0.624, "warp": 0.2}, {"team": "PHI", "mlbid": 686551, "pa": 251, "ops": 0.625, "warp": 0.2}, {"team": "PHI", "mlbid": 664238, "pa": 130, "ops": 0.658, "warp": 0.2}, {"team": "SAC", "mlbid": 660829, "pa": 251, "ops": 0.628, "warp": 0.2}, {"team": "HOU", "mlbid": 621529, "pa": 251, "ops": 0.628, "warp": 0.2}, {"team": "KC", "mlbid": 663731, "pa": 251, "ops": 0.638, "warp": 0.2}, {"team": "COL", "mlbid": 691182, "pa": 91, "ops": 0.696, "warp": 0.2}, {"team": "BAL", "mlbid": 683770, "pa": 251, "ops": 0.669, "warp": 0.2}]'''
 
@@ -109,6 +110,9 @@ TIER_COLORS = {"hard_seller":"#d62728","soft_seller":"#ff7f0e","neutral":"#7f7f7
 TIER_EMOJI  = {"hard_seller":"🔴","soft_seller":"🟠","neutral":"⚪","soft_buyer":"🟢","hard_buyer":"🔵"}
 EST = ZoneInfo("America/New_York")
 
+# ==============================================================================
+# UTILS
+# ==============================================================================
 def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
 
 def get_season_state():
@@ -153,6 +157,9 @@ def save_cache(payload):
         with open(CACHE_FILE,"w") as f: json.dump(payload,f,default=str)
     except Exception as e: print(f"Cache write failed: {e}")
 
+# ==============================================================================
+# DATA FETCHING
+# ==============================================================================
 _ROSTER_CACHE = {}
 def fetch_team_statuses():
     today = date.today().isoformat()
@@ -235,6 +242,9 @@ def compute_remaining_opponents(df):
         opps.setdefault(int(r["away_team_id"]),[]).append(int(r["home_team_id"]))
     return opps
 
+# ==============================================================================
+# PROJECTION ENGINE
+# ==============================================================================
 LEAGUE_AVG_RPG   = 4.50
 LEAGUE_AVG_FIP   = 4.10
 LEAGUE_AVG_OPS   = 0.730
@@ -426,11 +436,13 @@ def fetch_team_projections(standings_df, roster_map):
         rp_df = pp_team[pp_team["role"] == "RP"].sort_values("ip", ascending=False)
         
         def staff_era(df, role):
-            if df.empty or df["ip"].sum() == 0: return LEAGUE_AVG_ERA
+            if df.empty or df["ip"].sum() == 0: return float(LEAGUE_AVG_ERA)
             cap = IP_FULL_WEIGHT_SP if role == "SP" else IP_FULL_WEIGHT_RP
             cip = df["ip"].clip(upper=cap).values
             blend = (df["fip"].fillna(LEAGUE_AVG_FIP) * 0.7 + df["era"].fillna(LEAGUE_AVG_ERA) * 0.3).clip(2, 7.5).values
-            return float(np.average(blend, weights=cip)) if cip.sum() > 0 else LEAGUE_AVG_ERA
+            if cip.sum() > 0:
+                return float(np.average(blend, weights=cip))
+            return float(LEAGUE_AVG_ERA)
             
         sp_base = float(np.clip(staff_era(sp_df, "SP"), 2.80, 5.50))
         rp_base = float(np.clip(staff_era(rp_df, "RP"), 3.00, 5.50))
@@ -465,30 +477,16 @@ def fetch_team_projections(standings_df, roster_map):
             if not il_players.empty:
                 il_warp = float(il_players["warp"].fillna(0).clip(lower=0).sum())
                 
-                # Calculate scalars explicitly to prevent array leakage
-        safe_rpg = float(np.clip((team_ops/LEAGUE_AVG_OPS)*LEAGUE_AVG_RPG, 2.5, 7.5))
-        safe_rapg = float(np.clip((sp_era/LEAGUE_AVG_ERA)*LEAGUE_AVG_RPG*LEAGUE_SP_IP_SHARE +
-                                  (rp_era/LEAGUE_AVG_ERA)*LEAGUE_AVG_RPG*LEAGUE_RP_IP_SHARE, 2.5, 7.5))
-        safe_wp = float(safe_rpg**PYTHAG_EXPONENT / (safe_rpg**PYTHAG_EXPONENT + safe_rapg**PYTHAG_EXPONENT))
-        safe_il = 0.0
-        if not ph.empty and len(il_ids) > 0:
-            safe_il = float(ph[(ph["team_id"]==tid) & (ph["mlbid"].isin(il_ids))]["warp"].fillna(0).clip(lower=0).sum())
-            
         rows.append({
             "team_id": int(tid),
-            "proj_runs_per_game": round(safe_rpg, 3),
-            "proj_ra_per_game": round(safe_rapg, 3),
-            "proj_win_pct": round(safe_wp, 4),
-            "il_warp": round(safe_il, 2),
+            "proj_runs_per_game": round(float(np.clip(proj_rpg, 2.5, 7.5)), 3),
+            "proj_ra_per_game": round(float(np.clip(proj_rapg, 2.5, 7.5)), 3),
+            "proj_win_pct": round(float(np.clip(proj_wp, 0.0, 1.0)), 4),
+            "il_warp": round(float(np.clip(il_warp, 0.0, None)), 2),
             "proj_source": "PECOTA+Statcast"
         })
         
-        prj = pd.DataFrame(rows)
-    if not prj.empty:
-        prj["team_id"] = prj["team_id"].astype(int)
-        for c in ["proj_runs_per_game","proj_ra_per_game","proj_win_pct","il_warp"]:
-            prj[c] = pd.to_numeric(prj[c], errors="coerce").fillna(0.0).astype(float)
-    return prj
+    return pd.DataFrame(rows)
 
 def pythag(rs, ra):
     if rs <= 0 or ra <= 0: return 0.500
@@ -503,20 +501,19 @@ def build_master(std, prj):
     
     # 🔒 FORCE FLOAT ON NUMERIC COLUMNS PREVENTS PANDAS dtype COLLISIONS
     float_cols = ["proj_win_pct","proj_runs_per_game","proj_ra_per_game","il_warp",
-                  "games_played","runs_scored","runs_allowed","win_pct","pythag_win_pct","wc_games_back"]
+                  "games_played","runs_scored","runs_allowed","win_pct"]
     for c in float_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0).astype(float)
             
     df["pythag_win_pct"] = df.apply(lambda r: pythag(r["runs_scored"], r["runs_allowed"]), axis=1)
-    gp = df["games_played"].clip(0, 162)
-    df["pythag_win_pct"] = df["pythag_win_pct"]*(gp/(gp+PYTHAG_REGRESSION_PA)) + 0.500*(PYTHAG_REGRESSION_PA/(gp+PYTHAG_REGRESSION_PA))
-    base_proj_w = (PROJ_WEIGHT_MAX-(gp/162.0)*(PROJ_WEIGHT_MAX-PROJ_WEIGHT_MIN)).clip(PROJ_WEIGHT_MIN, PROJ_WEIGHT_MAX)
-    il_frac = (df["il_warp"]/TYPICAL_TEAM_WARP).clip(0.0, MAX_IL_FRAC)
-    adj_pyth_w = (1.0-base_proj_w)*(1.0-il_frac)
-    adj_proj_w = 1.0-adj_pyth_w
-    df["blended_win_pct"] = (df["proj_win_pct"]*adj_proj_w+df["pythag_win_pct"]*adj_pyth_w).clip(0.20,0.80)
-    # 🔒 EXPLICIT FLOAT CAST PREVENTS int64 ASSIGNMENT ERROR
+    gp = df["games_played"].clip(0, 162).astype(float)
+    df["pythag_win_pct"] = df["pythag_win_pct"] * (gp / (gp + PYTHAG_REGRESSION_PA)) + 0.500 * (PYTHAG_REGRESSION_PA / (gp + PYTHAG_REGRESSION_PA))
+    base_proj_w = (PROJ_WEIGHT_MAX - (gp / 162.0) * (PROJ_WEIGHT_MAX - PROJ_WEIGHT_MIN)).clip(PROJ_WEIGHT_MIN, PROJ_WEIGHT_MAX)
+    il_frac = (df["il_warp"] / TYPICAL_TEAM_WARP).clip(0.0, MAX_IL_FRAC)
+    adj_pyth_w = (1.0 - base_proj_w) * (1.0 - il_frac)
+    adj_proj_w = 1.0 - adj_pyth_w
+    df["blended_win_pct"] = (df["proj_win_pct"].fillna(0.5) * adj_proj_w + df["pythag_win_pct"] * adj_pyth_w).clip(0.20, 0.80)
     df["games_remaining"] = (162.0 - gp).clip(0, 162).astype(float)
     return df
 
@@ -624,6 +621,9 @@ def run_simulation(mdf, sch):
             "division_odds": dv, "playoff_odds": po, "ws_odds": ws,
             "pre_deadline_division_odds": pre_dv, "pre_deadline_playoff_odds": pre_po, "pre_deadline_ws_odds": pre_ws}
 
+# ==============================================================================
+# UI
+# ==============================================================================
 def render_projections_tab(mdf, sim):
     st.markdown("## 2026 MLB Season Projections")
     st.caption(f"Updated daily · {N_SIMULATIONS:,}-sim Monte Carlo · PECOTA 2026 + Statcast")
@@ -789,6 +789,9 @@ Before ramp start, no adjustment applied to projected records.""")
 
 Two parallel runs: post-deadline (with adj) and pre-deadline (without adj) for Deadline Impact comparison.""")
 
+# ==============================================================================
+# MAIN
+# ==============================================================================
 def load_all_data():
     cached = load_cache()
     if cached:
@@ -809,8 +812,8 @@ def load_all_data():
     up(55, "Building projections (PECOTA + Statcast)")
     try:
         prj = fetch_team_projections(std, roster_map)
-        if prj.empty: raise ValueError("empty")
-        except Exception as e:
+        if prj.empty: raise ValueError("empty projections")
+    except Exception as e:
         st.warning(f"Projection fallback: {e}")
         rows = []
         for _, row in std.iterrows():
@@ -818,14 +821,8 @@ def load_all_data():
             rs = float(row.get("runs_scored", 0))
             ra = float(row.get("runs_allowed", 0))
             wp = pythag(rs / gp if gp > 0 else 0, ra / gp if gp > 0 else 0) if gp > 0 else 0.500
-            rows.append({
-                "team_id": int(row["team_id"]),
-                "proj_win_pct": round(float(wp), 4),
-                "proj_runs_per_game": float(LEAGUE_AVG_RPG),
-                "proj_ra_per_game": float(LEAGUE_AVG_RPG),
-                "proj_source": "Regression",
-                "il_warp": 0.0
-            })
+            rows.append({"team_id": int(row["team_id"]), "proj_win_pct": round(float(wp), 4), "proj_runs_per_game": LEAGUE_AVG_RPG,
+                         "proj_ra_per_game": LEAGUE_AVG_RPG, "proj_source": "Regression", "il_warp": 0.0})
         prj = pd.DataFrame(rows)
     up(70, "Computing adjustments")
     mst = build_master(std, prj)
