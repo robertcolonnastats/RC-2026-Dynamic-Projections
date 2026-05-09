@@ -1,7 +1,9 @@
+"""
 MLB 2026 Season Projections
 Deadline-aware Monte Carlo projections for all 30 teams.
+Run with: streamlit run streamlit_app.py
 """
-import os, json, warnings
+import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -18,86 +20,80 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 # ==============================================================================
+# CONFIGURATION — Set these paths or use environment variables
+# ==============================================================================
+PECOTA_HIT_PATH = os.getenv("PECOTA_HIT_PATH", "/tmp/ph.json")
+PECOTA_PIT_PATH = os.getenv("PECOTA_PIT_PATH", "/tmp/pp.json")
+
+# ==============================================================================
 # CONSTANTS — edit anything in this section to adjust model behavior
 # ==============================================================================
-
 # ── Season dates ──────────────────────────────────────────────────────────────
 SEASON_YEAR              = 2026
 OPENING_DAY              = "2026-03-27"
 WORLD_SERIES_END_APPROX  = "2026-11-01"
 TRADE_DEADLINE           = "2026-07-31"
-DEADLINE_RAMP_START      = "2026-05-20"   # Adjustments begin phasing in here
+DEADLINE_RAMP_START      = "2026-05-20"
 
 # ── Infrastructure ────────────────────────────────────────────────────────────
 MLB_API_BASE             = "https://statsapi.mlb.com/api/v1"
 N_SIMULATIONS            = 1_000
-RANDOM_SEED              = 42             # Fixed = reproducible results each load
+RANDOM_SEED              = 42
 PYTHAG_EXPONENT          = 1.83
 CACHE_DIR                = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE               = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION            = "v19-wired-constants"  # Change to bust cache after updates
+CACHE_VERSION            = "v19-wired-constants"
 
 # ── Statcast sample thresholds ────────────────────────────────────────────────
-# At these levels current-season Statcast gets 100% weight.
-# Below threshold weight scales linearly (200 PA = 50% weight, etc.)
-PA_FULL_WEIGHT           = 400    # Batters: PA for full current-season weight
-IP_FULL_WEIGHT_SP        = 150    # Starters: IP for full current-season weight
-IP_FULL_WEIGHT_RP        = 40     # Relievers: IP for full current-season weight
+PA_FULL_WEIGHT           = 400
+IP_FULL_WEIGHT_SP        = 150
+IP_FULL_WEIGHT_RP        = 40
 
 # ── Prior signal split ────────────────────────────────────────────────────────
-# Applied to the non-current-season portion. MUST sum to 1.0.
-PRIOR_PECOTA_WEIGHT      = 0.45   # PECOTA 2026 preseason projection
-PRIOR_HIST_2025_WEIGHT   = 0.35   # 2025 full-season Statcast xwOBA/xERA
-PRIOR_HIST_2024_WEIGHT   = 0.20   # 2024 full-season Statcast xwOBA/xERA
+PRIOR_PECOTA_WEIGHT      = 0.45
+PRIOR_HIST_2025_WEIGHT   = 0.35
+PRIOR_HIST_2024_WEIGHT   = 0.20
 
 # ── Statcast influence ────────────────────────────────────────────────────────
-# How much Statcast signal can shift the PECOTA baseline.
-# 0.30 = Statcast can move projection ±30% of gap from league average.
 STATCAST_INFLUENCE       = 0.30
 
 # ── Active roster weights ─────────────────────────────────────────────────────
-# When computing lineup OPS, players get these weights by roster status.
-ROSTER_WEIGHT_ACTIVE     = 600.0  # Active roster players
-ROSTER_WEIGHT_IL         = 10.0   # IL players (near-zero but not excluded)
-ROSTER_WEIGHT_OTHER      = 300.0  # Minor leaguers / non-roster
+ROSTER_WEIGHT_ACTIVE     = 600.0
+ROSTER_WEIGHT_IL         = 10.0
+ROSTER_WEIGHT_OTHER      = 300.0
 
 # ── IL WARP adjustment ────────────────────────────────────────────────────────
-# IL players depress Pythagorean unfairly. Pythagorean weight is reduced
-# proportionally to how much WARP is sitting on the IL.
-# il_frac = min(il_warp / TYPICAL_TEAM_WARP, MAX_IL_FRAC)
-TYPICAL_TEAM_WARP        = 35.0   # Typical full-roster projected WARP
-MAX_IL_FRAC              = 0.50   # Max Pythagorean weight reduction from IL
+TYPICAL_TEAM_WARP        = 35.0
+MAX_IL_FRAC              = 0.50
 
 # ── Pythagorean blend ─────────────────────────────────────────────────────────
-# Pythag_W = GP / (GP + PYTHAG_REGRESSION_PA)
-# At 38 GP ≈ 32% Pythag / 68% PECOTA. At 81 GP = 50/50. At 162 GP ≈ 67% Pythag.
-PYTHAG_REGRESSION_PA     = 80     # Tango regression anchor
-PROJ_WEIGHT_MAX          = 0.70   # Max PECOTA weight (early season)
-PROJ_WEIGHT_MIN          = 0.45   # Min PECOTA weight (late season)
+PYTHAG_REGRESSION_PA     = 80
+PROJ_WEIGHT_MAX          = 0.70
+PROJ_WEIGHT_MIN          = 0.45
 
 # ── Buyer/Seller score inputs ─────────────────────────────────────────────────
-RD_SENSITIVITY           = 0.02   # Run diff/162 → score (higher = RD matters more)
-RD_DAMPENER_START_GP     = 50     # GP where run diff starts counting
-LUCK_SENSITIVITY         = 0.50   # Luck wins → score
-LUCK_DAMPENER_START_GP   = 40     # GP where luck starts counting
+RD_SENSITIVITY           = 0.02
+RD_DAMPENER_START_GP     = 50
+LUCK_SENSITIVITY         = 0.50
+LUCK_DAMPENER_START_GP   = 40
 
-# ── Buyer/Seller tier thresholds (adjusted score) ────────────────────────────
+# ── Buyer/Seller tier thresholds ──────────────────────────────────────────────
 TIER_HARD_SELLER         =  8.0
 TIER_SOFT_SELLER         =  4.0
 TIER_SOFT_BUYER          = -3.0
 TIER_HARD_BUYER          = -8.0
 
-# ── Win% adjustments per tier (at full ramp) ─────────────────────────────────
+# ── Win% adjustments per tier ─────────────────────────────────────────────────
 ADJ_HARD_SELLER          = -0.12
 ADJ_SOFT_SELLER          = -0.06
 ADJ_NEUTRAL              =  0.00
 ADJ_SOFT_BUYER           = +0.04
 ADJ_HARD_BUYER           = +0.07
-ADJ_SCALE                =  0.015  # adj = clip(-score * ADJ_SCALE, ADJ_HARD_SELLER, ADJ_HARD_BUYER)
+ADJ_SCALE                =  0.015
 
 # ── Luck regression & SoS ────────────────────────────────────────────────────
-LUCK_REGRESSION_FACTOR   = 0.40   # Fraction of luck wins to regress away
-SOS_SENSITIVITY          = 0.15   # Schedule difficulty → win% shift (max ~3W impact)
+LUCK_REGRESSION_FACTOR   = 0.40
+SOS_SENSITIVITY          = 0.15
 
 # ==============================================================================
 # TEAM INFO
@@ -125,7 +121,7 @@ TIER_EMOJI  = {"hard_seller":"🔴","soft_seller":"🟠","neutral":"⚪","soft_b
 EST = ZoneInfo("America/New_York")
 
 # ==============================================================================
-# CACHE
+# CACHE UTILS
 # ==============================================================================
 def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -272,21 +268,46 @@ PECOTA_TEAM_MAP = {
     "TEX":140,"TOR":141,"WAS":120,"WSH":120,
 }
 
-_PECOTA_HIT_JSON = HIT_JSON_PLACEHOLDER
-_PECOTA_PIT_JSON = PIT_JSON_PLACEHOLDER
-_ph = None; _pp = None
+# Global cache for PECOTA data
+_PECOTA_HIT_DF = None
+_PECOTA_PIT_DF = None
 
-def _pecota():
-    global _ph,_pp
-    if _ph is None:
-        _ph = pd.DataFrame(json.loads(_PECOTA_HIT_JSON))
-        _ph["team_id"] = _ph["team"].map(PECOTA_TEAM_MAP)
-        _ph = _ph.dropna(subset=["team_id"]); _ph["team_id"] = _ph["team_id"].astype(int)
-    if _pp is None:
-        _pp = pd.DataFrame(json.loads(_PECOTA_PIT_JSON))
-        _pp["team_id"] = _pp["team"].map(PECOTA_TEAM_MAP)
-        _pp = _pp.dropna(subset=["team_id"]); _pp["team_id"] = _pp["team_id"].astype(int)
-    return _ph,_pp
+def _load_pecota_data():
+    """Load PECOTA JSON files at runtime with error handling"""
+    global _PECOTA_HIT_DF, _PECOTA_PIT_DF
+    
+    if _PECOTA_HIT_DF is not None and _PECOTA_PIT_DF is not None:
+        return _PECOTA_HIT_DF, _PECOTA_PIT_DF
+    
+    try:
+        with open(PECOTA_HIT_PATH, "r") as f:
+            hit_data = json.load(f)
+        _PECOTA_HIT_DF = pd.DataFrame(hit_data)
+        _PECOTA_HIT_DF["team_id"] = _PECOTA_HIT_DF["team"].map(PECOTA_TEAM_MAP)
+        _PECOTA_HIT_DF = _PECOTA_HIT_DF.dropna(subset=["team_id"])
+        _PECOTA_HIT_DF["team_id"] = _PECOTA_HIT_DF["team_id"].astype(int)
+    except FileNotFoundError:
+        st.error(f"PECOTA hitters file not found: {PECOTA_HIT_PATH}")
+        st.stop()
+    except Exception as e:
+        st.error(f"Error loading PECOTA hitters: {e}")
+        st.stop()
+    
+    try:
+        with open(PECOTA_PIT_PATH, "r") as f:
+            pit_data = json.load(f)
+        _PECOTA_PIT_DF = pd.DataFrame(pit_data)
+        _PECOTA_PIT_DF["team_id"] = _PECOTA_PIT_DF["team"].map(PECOTA_TEAM_MAP)
+        _PECOTA_PIT_DF = _PECOTA_PIT_DF.dropna(subset=["team_id"])
+        _PECOTA_PIT_DF["team_id"] = _PECOTA_PIT_DF["team_id"].astype(int)
+    except FileNotFoundError:
+        st.error(f"PECOTA pitchers file not found: {PECOTA_PIT_PATH}")
+        st.stop()
+    except Exception as e:
+        st.error(f"Error loading PECOTA pitchers: {e}")
+        st.stop()
+    
+    return _PECOTA_HIT_DF, _PECOTA_PIT_DF
 
 def _fetch_statcast_hist(year,stat_type):
     try:
@@ -362,7 +383,7 @@ def _load_statcast_all():
     return res
 
 def fetch_team_projections(standings_df, roster_map):
-    ph,pp = _pecota()
+    ph,pp = _load_pecota_data()
     all_ids = list(TEAM_INFO.keys())
     team_pa,team_ip = {},{}
     if standings_df is not None and not standings_df.empty:
@@ -445,7 +466,6 @@ def build_master(std,prj):
     df = df.merge(prj[["team_id","proj_win_pct","proj_runs_per_game","proj_ra_per_game","proj_source","il_warp"]],on="team_id",how="left")
     df["pythag_win_pct"] = df.apply(lambda r: pythag(r["runs_scored"],r["runs_allowed"]),axis=1)
     gp = df["games_played"].clip(0,162)
-    # Tango regression: regress Pythagorean toward .500 for small samples
     df["pythag_win_pct"] = df["pythag_win_pct"]*(gp/(gp+PYTHAG_REGRESSION_PA)) + 0.500*(PYTHAG_REGRESSION_PA/(gp+PYTHAG_REGRESSION_PA))
     base_proj_w = (PROJ_WEIGHT_MAX-(gp/162.0)*(PROJ_WEIGHT_MAX-PROJ_WEIGHT_MIN)).clip(PROJ_WEIGHT_MIN,PROJ_WEIGHT_MAX)
     il_frac = (df["il_warp"]/TYPICAL_TEAM_WARP).clip(0.0,MAX_IL_FRAC)
@@ -552,7 +572,7 @@ def run_simulation(mdf,sch):
             "pre_deadline_division_odds":pre_dv,"pre_deadline_playoff_odds":pre_po,"pre_deadline_ws_odds":pre_ws}
 
 # ==============================================================================
-# UI
+# UI FUNCTIONS
 # ==============================================================================
 def render_projections_tab(mdf,sim):
     st.markdown("## 2026 MLB Season Projections")
@@ -561,9 +581,9 @@ def render_projections_tab(mdf,sim):
     for _,r in mdf.iterrows():
         t=r["team_id"]; pw=int(round(sim["proj_wins"].get(t,r["wins"])))
         rows.append({"Team":r["abbr"],"League":r["league"],"Division":r["division"],
-                     "W":int(r["wins"]),"L":int(r["losses"]),"Win%":f"{r[\'win_pct\']:.3f}",
-                     "Pythag%":f"{r[\'pythag_win_pct\']:.3f}",
-                     "GB":f"{r[\'wc_games_back\']:.1f}" if r["wc_games_back"]>0 else "—",
+                     "W":int(r["wins"]),"L":int(r["losses"]),"Win%":f"{r['win_pct']:.3f}",
+                     "Pythag%":f"{r['pythag_win_pct']:.3f}",
+                     "GB":f"{r['wc_games_back']:.1f}" if r["wc_games_back"]>0 else "—",
                      "Proj W":pw,"Proj L":162-pw,
                      "Status":r.get("tier_label","Neutral"),"tier":r.get("tier","neutral"),
                      "SoS":r.get("sos_label","—")})
@@ -575,7 +595,7 @@ def render_projections_tab(mdf,sim):
     st.markdown("---")
     for d in sorted(df["Division"].unique()):
         dd=df[df["Division"]==d].sort_values("Proj W",ascending=False).copy()
-        dd["Status"]=dd.apply(lambda r:f"{TIER_EMOJI.get(r[\'tier\'],\'⚪\')} {r[\'Status\']}",axis=1)
+        dd["Status"]=dd.apply(lambda r:f"{TIER_EMOJI.get(r['tier'],'⚪')} {r['Status']}",axis=1)
         st.markdown(f"### {d}")
         st.dataframe(dd.drop(columns=["tier"],errors="ignore"),hide_index=True,width="stretch")
     st.markdown("---")
@@ -604,17 +624,17 @@ def render_team_tab(mdf,sim):
     sel=st.selectbox("Select Team",[o[0] for o in opts],key="team_sel")
     tid=next(o[1] for o in opts if o[0]==sel); r=mdf[mdf["team_id"]==tid].iloc[0]
     tier=r.get("tier","neutral")
-    st.markdown(f"## {r[\'name\']} ({r[\'abbr\']})")
-    st.caption(f"{r[\'division\']} · {TIER_EMOJI.get(tier,\'⚪\')} {r.get(\'tier_label\',\'Neutral\')} · {r.get(\'proj_source\',\'Unknown\')}")
+    st.markdown(f"## {r['name']} ({r['abbr']})")
+    st.caption(f"{r['division']} · {TIER_EMOJI.get(tier,'⚪')} {r.get('tier_label','Neutral')} · {r.get('proj_source','Unknown')}")
     pw=sim["proj_wins"].get(tid,r["wins"]); ps=sim.get("proj_wins_std",{}).get(tid,5.0)
     pw_i=int(round(pw)); pl_i=int(round(162-pw))
     st.markdown("### Season Projections")
     m1,m2,m3,m4,m5,m6=st.columns(6)
-    m1.metric("Record",f"{int(r[\'wins\'])}-{int(r[\'losses\'])}")
+    m1.metric("Record",f"{int(r['wins'])}-{int(r['losses'])}")
     m2.metric("Proj Rec",f"{pw_i}-{pl_i}",f"±{ps:.1f}W")
-    m3.metric("Div%",f"{sim.get(\'division_odds\',{}).get(tid,0):.1%}")
-    m4.metric("Playoff%",f"{sim.get(\'playoff_odds\',{}).get(tid,0):.1%}")
-    m5.metric("WS%",f"{sim.get(\'ws_odds\',{}).get(tid,0):.2%}")
+    m3.metric("Div%",f"{sim.get('division_odds',{}).get(tid,0):.1%}")
+    m4.metric("Playoff%",f"{sim.get('playoff_odds',{}).get(tid,0):.1%}")
+    m5.metric("WS%",f"{sim.get('ws_odds',{}).get(tid,0):.2%}")
     m6.metric("SoS",r.get("sos_label","—"))
     pre_po=sim.get("pre_deadline_playoff_odds",{}).get(tid,0); post_po=sim.get("playoff_odds",{}).get(tid,0)
     pre_ws=sim.get("pre_deadline_ws_odds",{}).get(tid,0); post_ws=sim.get("ws_odds",{}).get(tid,0)
@@ -630,25 +650,25 @@ def render_team_tab(mdf,sim):
     with ci1:
         st.markdown("**Inputs**")
         for k,v in [
-            ("WC Games Back",f"{r.get(\'wc_games_back\',0):.1f}"),
-            ("Run Diff/162",f"{r.get(\'rd_per_162\',0):+.0f}"),
-            ("Actual Win%",f"{r.get(\'win_pct\',0):.3f}"),
-            ("Pythagorean Win%",f"{r.get(\'pythag_win_pct\',0):.3f}"),
-            ("PECOTA Proj Win%",f"{r.get(\'proj_win_pct\',0):.3f}"),
-            ("Blended Win%",f"{r.get(\'blended_win_pct\',0):.3f}"),
-            ("Luck (wins +/-)",f"{r.get(\'luck_wins\',0):+.1f}"),
-            ("IL WARP (missing)",f"{r.get(\'il_warp\',0):.1f}"),
+            ("WC Games Back",f"{r.get('wc_games_back',0):.1f}"),
+            ("Run Diff/162",f"{r.get('rd_per_162',0):+.0f}"),
+            ("Actual Win%",f"{r.get('win_pct',0):.3f}"),
+            ("Pythagorean Win%",f"{r.get('pythag_win_pct',0):.3f}"),
+            ("PECOTA Proj Win%",f"{r.get('proj_win_pct',0):.3f}"),
+            ("Blended Win%",f"{r.get('blended_win_pct',0):.3f}"),
+            ("Luck (wins +/-)",f"{r.get('luck_wins',0):+.1f}"),
+            ("IL WARP (missing)",f"{r.get('il_warp',0):.1f}"),
         ]: st.markdown(f"- **{k}:** {v}")
     with ci2:
         st.markdown("**Score & Adjustments**")
         gr=max(r.get("games_remaining",1),1); lw=r.get("luck_wins",0)
         for k,v in [
-            ("Adjusted Score",f"{r.get(\'adjusted_score\',0):.2f}"),
-            ("Base Win Adj",f"{r.get(\'base_adj\',0):+.3f}"),
-            ("Ramped Adj (today)",f"{r.get(\'ramped_adj\',0):+.3f}"),
+            ("Adjusted Score",f"{r.get('adjusted_score',0):.2f}"),
+            ("Base Win Adj",f"{r.get('base_adj',0):+.3f}"),
+            ("Ramped Adj (today)",f"{r.get('ramped_adj',0):+.3f}"),
             ("Luck Regression",f"{-(lw*LUCK_REGRESSION_FACTOR)/gr:+.4f}"),
-            ("SoS Adjustment",f"{r.get(\'sos_adjustment\',0):+.4f}"),
-            ("Final Adj Win%",f"{r.get(\'adj_win_pct\',0):.3f}"),
+            ("SoS Adjustment",f"{r.get('sos_adjustment',0):+.4f}"),
+            ("Final Adj Win%",f"{r.get('adj_win_pct',0):.3f}"),
             ("Deadline Ramp",f"{get_deadline_ramp_factor():.1%}"),
         ]: st.markdown(f"- **{k}:** {v}")
     st.markdown("---")
@@ -664,7 +684,7 @@ def render_methodology_tab():
     st.markdown("## 📖 Methodology & Model Architecture")
     st.caption(f"Data last updated: {get_last_updated()}")
     st.markdown("""Built around one insight: **no existing system accounts for what happens when a team sells at the deadline.**
-Teams underperforming due to injuries are systematically undervalued — their odds don\'t reflect the roster they\'ll have in August.""")
+Teams underperforming due to injuries are systematically undervalued — their odds don't reflect the roster they'll have in August.""")
     with st.expander("📊 Data Sources"):
         st.markdown("""| Source | Frequency | Purpose |
 |---|---|---|
@@ -708,7 +728,7 @@ Before ramp start, no adjustment applied to projected records.""")
 Two parallel runs: post-deadline (with adj) and pre-deadline (without adj) for Deadline Impact comparison.""")
 
 # ==============================================================================
-# MAIN
+# MAIN APP
 # ==============================================================================
 def load_all_data():
     cached = load_cache()
@@ -750,6 +770,22 @@ def load_all_data():
     return mst,sim,sch
 
 def main():
+    # Check for required PECOTA files on first load
+    if not os.path.exists(PECOTA_HIT_PATH) or not os.path.exists(PECOTA_PIT_PATH):
+        st.error("❌ Missing PECOTA data files")
+        st.markdown(f"""
+        Please provide PECOTA projection files:
+        - Hitters: `{PECOTA_HIT_PATH}`
+        - Pitchers: `{PECOTA_PIT_PATH}`
+        
+        Or set environment variables:
+        ```bash
+        export PECOTA_HIT_PATH=/path/to/hitters.json
+        export PECOTA_PIT_PATH=/path/to/pitchers.json
+        ```
+        """)
+        st.stop()
+    
     lc,tc=st.columns([1,8])
     if os.path.exists("rc_logo.png"): lc.image("rc_logo.png",width=80)
     else: lc.markdown("⚾")
@@ -770,14 +806,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-'''
-
-# Inject PECOTA data
-hit_json = open("/tmp/ph.json").read()
-pit_json = open("/tmp/pp.json").read()
-APP = APP.replace("HIT_JSON_PLACEHOLDER", repr(hit_json))
-APP = APP.replace("PIT_JSON_PLACEHOLDER", repr(pit_json))
-
-with open("/home/claude/streamlit_app.py", "w") as f:
-    f.write(APP)
-print(f"Written: {APP.count(chr(10))} lines")
