@@ -2,8 +2,8 @@
 MLB 2026 Season Projections
 Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
-✅ Fixed: Array leak '[125.5 125.5 125.5]' (Pure Python weighting logic)
-✅ Fixed: Pandas 2.x dtype crashes (Explicit scalar enforcement)
+✅ Fixed: 'high <= 0' crash in simulation (empty qualifiers guard)
+✅ Fixed: Pandas dtype 'int64' leaks
 ✅ Fixed: Streamlit deprecation warnings
 """
 import os, json, warnings, sys
@@ -216,7 +216,6 @@ def fetch_standings():
         wc_pool = lg_df[~lg_df.index.isin(div_leaders)].sort_values("win_pct",ascending=False)
         wc_cutoff = wc_pool.iloc[2]["win_pct"] if len(wc_pool)>=3 else (wc_pool.iloc[-1]["win_pct"] if len(wc_pool)>0 else 0.5)
         
-        # Safe assignment using values to prevent index alignment quirks
         vals = lg_df["wc_games_back"].copy()
         for idx, row in lg_df.iterrows():
             if idx in div_leaders.values: 
@@ -406,7 +405,6 @@ def fetch_team_projections(standings_df, roster_map):
         
         pecota_ops = LEAGUE_AVG_OPS
         if not ph_team.empty:
-            # PURE PYTHON LIST MATH: Completely eliminates Pandas Series array leaks
             pa_vals = ph_team["pa"].fillna(0).tolist()
             mlbids = ph_team["mlbid"].tolist()
             ops_vals = ph_team["ops"].fillna(LEAGUE_AVG_OPS).tolist()
@@ -489,15 +487,15 @@ def fetch_team_projections(standings_df, roster_map):
             if not il_players.empty:
                 il_warp = float(il_players["warp"].fillna(0).clip(lower=0).sum())
         
-        # Strict Scalar Enforcement
-        rows.append({
+        clean_row = {
             "team_id": int(tid),
             "proj_runs_per_game": round(float(np.clip(proj_rpg, 2.5, 7.5)), 3),
             "proj_ra_per_game": round(float(np.clip(proj_rapg, 2.5, 7.5)), 3),
             "proj_win_pct": round(float(np.clip(proj_wp, 0.0, 1.0)), 4),
             "il_warp": round(float(np.clip(il_warp, 0.0, None)), 2),
             "proj_source": "PECOTA+Statcast"
-        })
+        }
+        rows.append(clean_row)
         
     prj = pd.DataFrame(rows)
     if not prj.empty:
@@ -512,7 +510,6 @@ def pythag(rs, ra):
 
 def build_master(std, prj):
     df = std.copy()
-    # Aggressive sanitization before any math
     df = sanitize_df(df)
     prj = sanitize_df(prj)
     
@@ -521,7 +518,6 @@ def build_master(std, prj):
     
     df = df.merge(prj[["team_id","proj_win_pct","proj_runs_per_game","proj_ra_per_game","proj_source","il_warp"]], on="team_id", how="left")
     
-    # Fill missing projections with league average
     for c in ["proj_win_pct","proj_runs_per_game","proj_ra_per_game","il_warp"]:
         df[c] = df[c].fillna(0.0).astype(float)
             
@@ -588,6 +584,7 @@ def log5(a, b): return (a - a * b) / (a + b - 2 * a * b + 1e-9)
 
 def _sim_once(mdf, sch, wp_col, rng):
     tids = mdf["team_id"].tolist()
+    if not tids: return ({}, {}, {}, {})
     n = len(tids)
     idx = {t: i for i, t in enumerate(tids)}
     init = np.array([float(mdf.set_index("team_id")["wins"].get(t, 0)) for t in tids], dtype=np.float32)
@@ -595,38 +592,49 @@ def _sim_once(mdf, sch, wp_col, rng):
     rem = get_remaining_games(sch)
     if rem.empty:
         return ({t: float(init[idx[t]]) for t in tids}, {t: 0.0 for t in tids}, {t: 0.0 for t in tids}, {t: 0.0 for t in tids})
+    
     h, a = rem["home_team_id"].values.astype(int), rem["away_team_id"].values.astype(int)
     valid = np.array([(x in idx and y in idx) for x, y in zip(h, a)])
     h, a = h[valid], a[valid]
+    
+    if len(h) == 0:
+        return ({t: float(init[idx[t]]) for t in tids}, {t: 0.0 for t in tids}, {t: 0.0 for t in tids}, {t: 0.0 for t in tids})
+
     ap = np.array([log5(wp.get(x, 0.5), wp.get(y, 0.5)) for x, y in zip(h, a)], dtype=np.float32)
     hi, ai = np.array([idx[x] for x in h]), np.array([idx[x] for x in a])
     f = np.full((N_SIMULATIONS, n), init, dtype=np.float32)
-    if len(h) > 0:
-        r = rng.random((N_SIMULATIONS, len(h)), dtype=np.float32)
-        hw = (r < ap[np.newaxis, :]).astype(np.float32)
-        np.add.at(f, (np.arange(N_SIMULATIONS)[:, None], hi), hw)
-        np.add.at(f, (np.arange(N_SIMULATIONS)[:, None], ai), 1 - hw)
+    
+    r = rng.random((N_SIMULATIONS, len(h)), dtype=np.float32)
+    hw = (r < ap[np.newaxis, :]).astype(np.float32)
+    np.add.at(f, (np.arange(N_SIMULATIONS)[:, None], hi), hw)
+    np.add.at(f, (np.arange(N_SIMULATIONS)[:, None], ai), 1 - hw)
+    
     div_map = mdf.set_index("team_id")["division"].to_dict()
     lg_map = mdf.set_index("team_id")["league"].to_dict()
     div_odds = {t: 0.0 for t in tids}
     po_odds = {t: 0.0 for t in tids}
     ws_odds = {t: 0.0 for t in tids}
+    
     for si in range(N_SIMULATIONS):
         wins_i = {t: float(f[si][idx[t]]) for t in tids}
         for lg in ["AL", "NL"]:
-            lg_t = [t for t in tids if lg_map[t] == lg]
+            lg_t = [t for t in tids if lg_map.get(t) == lg]
+            if not lg_t: continue
             divs = {}
-            for t in lg_t: divs.setdefault(div_map[t], []).append(t)
+            for t in lg_t: divs.setdefault(div_map.get(t), []).append(t)
             qual = set()
             for d, dt in divs.items():
-                w = max(dt, key=lambda t: wins_i[t])
-                qual.add(w)
-                div_odds[w] += 1
+                if dt:
+                    w = max(dt, key=lambda t: wins_i[t])
+                    qual.add(w)
+                    div_odds[w] += 1
             wc = [t for t in sorted(lg_t, key=lambda t: -wins_i[t]) if t not in qual]
             for t in wc[:3]: qual.add(t)
             for t in qual: po_odds[t] += 1
             pl = list(qual)
-            ws_odds[pl[rng.integers(len(pl))]] += 1
+            if pl:
+                ws_odds[pl[rng.integers(len(pl))]] += 1
+                
     d = N_SIMULATIONS
     pw = {t: float(f.mean(0)[idx[t]]) for t in tids}
     std = {t: float(f.std(0)[idx[t]]) for t in tids}
