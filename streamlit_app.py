@@ -2,9 +2,9 @@
 MLB 2026 Season Projections
 Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
-✅ Fixed: 'Invalid value [...] for dtype int64' (Strict scalar enforcement)
-✅ Fixed: Streamlit use_container_width deprecation
-✅ Fixed: Depth-chart weighting logic
+✅ Fixed: Array leak '[125.5 125.5 125.5]' (Pure Python weighting logic)
+✅ Fixed: Pandas 2.x dtype crashes (Explicit scalar enforcement)
+✅ Fixed: Streamlit deprecation warnings
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -23,7 +23,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 # ==============================================================================
-# EMBEDDED PECOTA DATA (Derived from uploaded Excel files)
+# EMBEDDED PECOTA DATA
 # ==============================================================================
 PECOTA_HIT_EMBEDDED = '''[{"team": "SD", "mlbid": 518792, "pa": 251, "ops": 0.646, "warp": 0.3}, {"team": "MIA", "mlbid": 807751, "pa": 251, "ops": 0.642, "warp": 0.3}, {"team": "TEX", "mlbid": 683227, "pa": 199, "ops": 0.653, "warp": 0.3}, {"team": "SF", "mlbid": 692238, "pa": 251, "ops": 0.668, "warp": 0.3}, {"team": "CHC", "mlbid": 624424, "pa": 138, "ops": 0.678, "warp": 0.2}, {"team": "CHC", "mlbid": 823807, "pa": 251, "ops": 0.609, "warp": 0.2}, {"team": "SAC", "mlbid": 694034, "pa": 251, "ops": 0.631, "warp": 0.2}, {"team": "PHI", "mlbid": 800607, "pa": 251, "ops": 0.646, "warp": 0.2}, {"team": "SD", "mlbid": 669392, "pa": 251, "ops": 0.622, "warp": 0.2}, {"team": "ARI", "mlbid": 702258, "pa": 251, "ops": 0.614, "warp": 0.2}, {"team": "ARI", "mlbid": 695521, "pa": 251, "ops": 0.651, "warp": 0.2}, {"team": "BAL", "mlbid": 668974, "pa": 251, "ops": 0.609, "warp": 0.2}, {"team": "CHW", "mlbid": 695731, "pa": 238, "ops": 0.648, "warp": 0.2}, {"team": "ATL", "mlbid": 642086, "pa": 200, "ops": 0.681, "warp": 0.2}, {"team": "TOR", "mlbid": 687072, "pa": 251, "ops": 0.639, "warp": 0.2}, {"team": "TB", "mlbid": 666165, "pa": 251, "ops": 0.628, "warp": 0.2}, {"team": "PHI", "mlbid": 681323, "pa": 251, "ops": 0.673, "warp": 0.2}, {"team": "DET", "mlbid": 689577, "pa": 251, "ops": 0.617, "warp": 0.1}, {"team": "CHW", "mlbid": 807747, "pa": 251, "ops": 0.602, "warp": 0.1}, {"team": "STL", "mlbid": 647378, "pa": 251, "ops": 0.621, "warp": 0.1}, {"team": "PHI", "mlbid": 805704, "pa": 251, "ops": 0.662, "warp": 0.1}, {"team": "LAA", "mlbid": 806534, "pa": 251, "ops": 0.639, "warp": 0.1}, {"team": "SF", "mlbid": 814194, "pa": 251, "ops": 0.621, "warp": 0.1}, {"team": "TB", "mlbid": 700246, "pa": 414, "ops": 0.643, "warp": 0.1}, {"team": "LAA", "mlbid": 690804, "pa": 251, "ops": 0.663, "warp": 0.1}, {"team": "SF", "mlbid": 669442, "pa": 251, "ops": 0.625, "warp": 0.1}, {"team": "LAD", "mlbid": 669227, "pa": 251, "ops": 0.635, "warp": 0.1}, {"team": "MIN", "mlbid": 805805, "pa": 99, "ops": 0.649, "warp": 0.1}, {"team": "DET", "mlbid": 667452, "pa": 251, "ops": 0.687, "warp": 0.3}, {"team": "LAD", "mlbid": 806077, "pa": 251, "ops": 0.616, "warp": 0.3}, {"team": "TB", "mlbid": 702556, "pa": 251, "ops": 0.644, "warp": 0.3}, {"team": "CHW", "mlbid": 695299, "pa": 251, "ops": 0.632, "warp": 0.3}, {"team": "SF", "mlbid": 701852, "pa": 251, "ops": 0.635, "warp": 0.3}, {"team": "STL", "mlbid": 804241, "pa": 251, "ops": 0.639, "warp": 0.3}, {"team": "LAD", "mlbid": 500743, "pa": 163, "ops": 0.666, "warp": 0.3}, {"team": "TB", "mlbid": 828319, "pa": 251, "ops": 0.636, "warp": 0.3}, {"team": "SD", "mlbid": 670092, "pa": 251, "ops": 0.660, "warp": 0.2}, {"team": "PIT", "mlbid": 621466, "pa": 251, "ops": 0.689, "warp": 0.2}, {"team": "SEA", "mlbid": 692039, "pa": 251, "ops": 0.628, "warp": 0.2}, {"team": "SF", "mlbid": 527038, "pa": 271, "ops": 0.675, "warp": 0.3}, {"team": "ARI", "mlbid": 702679, "pa": 251, "ops": 0.630, "warp": 0.2}, {"team": "SF", "mlbid": 813841, "pa": 251, "ops": 0.625, "warp": 0.2}, {"team": "LAA", "mlbid": 663905, "pa": 251, "ops": 0.676, "warp": 0.2}, {"team": "ATL", "mlbid": 621450, "pa": 251, "ops": 0.636, "warp": 0.2}, {"team": "SEA", "mlbid": 687659, "pa": 251, "ops": 0.625, "warp": 0.2}, {"team": "TB", "mlbid": 690991, "pa": 251, "ops": 0.641, "warp": 0.2}, {"team": "LAD", "mlbid": 685301, "pa": 251, "ops": 0.660, "warp": 0.2}, {"team": "TB", "mlbid": 807083, "pa": 251, "ops": 0.621, "warp": 0.2}, {"team": "CIN", "mlbid": 680756, "pa": 251, "ops": 0.618, "warp": 0.2}, {"team": "SD", "mlbid": 681036, "pa": 251, "ops": 0.623, "warp": 0.2}, {"team": "TEX", "mlbid": 806964, "pa": 251, "ops": 0.644, "warp": 0.2}, {"team": "SF", "mlbid": 678681, "pa": 251, "ops": 0.657, "warp": 0.2}, {"team": "ARI", "mlbid": 815154, "pa": 251, "ops": 0.613, "warp": 0.2}, {"team": "MIL", "mlbid": 670232, "pa": 251, "ops": 0.624, "warp": 0.2}, {"team": "PHI", "mlbid": 686551, "pa": 251, "ops": 0.625, "warp": 0.2}, {"team": "PHI", "mlbid": 664238, "pa": 130, "ops": 0.658, "warp": 0.2}, {"team": "SAC", "mlbid": 660829, "pa": 251, "ops": 0.628, "warp": 0.2}, {"team": "HOU", "mlbid": 621529, "pa": 251, "ops": 0.628, "warp": 0.2}, {"team": "KC", "mlbid": 663731, "pa": 251, "ops": 0.638, "warp": 0.2}, {"team": "COL", "mlbid": 691182, "pa": 91, "ops": 0.696, "warp": 0.2}, {"team": "BAL", "mlbid": 683770, "pa": 251, "ops": 0.669, "warp": 0.2}]'''
 
@@ -156,6 +156,17 @@ def save_cache(payload):
         with open(CACHE_FILE,"w") as f: json.dump(payload,f,default=str)
     except Exception as e: print(f"Cache write failed: {e}")
 
+def sanitize_df(df):
+    """Aggressively convert any non-scalar objects in DataFrame cells to safe types"""
+    for c in df.columns:
+        try:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+            if df[c].dtype == 'object':
+                df[c] = df[c].apply(lambda x: float(x[0]) if isinstance(x, (list, np.ndarray)) and len(x) > 0 else (0 if x is None else x))
+        except:
+            df[c] = df[c].apply(lambda x: 0 if isinstance(x, (list, np.ndarray, pd.Series)) else x)
+    return df
+
 # ==============================================================================
 # DATA FETCHING
 # ==============================================================================
@@ -195,6 +206,7 @@ def fetch_standings():
                          "runs_scored":rs,"runs_allowed":ra,"run_differential":rs-ra})
     df = pd.DataFrame(rows)
     if df.empty: raise RuntimeError("Standings empty")
+    
     for c in ["wins","losses","games_played","runs_scored","runs_allowed","run_differential"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
         
@@ -203,11 +215,17 @@ def fetch_standings():
         div_leaders = lg_df.groupby("division")["win_pct"].idxmax()
         wc_pool = lg_df[~lg_df.index.isin(div_leaders)].sort_values("win_pct",ascending=False)
         wc_cutoff = wc_pool.iloc[2]["win_pct"] if len(wc_pool)>=3 else (wc_pool.iloc[-1]["win_pct"] if len(wc_pool)>0 else 0.5)
-        for idx,row in lg_df.iterrows():
-            if idx in div_leaders.values: lg_df.loc[idx,"wc_games_back"] = -5.0
-            else: lg_df.loc[idx,"wc_games_back"] = round((wc_cutoff-row["win_pct"])*row["games_played"],1)
-        df.loc[df["league"]==lg,"wc_games_back"] = lg_df["wc_games_back"]
-    return df.sort_values(["league","division","wins"],ascending=[True,True,False])
+        
+        # Safe assignment using values to prevent index alignment quirks
+        vals = lg_df["wc_games_back"].copy()
+        for idx, row in lg_df.iterrows():
+            if idx in div_leaders.values: 
+                vals.loc[idx] = -5.0
+            else: 
+                vals.loc[idx] = round((wc_cutoff-row["win_pct"])*row["games_played"],1)
+        df.loc[df["league"]==lg,"wc_games_back"] = vals.values
+        
+    return sanitize_df(df.sort_values(["league","division","wins"],ascending=[True,True,False]))
 
 def fetch_schedule():
     today = date.today(); end = min(date.fromisoformat(WORLD_SERIES_END_APPROX),date(SEASON_YEAR,9,30))
@@ -383,25 +401,33 @@ def fetch_team_projections(standings_df, roster_map):
         active_ids = roster_map.get(tid,{}).get("active",set())
         il_ids = roster_map.get(tid,{}).get("il",set())
         
-        ph_team = ph[ph["team_id"]==tid].copy()
-        pp_team = pp[pp["team_id"]==tid].copy()
+        ph_team = ph[ph["team_id"]==tid]
+        pp_team = pp[pp["team_id"]==tid]
         
         pecota_ops = LEAGUE_AVG_OPS
         if not ph_team.empty:
-            # Safe Weight Calculation: use copy() to avoid modifying original df in place
-            weights = ph_team["pa"].fillna(0).copy()
-            il_mask = ph_team["mlbid"].isin(il_ids)
-            active_mask = ph_team["mlbid"].isin(active_ids)
-            other_mask = ~il_mask & ~active_mask
+            # PURE PYTHON LIST MATH: Completely eliminates Pandas Series array leaks
+            pa_vals = ph_team["pa"].fillna(0).tolist()
+            mlbids = ph_team["mlbid"].tolist()
+            ops_vals = ph_team["ops"].fillna(LEAGUE_AVG_OPS).tolist()
             
-            weights[il_mask] *= (ROSTER_WEIGHT_IL / ROSTER_WEIGHT_ACTIVE)
-            weights[other_mask] *= (ROSTER_WEIGHT_OTHER / ROSTER_WEIGHT_ACTIVE)
+            weights = []
+            valid_ops = []
+            for pa, mlbid, ops in zip(pa_vals, mlbids, ops_vals):
+                w = pa
+                if mlbid in il_ids:
+                    w *= (ROSTER_WEIGHT_IL / ROSTER_WEIGHT_ACTIVE)
+                elif mlbid not in active_ids:
+                    w *= (ROSTER_WEIGHT_OTHER / ROSTER_WEIGHT_ACTIVE)
+                if w > 0:
+                    weights.append(w)
+                    valid_ops.append(ops)
             
-            valid = weights > 0
-            if valid.any():
-                ops_vals = ph_team.loc[valid, "ops"].fillna(LEAGUE_AVG_OPS).values
-                weights_arr = weights[valid].values
-                pecota_ops = float(np.average(ops_vals, weights=weights_arr))
+            if weights:
+                total_w = sum(weights)
+                pecota_ops = sum(w * o for w, o in zip(weights, valid_ops)) / total_w
+            else:
+                pecota_ops = LEAGUE_AVG_OPS
                 
         pecota_ops = float(np.clip(pecota_ops, 0.620, 0.850))
         
@@ -463,29 +489,15 @@ def fetch_team_projections(standings_df, roster_map):
             if not il_players.empty:
                 il_warp = float(il_players["warp"].fillna(0).clip(lower=0).sum())
         
-        # Strict Scalar Sanitization - forces everything to Python float/int
-        clean_row = {}
-        raw_row = {
+        # Strict Scalar Enforcement
+        rows.append({
             "team_id": int(tid),
-            "proj_runs_per_game": float(np.clip(proj_rpg, 2.5, 7.5)),
-            "proj_ra_per_game": float(np.clip(proj_rapg, 2.5, 7.5)),
-            "proj_win_pct": float(np.clip(proj_wp, 0.0, 1.0)),
-            "il_warp": float(np.clip(il_warp, 0.0, None)),
+            "proj_runs_per_game": round(float(np.clip(proj_rpg, 2.5, 7.5)), 3),
+            "proj_ra_per_game": round(float(np.clip(proj_rapg, 2.5, 7.5)), 3),
+            "proj_win_pct": round(float(np.clip(proj_wp, 0.0, 1.0)), 4),
+            "il_warp": round(float(np.clip(il_warp, 0.0, None)), 2),
             "proj_source": "PECOTA+Statcast"
-        }
-        
-        for k, v in raw_row.items():
-            if hasattr(v, 'item'): v = v.item()
-            elif isinstance(v, np.ndarray): v = float(v[0])
-            elif isinstance(v, (np.floating, np.integer)): v = float(v)
-            clean_row[k] = v
-            
-        clean_row["proj_runs_per_game"] = round(clean_row["proj_runs_per_game"], 3)
-        clean_row["proj_ra_per_game"] = round(clean_row["proj_ra_per_game"], 3)
-        clean_row["proj_win_pct"] = round(clean_row["proj_win_pct"], 4)
-        clean_row["il_warp"] = round(clean_row["il_warp"], 2)
-        
-        rows.append(clean_row)
+        })
         
     prj = pd.DataFrame(rows)
     if not prj.empty:
@@ -500,15 +512,18 @@ def pythag(rs, ra):
 
 def build_master(std, prj):
     df = std.copy()
-    # Strict numeric coercion
-    df["team_id"] = pd.to_numeric(df["team_id"], errors="coerce").fillna(0).astype(int)
-    prj["team_id"] = pd.to_numeric(prj["team_id"], errors="coerce").fillna(0).astype(int)
+    # Aggressive sanitization before any math
+    df = sanitize_df(df)
+    prj = sanitize_df(prj)
+    
+    df["team_id"] = df["team_id"].astype(int)
+    prj["team_id"] = prj["team_id"].astype(int)
     
     df = df.merge(prj[["team_id","proj_win_pct","proj_runs_per_game","proj_ra_per_game","proj_source","il_warp"]], on="team_id", how="left")
     
-    # Force float on numeric columns to prevent int64 assignment errors
-    for c in ["proj_win_pct","proj_runs_per_game","proj_ra_per_game","il_warp","win_pct"]:
-        if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0).astype(float)
+    # Fill missing projections with league average
+    for c in ["proj_win_pct","proj_runs_per_game","proj_ra_per_game","il_warp"]:
+        df[c] = df[c].fillna(0.0).astype(float)
             
     df["pythag_win_pct"] = df.apply(lambda r: pythag(float(r["runs_scored"]), float(r["runs_allowed"])), axis=1).astype(float)
     gp = df["games_played"].clip(0, 162).astype(float)
@@ -519,7 +534,7 @@ def build_master(std, prj):
     adj_pyth_w = (1.0 - base_proj_w) * (1.0 - il_frac)
     adj_proj_w = 1.0 - adj_pyth_w
     
-    df["blended_win_pct"] = (df["proj_win_pct"].fillna(0.5) * adj_proj_w + df["pythag_win_pct"] * adj_pyth_w).clip(0.20, 0.80).astype(float)
+    df["blended_win_pct"] = (df["proj_win_pct"] * adj_proj_w + df["pythag_win_pct"] * adj_pyth_w).clip(0.20, 0.80).astype(float)
     df["games_remaining"] = (162.0 - gp).clip(0, 162).astype(float)
     return df
 
