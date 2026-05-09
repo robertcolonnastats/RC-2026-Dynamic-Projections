@@ -44,7 +44,7 @@ DEADLINE_RAMP_START      = "2026-05-20"
 MLB_API_BASE             = "https://statsapi.mlb.com/api/v1"
 N_SIMULATIONS            = 1_000
 RANDOM_SEED              = 42
-PYTHAG_EXPONENT          = 3.00
+PYTHAG_EXPONENT          = 1.50
 CACHE_DIR                = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE               = "/tmp/rc_mlb_2026_v19/latest.json"
 CACHE_VERSION            = "v19-wired-constants"
@@ -60,7 +60,7 @@ PRIOR_HIST_2025_WEIGHT   = 0.30
 PRIOR_HIST_2024_WEIGHT   = 0.15
 
 # ── Statcast influence ────────────────────────────────────────────────────────
-STATCAST_INFLUENCE       = 0.50
+STATCAST_INFLUENCE       = 0.30
 
 # ── Active roster weights ─────────────────────────────────────────────────────
 ROSTER_WEIGHT_ACTIVE     = 600.0
@@ -97,8 +97,8 @@ ADJ_HARD_BUYER           = +0.07
 ADJ_SCALE                =  0.015
 
 # ── Luck regression & SoS ────────────────────────────────────────────────────
-LUCK_REGRESSION_FACTOR   = 0.40
-SOS_SENSITIVITY          = 0.15
+LUCK_REGRESSION_FACTOR   = 0.80
+SOS_SENSITIVITY          = 0.05
 
 # ==============================================================================
 # TEAM INFO
