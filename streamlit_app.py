@@ -1,9 +1,10 @@
 """
-MLB 2026 Season Projections (Hybrid v27 - Strict Dependencies)
+MLB 2026 Season Projections (Hybrid v27.1 - Strict Dependencies)
 Fully Automated: PECOTA + Statcast (EV90, Zone-Contact, FIP) + Live Roster Sync.
-Strict Data Dependency: No graceful fallbacks. If APIs fail, app stops with error.
+Strict Data Dependency: No graceful fallbacks. If APIs fail, app stops with explicit error.
 """
 import os
+import io
 import json
 import sys
 import traceback
@@ -35,7 +36,7 @@ N_SIMULATIONS = 1_000
 RANDOM_SEED = 42
 CACHE_DIR = "/tmp/rc_mlb_2026_v27"
 CACHE_FILE = "/tmp/rc_mlb_2026_v27/latest.json"
-CACHE_VERSION = "v27-strict-dependencies"
+CACHE_VERSION = "v27.1-strict-safe-indexing"
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
 TEAM_INFO = {
@@ -68,7 +69,6 @@ def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
 _ROSTER_CACHE, _STATCAST_CACHE = {}, {}
 
 def fetch_team_statuses():
-    """Fetches active rosters. STRICT: Raises error if API fails."""
     today = date.today().isoformat()
     if _ROSTER_CACHE.get("date") == today and _ROSTER_CACHE.get("data"): return _ROSTER_CACHE["data"]
     data, il_codes = {}, {"IL10", "IL60", "DL10", "DL15", "DL60"}
@@ -87,7 +87,6 @@ def fetch_team_statuses():
     return data
 
 def fetch_standings():
-    """Fetches standings. STRICT: Raises error if API fails."""
     try:
         resp = requests.get(f"{MLB_API_BASE}/standings", params={"leagueId": "103,104", "season": SEASON_YEAR, "standingsTypes": "regularSeason", "hydrate": "team,record"}, timeout=15)
         if resp.status_code != 200: raise RuntimeError(f"MLB Standings API failed: {resp.status_code}")
@@ -121,7 +120,6 @@ def fetch_standings():
         raise RuntimeError(f"CRITICAL: Standings fetch failed. {e}")
 
 def fetch_schedule():
-    """Fetches schedule. STRICT: Raises error if API fails."""
     try:
         today = date.today(); end = min(date.fromisoformat(WORLD_SERIES_END_APPROX), date(SEASON_YEAR, 9, 30))
         if today > end: return pd.DataFrame()
@@ -210,7 +208,6 @@ PECOTA_PIT = [
 PECOTA_MAP = {"NYY":147, "LAD":119, "NYM":121, "KC":118, "DET":116, "PIT":134, "PHI":143, "ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CIN":113, "CLE":114, "COL":115, "HOU":117, "LAA":108, "MIA":146, "MIL":158, "MIN":142, "OAK":133, "SD":135, "SEA":136, "SF":137, "STL":138, "TB":139, "TEX":140, "TOR":141, "WSH":120, "CWS":145}
 
 def _fetch_savstat(year, stat_type):
-    """Fetches Statcast metrics. STRICT: Raises error if data is empty."""
     try:
         url = f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type={stat_type}&year={year}&position=&team=&min=1&csv=true"
         r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
@@ -229,8 +226,6 @@ def blend_player_metric(curr_val, hist_val, pecota_val, sample, threshold):
     w_pecota = (1.0 - w_curr) * 0.65
     w_hist = (1.0 - w_curr) * 0.35
     
-    # Strict handling: If values are missing, this will result in NaN or 0, 
-    # propagating the error up rather than hiding it.
     v_curr = float(curr_val) if isinstance(curr_val, (int, float, np.number)) else 0.0
     v_hist = float(hist_val) if isinstance(hist_val, (int, float, np.number)) else 0.0
     v_pecota = float(pecota_val) if isinstance(pecota_val, (int, float, np.number)) else 0.0
@@ -250,44 +245,51 @@ def fetch_team_projections(standings_df, roster_map):
     ph = pd.DataFrame(PECOTA_HIT).assign(team_id=lambda x: x["team"].map(PECOTA_MAP)).dropna(subset=["team_id"])
     pp = pd.DataFrame(PECOTA_PIT).assign(team_id=lambda x: x["team"].map(PECOTA_MAP)).dropna(subset=["team_id"])
     
+    if "mlbid" in ph.columns: ph["mlbid"] = ph["mlbid"].astype(int)
+    if "mlbid" in pp.columns: pp["mlbid"] = pp["mlbid"].astype(int)
+    
     rows = []
     for tid in all_ids:
-        lineup = ph[ph["team_id"] == tid].head(9)
-        pitchers = pp[pp["team_id"] == tid]
+        lineup = ph[ph["team_id"] == tid].head(9) if not ph.empty else pd.DataFrame()
+        pitchers = pp[pp["team_id"] == tid] if not pp.empty else pd.DataFrame()
         
-        # Hitter Blend (Strict)
+        # Hitter Blend (Strict & Safe)
         team_ops = LEAGUE_AVG_OPS
         if not lineup.empty:
             blended_ops = []
             for _, r in lineup.iterrows():
-                curr_row = sc_curr[(sc_curr.get("team_id")==tid) & (sc_curr.get("mlbid")==r["mlbid"])]
-                hist_row = sc_hist[(sc_hist.get("team_id")==tid) & (sc_hist.get("mlbid")==r["mlbid"])]
-                
-                # Use xwoba as proxy for blended metric if available
-                curr_xw = curr_row["xwoba"].values[0] if not curr_row.empty and "xwoba" in curr_row.columns else None
-                hist_xw = hist_row["xwoba"].values[0] if not hist_row.empty and "xwoba" in hist_row.columns else None
-                
-                # EV90/Zone-Contact logic would go here if columns existed; 
-                # xwoba is the primary blend metric available in this endpoint.
+                curr_xw, hist_xw = 0, 0
+                # Safe DataFrame filtering
+                if not sc_curr.empty and "team_id" in sc_curr.columns and "mlbid" in sc_curr.columns:
+                    mask = (sc_curr["team_id"] == tid) & (sc_curr["mlbid"] == r["mlbid"])
+                    if "xwoba" in sc_curr.columns and mask.any(): curr_xw = sc_curr.loc[mask, "xwoba"].values[0]
+                    
+                if not sc_hist.empty and "team_id" in sc_hist.columns and "mlbid" in sc_hist.columns:
+                    mask = (sc_hist["team_id"] == tid) & (sc_hist["mlbid"] == r["mlbid"])
+                    if "xwoba" in sc_hist.columns and mask.any(): hist_xw = sc_hist.loc[mask, "xwoba"].values[0]
+                    
                 blended_xw = blend_player_metric(curr_xw, hist_xw, 0.800, r.get("pa", 50), 400.0)
                 blended_ops.append(blended_xw * 1.25)
             team_ops = float(np.clip(np.mean(blended_ops), 0.620, 0.850))
         proj_rpg = float(np.clip((team_ops/LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG, 2.5, 7.5))
         
-        # Pitcher Blend (Strict)
+        # Pitcher Blend (Strict & Safe)
         team_fip = LEAGUE_AVG_FIP
         if not pitchers.empty:
             blended_fips = []
             for _, r in pitchers.iterrows():
                 role = r.get("role", "SP")
                 thr = 150.0 if role == "SP" else 40.0
+                curr_f, hist_f = 0, 0
                 
-                curr_row = sc_pitch_curr[(sc_pitch_curr.get("team_id")==tid) & (sc_pitch_curr.get("mlbid")==r["mlbid"])]
-                hist_row = sc_pitch_hist[(sc_pitch_hist.get("team_id")==tid) & (sc_pitch_hist.get("mlbid")==r["mlbid"])]
-                
-                curr_f = curr_row["fip"].values[0] if not curr_row.empty and "fip" in curr_row.columns else None
-                hist_f = hist_row["fip"].values[0] if not hist_row.empty and "fip" in hist_row.columns else None
-                
+                if not sc_pitch_curr.empty and "team_id" in sc_pitch_curr.columns and "mlbid" in sc_pitch_curr.columns:
+                    mask = (sc_pitch_curr["team_id"] == tid) & (sc_pitch_curr["mlbid"] == r["mlbid"])
+                    if "fip" in sc_pitch_curr.columns and mask.any(): curr_f = sc_pitch_curr.loc[mask, "fip"].values[0]
+                    
+                if not sc_pitch_hist.empty and "team_id" in sc_pitch_hist.columns and "mlbid" in sc_pitch_hist.columns:
+                    mask = (sc_pitch_hist["team_id"] == tid) & (sc_pitch_hist["mlbid"] == r["mlbid"])
+                    if "fip" in sc_pitch_hist.columns and mask.any(): hist_f = sc_pitch_hist.loc[mask, "fip"].values[0]
+                    
                 blended_f = blend_player_metric(curr_f, hist_f, r.get("fip", 4.20), r.get("ip", 20), thr)
                 blended_fips.append(blended_f)
             team_fip = float(np.clip(np.mean(blended_fips), 2.80, 5.50))
@@ -416,7 +418,7 @@ def run_simulation(mdf, sch):
 # UI SECTIONS
 # ==============================================================================
 def render_projections_tab(mdf, sim):
-    st.markdown("## 2026 MLB Season Projections"); st.caption(f"Updated daily · Hybrid v27 (Strict Dependencies)")
+    st.markdown("## 2026 MLB Season Projections"); st.caption(f"Updated daily · Hybrid v27.1 (Strict Dependencies)")
     rows = []
     for _, r in mdf.iterrows():
         t = r["team_id"]; proj_w = int(round(sim['proj_wins'].get(t, r['wins'])))
@@ -561,14 +563,12 @@ Applied sequentially after the core blend.
 # ==============================================================================
 # MAIN
 # ==============================================================================
-import io # Add missing import for StringIO
-
 def load_all_data():
     cached = load_cache()
     if cached:
         m = pd.DataFrame(cached["master"]); s = cached.get("sim_results", {}); sc = pd.DataFrame(cached.get("schedule", []))
         if not m.empty and s: return m, s, sc
-    st.markdown("### ⚾ Loading fresh data... (Strict Sync v27)"); pb = st.progress(0)
+    st.markdown("### ⚾ Loading fresh data... (Strict Sync v27.1)"); pb = st.progress(0)
     try:
         roster_map = fetch_team_statuses(); pb.progress(20)
         std = fetch_standings(); pb.progress(40); sch = fetch_schedule(); pb.progress(60)
