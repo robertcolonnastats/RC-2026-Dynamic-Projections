@@ -55,9 +55,9 @@ IP_FULL_WEIGHT_SP        = 150
 IP_FULL_WEIGHT_RP        = 40
 
 # ── Prior signal split ────────────────────────────────────────────────────────
-PRIOR_PECOTA_WEIGHT      = 0.70
-PRIOR_HIST_2025_WEIGHT   = 0.20
-PRIOR_HIST_2024_WEIGHT   = 0.10
+PRIOR_PECOTA_WEIGHT      = 0.50
+PRIOR_HIST_2025_WEIGHT   = 0.30
+PRIOR_HIST_2024_WEIGHT   = 0.20
 
 # ── Statcast influence ────────────────────────────────────────────────────────
 STATCAST_INFLUENCE       = 1.00
@@ -97,7 +97,7 @@ ADJ_HARD_BUYER           = +0.07
 ADJ_SCALE                =  0.015
 
 # ── Luck regression & SoS ────────────────────────────────────────────────────
-LUCK_REGRESSION_FACTOR   = 0.50
+LUCK_REGRESSION_FACTOR   = 2.00
 SOS_SENSITIVITY          = 0.05
 
 # ==============================================================================
