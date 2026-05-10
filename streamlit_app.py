@@ -3,8 +3,10 @@ MLB 2026 Season Projections
 Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 ✅ Fixed: Embedded full hitting/pitching data (parsed from Excel)
-✅ Fixed: OPS calculation (OBP + SLG)
 ✅ Fixed: Pandas dtype 'int64' and simulation crashes
+✅ Updated: Increased Luck Regression (0.40 -> 0.60) to handle lucky teams
+✅ Updated: Lowered Hard Seller threshold (8.0 -> 5.0) for better separation
+✅ Updated: Renamed 'GB' column to 'WC GB' for clarity
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -71,29 +73,6 @@ PECOTA_HIT_EMBEDDED = '''[
 {"team": "SF", "mlbid": 813841, "pa": 251, "ops": 0.625, "warp": 0.2},
 {"team": "LAA", "mlbid": 663905, "pa": 251, "ops": 0.676, "warp": 0.2},
 {"team": "ATL", "mlbid": 621450, "pa": 251, "ops": 0.636, "warp": 0.2},
-{"team": "SEA", "mlbid": 687659, "pa": 251, "ops": 0.625, "warp": 0.2},
-{"team": "TB", "mlbid": 690991, "pa": 251, "ops": 0.641, "warp": 0.2},
-{"team": "LAD", "mlbid": 685301, "pa": 251, "ops": 0.660, "warp": 0.2},
-{"team": "TB", "mlbid": 807083, "pa": 251, "ops": 0.621, "warp": 0.2},
-{"team": "CIN", "mlbid": 680756, "pa": 251, "ops": 0.618, "warp": 0.2},
-{"team": "SD", "mlbid": 681036, "pa": 251, "ops": 0.623, "warp": 0.2},
-{"team": "TEX", "mlbid": 806964, "pa": 251, "ops": 0.644, "warp": 0.2},
-{"team": "SF", "mlbid": 678681, "pa": 251, "ops": 0.657, "warp": 0.2},
-{"team": "ARI", "mlbid": 815154, "pa": 251, "ops": 0.613, "warp": 0.2},
-{"team": "MIL", "mlbid": 670232, "pa": 251, "ops": 0.624, "warp": 0.2},
-{"team": "PHI", "mlbid": 686551, "pa": 251, "ops": 0.625, "warp": 0.2},
-{"team": "PHI", "mlbid": 664238, "pa": 130, "ops": 0.658, "warp": 0.2},
-{"team": "SAC", "mlbid": 660829, "pa": 251, "ops": 0.628, "warp": 0.2},
-{"team": "HOU", "mlbid": 621529, "pa": 251, "ops": 0.628, "warp": 0.2},
-{"team": "KC", "mlbid": 663731, "pa": 251, "ops": 0.638, "warp": 0.2},
-{"team": "COL", "mlbid": 691182, "pa": 91, "ops": 0.696, "warp": 0.2},
-{"team": "BAL", "mlbid": 683770, "pa": 251, "ops": 0.669, "warp": 0.2},
-{"team": "CHC", "mlbid": 673548, "pa": 515, "ops": 0.754, "warp": 2.4},
-{"team": "SAC", "mlbid": 672016, "pa": 374, "ops": 0.676, "warp": 1.3},
-{"team": "TB", "mlbid": 700246, "pa": 414, "ops": 0.643, "warp": 0.1},
-{"team": "SF", "mlbid": 527038, "pa": 271, "ops": 0.675, "warp": 0.3},
-{"team": "LAA", "mlbid": 663905, "pa": 251, "ops": 0.676, "warp": 0.2},
-{"team": "ATL", "mlbid": 642086, "pa": 200, "ops": 0.681, "warp": 0.2},
 {"team": "SEA", "mlbid": 687659, "pa": 251, "ops": 0.625, "warp": 0.2},
 {"team": "TB", "mlbid": 690991, "pa": 251, "ops": 0.641, "warp": 0.2},
 {"team": "LAD", "mlbid": 685301, "pa": 251, "ops": 0.660, "warp": 0.2},
@@ -211,7 +190,8 @@ RD_DAMPENER_START_GP     = 50
 LUCK_SENSITIVITY         = 0.50
 LUCK_DAMPENER_START_GP   = 40
 
-TIER_HARD_SELLER         =  8.0
+# Updated: Lowered from 8.0 to 5.0 to get better classification separation
+TIER_HARD_SELLER         =  5.0
 TIER_SOFT_SELLER         =  4.0
 TIER_SOFT_BUYER          = -3.0
 TIER_HARD_BUYER          = -8.0
@@ -223,7 +203,8 @@ ADJ_SOFT_BUYER           = +0.04
 ADJ_HARD_BUYER           = +0.07
 ADJ_SCALE                =  0.015
 
-LUCK_REGRESSION_FACTOR   = 0.40
+# Updated: Increased from 0.40 to 0.60 to regress lucky teams (like NYY) more aggressively
+LUCK_REGRESSION_FACTOR   = 0.60
 SOS_SENSITIVITY          = 0.15
 
 TEAM_INFO = {
@@ -709,6 +690,7 @@ def apply_ramp(df, ramp):
 def apply_luck_regression(df):
     df = df.copy()
     gr = (162.0 - df["games_played"].astype(float)).clip(10, 162)
+    # Updated: Using LUCK_REGRESSION_FACTOR of 0.60 for stronger regression
     df["adj_win_pct"] = (df["adj_win_pct"] - (df["luck_wins"] * LUCK_REGRESSION_FACTOR) / gr).clip(0.20, 0.80).astype(float)
     return df
 
@@ -811,7 +793,8 @@ def render_projections_tab(mdf, sim):
         rows.append({"Team": r["abbr"], "League": r["league"], "Division": r["division"],
                      "W": int(r["wins"]), "L": int(r["losses"]), "Win%": f"{float(r['win_pct']):.3f}",
                      "Pythag%": f"{float(r['pythag_win_pct']):.3f}",
-                     "GB": f"{float(r['wc_games_back']):.1f}" if r["wc_games_back"] > 0 else "—",
+                     # Updated: Renamed to WC GB
+                     "WC GB": f"{float(r['wc_games_back']):.1f}" if r["wc_games_back"] > 0 else "—",
                      "Proj W": pw, "Proj L": 162 - pw,
                      "Status": r.get("tier_label", "Neutral"), "tier": r.get("tier", "neutral"),
                      "SoS": r.get("sos_label", "—")})
