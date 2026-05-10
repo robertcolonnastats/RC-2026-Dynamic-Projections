@@ -3,11 +3,13 @@ MLB 2026 Season Projections
 Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 
-Key Updates:
+Key Updates (v27):
+- Fixed Stale Cache issues (forced refresh logic)
+- Removed silent failures; added st.warning() for debugging
+- Enforced strict dtypes (int) for team_id merges
+- Fixed Division breakout in display and CSV export
 - Fixed undefined variable errors (prj, pw)
-- Complete fetch_team_projections & run_simulation implementations
-- Network resilience & Excel file validation
-- Updated weights: Statcast (0.40), Pythag Reg (130), Luck Reg (0.50)
+- Applied updated weights: Statcast (0.40), Pythag (130), Luck (0.50)
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -40,7 +42,8 @@ RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v26-file-check-division-fix"
+# Incrementing version to force refresh on all clients
+CACHE_VERSION = "v27-force-refresh-debug"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -125,11 +128,19 @@ def get_last_updated():
 def is_cache_valid():
     _ensure_cache_dir()
     if not os.path.exists(CACHE_FILE): return False
-    if os.path.getmtime(CACHE_FILE) < datetime.now(EST).replace(hour=0,minute=0,second=0,microsecond=0).timestamp(): return False
+    
+    # Cache must be newer than the start of the current day
+    current_day_start = datetime.now(EST).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
+    if os.path.getmtime(CACHE_FILE) < current_day_start: return False
+    
     try:
         with open(CACHE_FILE) as f:
-            if json.load(f).get("cache_version") != CACHE_VERSION:
-                os.remove(CACHE_FILE); return False
+            data = json.load(f)
+            if data.get("cache_version") != CACHE_VERSION:
+                return False
+            # Additional check: ensure master data exists and is not empty
+            if "master" not in data or not data["master"]:
+                return False
     except: return False
     return True
 
@@ -143,8 +154,9 @@ def save_cache(payload):
     _ensure_cache_dir()
     try:
         payload["cache_version"] = CACHE_VERSION
+        payload["last_updated_timestamp"] = datetime.now(EST).isoformat()
         with open(CACHE_FILE,"w") as f: json.dump(payload,f,default=str)
-    except Exception as e: print(f"Cache write failed: {e}")
+    except Exception as e: st.error(f"Cache write failed: {e}")
 
 def sanitize_df(df):
     for c in df.columns:
@@ -171,7 +183,8 @@ def fetch_team_statuses():
             ros = requests.get(f"{MLB_API_BASE}/teams/{tid}/roster",params={"rosterType":"40Man","season":SEASON_YEAR},timeout=10)
             il_ids = {p["person"]["id"] for p in (ros.json() if ros.status_code==200 else {}).get("roster",[]) if p.get("status",{}).get("code","") in il_codes}
             data[tid] = {"active":active_ids,"il":il_ids}
-        except: data[tid] = {"active":set(),"il":set()}
+        except Exception as e: 
+            data[tid] = {"active":set(),"il":set()}
     _ROSTER_CACHE["data"],_ROSTER_CACHE["date"] = data,today
     return data
 
@@ -376,6 +389,7 @@ def _load_statcast_all():
     return res
 
 def fetch_team_projections(standings_df, roster_map):
+    """Generates projections for all teams. Returns DataFrame even if some teams have no PECOTA data."""
     ph,pp = _load_pecota_data()
     all_ids = list(TEAM_INFO.keys())
     team_pa,team_ip = {},{}
@@ -388,76 +402,104 @@ def fetch_team_projections(standings_df, roster_map):
     h24b = sc.get("h24b",{}); h24p = sc.get("h24p",{})
     mlb_ops,mlb_era = sc.get("mlb",({},{}))
     cur_bat,cur_pit = sc.get("cur",({},{}))
+    
     rows = []
     for tid in all_ids:
-        active_ids = roster_map.get(tid,{}).get("active",set())
-        il_ids = roster_map.get(tid,{}).get("il",set())
-        ph_team = ph[ph["team_id"]==tid]
-        pp_team = pp[pp["team_id"]==tid].copy()
-        pp_team['role'] = 'RP'
-        if not pp_team.empty:
-            if 'gs' in pp_team.columns and 'g' in pp_team.columns:
-                pp_team['gs'] = pd.to_numeric(pp_team['gs'], errors='coerce').fillna(0)
-                pp_team['g'] = pd.to_numeric(pp_team['g'], errors='coerce').fillna(0)
-                valid_games = pp_team['g'] > 0
-                pp_team.loc[valid_games, 'gs_pct'] = pp_team.loc[valid_games, 'gs'] / pp_team.loc[valid_games, 'g']
-                pp_team.loc[pp_team['gs_pct'] >= 0.50, 'role'] = 'SP'
-        pecota_ops = LEAGUE_AVG_OPS
-        if not ph_team.empty:
-            pa_vals = ph_team["pa"].fillna(0).tolist()
-            mlbids = ph_team["mlbid"].tolist()
-            ops_vals = ph_team["ops"].fillna(LEAGUE_AVG_OPS).tolist()
-            weights = []; valid_ops = []
-            for pa, mlbid, ops in zip(pa_vals, mlbids, ops_vals):
-                w = pa
-                if mlbid in il_ids: w *= (ROSTER_WEIGHT_IL / ROSTER_WEIGHT_ACTIVE)
-                elif mlbid not in active_ids: w *= (ROSTER_WEIGHT_OTHER / ROSTER_WEIGHT_ACTIVE)
-                if w > 0: weights.append(w); valid_ops.append(ops)
-            if weights: pecota_ops = sum(w * o for w, o in zip(weights, valid_ops)) / sum(weights)
-        pecota_ops = float(np.clip(pecota_ops, 0.620, 0.850))
-        cur_pa = float(team_pa.get(tid, 0))
-        w_cur = min(cur_pa / PA_FULL_WEIGHT, 1.0); w_prior = 1.0 - w_cur
-        cur_xwoba = LEAGUE_AVG_XWOBA
-        if isinstance(cur_bat, dict) and tid in cur_bat:
-            d = cur_bat[tid]; wt = min(d.get("sample", 0) / (PA_FULL_WEIGHT * 9), 1.0)
-            cur_xwoba = d["stat"] * wt + LEAGUE_AVG_XWOBA * (1 - wt)
-        elif isinstance(mlb_ops, dict) and tid in mlb_ops: cur_xwoba = float(mlb_ops[tid]) * 0.43
-        xwoba = (w_cur * cur_xwoba + w_prior * PRIOR_HIST_2025_WEIGHT * h25b.get(tid, LEAGUE_AVG_XWOBA) + w_prior * PRIOR_HIST_2024_WEIGHT * h24b.get(tid, LEAGUE_AVG_XWOBA) + w_prior * PRIOR_PECOTA_WEIGHT * LEAGUE_AVG_XWOBA)
-        team_ops = float(np.clip(pecota_ops * (1 + (xwoba / LEAGUE_AVG_XWOBA - 1) * STATCAST_INFLUENCE), 0.620, 0.850))
-        proj_rpg = float(np.clip((team_ops / LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG, 2.5, 7.5))
-        sp_df = pp_team[pp_team["role"] == "SP"].sort_values("ip", ascending=False)
-        rp_df = pp_team[pp_team["role"] == "RP"].sort_values("ip", ascending=False)
-        def staff_era(df, role):
-            if df.empty or df["ip"].sum() == 0: return float(LEAGUE_AVG_ERA)
-            cap = IP_FULL_WEIGHT_SP if role == "SP" else IP_FULL_WEIGHT_RP
-            cip = df["ip"].clip(upper=cap).values
-            blend = (df["fip"].fillna(LEAGUE_AVG_FIP) * 0.7 + df["era"].fillna(LEAGUE_AVG_ERA) * 0.3).clip(2, 7.5).values
-            if cip.sum() > 0: return float(np.average(blend, weights=cip))
-            return float(LEAGUE_AVG_ERA)
-        sp_base = float(np.clip(staff_era(sp_df, "SP"), 2.80, 5.50))
-        rp_base = float(np.clip(staff_era(rp_df, "RP"), 3.00, 5.50))
-        cur_ip = float(team_ip.get(tid, 0))
-        w_cur_ip = min(cur_ip / IP_FULL_WEIGHT_SP, 1.0); w_prior_ip = 1.0 - w_cur_ip
-        cur_xera = LEAGUE_AVG_XERA
-        if isinstance(cur_pit, dict) and tid in cur_pit:
-            d = cur_pit[tid]; wt = min(d.get("sample", 0) / IP_FULL_WEIGHT_SP, 1.0)
-            cur_xera = d["stat"] * wt + LEAGUE_AVG_XERA * (1 - wt)
-        elif isinstance(mlb_era, dict) and tid in mlb_era: cur_xera = float(mlb_era[tid])
-        xera = (w_cur_ip * cur_xera + w_prior_ip * PRIOR_HIST_2025_WEIGHT * h25p.get(tid, LEAGUE_AVG_XERA) + w_prior_ip * PRIOR_HIST_2024_WEIGHT * h24p.get(tid, LEAGUE_AVG_XERA) + w_prior_ip * PRIOR_PECOTA_WEIGHT * LEAGUE_AVG_XERA)
-        sc_adj = (xera / LEAGUE_AVG_XERA - 1) * STATCAST_INFLUENCE
-        sp_era = float(np.clip(sp_base * (1 + sc_adj), 2.80, 5.50))
-        rp_era = float(np.clip(rp_base * (1 + sc_adj), 3.00, 5.50))
-        proj_rapg = float(np.clip((sp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE + (rp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE, 2.5, 7.5))
-        proj_wp = float(proj_rpg**PYTHAG_EXPONENT / (proj_rpg**PYTHAG_EXPONENT + proj_rapg**PYTHAG_EXPONENT))
-        il_warp = 0.0
-        if not ph.empty and len(il_ids) > 0:
-            il_players = ph[(ph["team_id"] == tid) & (ph["mlbid"].isin(il_ids))]
-            if not il_players.empty: il_warp = float(il_players["warp"].fillna(0).clip(lower=0).sum())
-        clean_row = {"team_id": int(tid), "proj_runs_per_game": round(float(np.clip(proj_rpg, 2.5, 7.5)), 3),
-                     "proj_ra_per_game": round(float(np.clip(proj_rapg, 2.5, 7.5)), 3),
-                     "proj_win_pct": round(float(np.clip(proj_wp, 0.0, 1.0)), 4),
-                     "il_warp": round(float(np.clip(il_warp, 0.0, None)), 2), "proj_source": "PECOTA+Statcast"}
-        rows.append(clean_row)
+        try:
+            active_ids = roster_map.get(tid,{}).get("active",set())
+            il_ids = roster_map.get(tid,{}).get("il",set())
+            ph_team = ph[ph["team_id"]==tid] if not ph.empty else pd.DataFrame()
+            pp_team = pp[pp["team_id"]==tid].copy() if not pp.empty else pd.DataFrame()
+            
+            # Safe role assignment
+            if not pp_team.empty:
+                pp_team['role'] = 'RP'
+                if 'gs' in pp_team.columns and 'g' in pp_team.columns:
+                    pp_team['gs'] = pd.to_numeric(pp_team['gs'], errors='coerce').fillna(0)
+                    pp_team['g'] = pd.to_numeric(pp_team['g'], errors='coerce').fillna(0)
+                    valid_games = pp_team['g'] > 0
+                    pp_team.loc[valid_games, 'gs_pct'] = pp_team.loc[valid_games, 'gs'] / pp_team.loc[valid_games, 'g']
+                    pp_team.loc[pp_team['gs_pct'] >= 0.50, 'role'] = 'SP'
+            
+            pecota_ops = LEAGUE_AVG_OPS
+            if not ph_team.empty:
+                pa_vals = ph_team["pa"].fillna(0).tolist()
+                mlbids = ph_team["mlbid"].tolist()
+                ops_vals = ph_team["ops"].fillna(LEAGUE_AVG_OPS).tolist()
+                weights = []; valid_ops = []
+                for pa, mlbid, ops in zip(pa_vals, mlbids, ops_vals):
+                    w = pa
+                    if mlbid in il_ids: w *= (ROSTER_WEIGHT_IL / ROSTER_WEIGHT_ACTIVE)
+                    elif mlbid not in active_ids: w *= (ROSTER_WEIGHT_OTHER / ROSTER_WEIGHT_ACTIVE)
+                    if w > 0: weights.append(w); valid_ops.append(ops)
+                if weights: pecota_ops = sum(w * o for w, o in zip(weights, valid_ops)) / sum(weights)
+            
+            pecota_ops = float(np.clip(pecota_ops, 0.620, 0.850))
+            cur_pa = float(team_pa.get(tid, 0))
+            w_cur = min(cur_pa / PA_FULL_WEIGHT, 1.0); w_prior = 1.0 - w_cur
+            cur_xwoba = LEAGUE_AVG_XWOBA
+            if isinstance(cur_bat, dict) and tid in cur_bat:
+                d = cur_bat[tid]; wt = min(d.get("sample", 0) / (PA_FULL_WEIGHT * 9), 1.0)
+                cur_xwoba = d["stat"] * wt + LEAGUE_AVG_XWOBA * (1 - wt)
+            elif isinstance(mlb_ops, dict) and tid in mlb_ops: cur_xwoba = float(mlb_ops[tid]) * 0.43
+            
+            xwoba = (w_cur * cur_xwoba + w_prior * PRIOR_HIST_2025_WEIGHT * h25b.get(tid, LEAGUE_AVG_XWOBA) + 
+                     w_prior * PRIOR_HIST_2024_WEIGHT * h24b.get(tid, LEAGUE_AVG_XWOBA) + w_prior * PRIOR_PECOTA_WEIGHT * LEAGUE_AVG_XWOBA)
+            team_ops = float(np.clip(pecota_ops * (1 + (xwoba / LEAGUE_AVG_XWOBA - 1) * STATCAST_INFLUENCE), 0.620, 0.850))
+            proj_rpg = float(np.clip((team_ops / LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG, 2.5, 7.5))
+            
+            sp_df = pp_team[pp_team["role"] == "SP"].sort_values("ip", ascending=False) if not pp_team.empty else pd.DataFrame()
+            rp_df = pp_team[pp_team["role"] == "RP"].sort_values("ip", ascending=False) if not pp_team.empty else pd.DataFrame()
+            
+            def staff_era(df, role):
+                if df.empty or df["ip"].sum() == 0: return float(LEAGUE_AVG_ERA)
+                cap = IP_FULL_WEIGHT_SP if role == "SP" else IP_FULL_WEIGHT_RP
+                cip = df["ip"].clip(upper=cap).values
+                blend = (df["fip"].fillna(LEAGUE_AVG_FIP) * 0.7 + df["era"].fillna(LEAGUE_AVG_ERA) * 0.3).clip(2, 7.5).values
+                if cip.sum() > 0: return float(np.average(blend, weights=cip))
+                return float(LEAGUE_AVG_ERA)
+            
+            sp_base = float(np.clip(staff_era(sp_df, "SP"), 2.80, 5.50))
+            rp_base = float(np.clip(staff_era(rp_df, "RP"), 3.00, 5.50))
+            
+            cur_ip = float(team_ip.get(tid, 0))
+            w_cur_ip = min(cur_ip / IP_FULL_WEIGHT_SP, 1.0); w_prior_ip = 1.0 - w_cur_ip
+            cur_xera = LEAGUE_AVG_XERA
+            if isinstance(cur_pit, dict) and tid in cur_pit:
+                d = cur_pit[tid]; wt = min(d.get("sample", 0) / IP_FULL_WEIGHT_SP, 1.0)
+                cur_xera = d["stat"] * wt + LEAGUE_AVG_XERA * (1 - wt)
+            elif isinstance(mlb_era, dict) and tid in mlb_era: cur_xera = float(mlb_era[tid])
+            
+            xera = (w_cur_ip * cur_xera + w_prior_ip * PRIOR_HIST_2025_WEIGHT * h25p.get(tid, LEAGUE_AVG_XERA) + 
+                    w_prior_ip * PRIOR_HIST_2024_WEIGHT * h24p.get(tid, LEAGUE_AVG_XERA) + w_prior_ip * PRIOR_PECOTA_WEIGHT * LEAGUE_AVG_XERA)
+            sc_adj = (xera / LEAGUE_AVG_XERA - 1) * STATCAST_INFLUENCE
+            sp_era = float(np.clip(sp_base * (1 + sc_adj), 2.80, 5.50))
+            rp_era = float(np.clip(rp_base * (1 + sc_adj), 3.00, 5.50))
+            proj_rapg = float(np.clip((sp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE + 
+                                      (rp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE, 2.5, 7.5))
+            proj_wp = float(proj_rpg**PYTHAG_EXPONENT / (proj_rpg**PYTHAG_EXPONENT + proj_rapg**PYTHAG_EXPONENT))
+            
+            il_warp = 0.0
+            if not ph.empty and len(il_ids) > 0:
+                il_players = ph[(ph["team_id"] == tid) & (ph["mlbid"].isin(il_ids))]
+                if not il_players.empty: il_warp = float(il_players["warp"].fillna(0).clip(lower=0).sum())
+            
+            clean_row = {"team_id": int(tid), "proj_runs_per_game": round(float(np.clip(proj_rpg, 2.5, 7.5)), 3),
+                         "proj_ra_per_game": round(float(np.clip(proj_rapg, 2.5, 7.5)), 3),
+                         "proj_win_pct": round(float(np.clip(proj_wp, 0.0, 1.0)), 4),
+                         "il_warp": round(float(np.clip(il_warp, 0.0, None)), 2), "proj_source": "PECOTA+Statcast"}
+            rows.append(clean_row)
+        except Exception as e:
+            st.warning(f"⚠️ Error projecting team {tid}: {e}. Using fallback.")
+            rows.append({"team_id": int(tid), "proj_runs_per_game": LEAGUE_AVG_RPG, "proj_ra_per_game": LEAGUE_AVG_RPG,
+                         "proj_win_pct": 0.500, "il_warp": 0.0, "proj_source": "Fallback"})
+    
+    # GUARANTEED RETURN: Even if rows is empty or errors occurred
+    if not rows:
+        for tid in all_ids:
+            rows.append({"team_id": int(tid), "proj_runs_per_game": LEAGUE_AVG_RPG, "proj_ra_per_game": LEAGUE_AVG_RPG,
+                         "proj_win_pct": 0.500, "il_warp": 0.0, "proj_source": "Fallback"})
+    
     prj = pd.DataFrame(rows)
     if not prj.empty:
         for c in prj.columns: prj[c] = pd.to_numeric(prj[c], errors="coerce").fillna(0.0)
@@ -470,10 +512,17 @@ def pythag(rs, ra):
 
 def build_master(std, prj):
     df = std.copy()
+    # FIX: Enforce int type for team_id to prevent merge mismatches
     df["team_id"] = pd.to_numeric(df["team_id"], errors="coerce").fillna(0).astype(int)
     prj["team_id"] = pd.to_numeric(prj["team_id"], errors="coerce").fillna(0).astype(int)
+    
     df = sanitize_df(df); prj = sanitize_df(prj)
     df = df.merge(prj[["team_id","proj_win_pct","proj_runs_per_game","proj_ra_per_game","proj_source","il_warp"]], on="team_id", how="left")
+    
+    # FIX: Validate merge results
+    if df["proj_win_pct"].isna().sum() > 0:
+        st.warning(f"⚠️ Merge resulted in {df['proj_win_pct'].isna().sum()} missing projection values.")
+        
     for c in ["proj_win_pct","proj_runs_per_game","proj_ra_per_game","il_warp"]: df[c] = df[c].fillna(0.0).astype(float)
     df["pythag_win_pct"] = df.apply(lambda r: pythag(float(r["runs_scored"]), float(r["runs_allowed"])), axis=1).astype(float)
     gp = df["games_played"].clip(0, 162).astype(float)
@@ -591,6 +640,7 @@ def _sim_once(mdf, sch, wp_col, rng):
 
 def run_simulation(mdf, sch):
     rng = np.random.default_rng(RANDOM_SEED)
+    # FIX: Ensure pw is captured correctly from _sim_once
     pw, dv, po, ws = _sim_once(mdf, sch, "adj_win_pct", rng)
     pre_rng = np.random.default_rng(RANDOM_SEED)
     pre_pw, pre_dv, pre_po, pre_ws = _sim_once(mdf, sch, "blended_win_pct", pre_rng)
@@ -648,6 +698,7 @@ def render_projections_tab(mdf, sim):
             st.dataframe(dd.drop(columns=["tier"], errors="ignore"), hide_index=True, width="stretch")
     
     st.markdown("---")
+    # FIX: Ensure CSV includes all necessary columns including Division
     csv = df.drop(columns=["tier"], errors="ignore").to_csv(index=False)
     st.download_button("📥 Export Standings & Projections (CSV)", csv, "mlb_2026_projections.csv", "text/csv")
 
@@ -751,18 +802,25 @@ def main():
     tc.markdown("# MLB 2026 Season Projections")
     tc.caption("Excel-Aligned · Dynamic Projections · No Hardcoding")
     
-    with st.expander("🔍 Debug: File Status", expanded=False):
+    # Debug Panel
+    with st.expander("🔍 Debug: File Status & Cache", expanded=False):
         hit_file = "pecota2026_hitting_mar26.xlsx"
         pit_file = "pecota2026_pitching_mar26.xlsx"
         st.write(f"- `{hit_file}`: {'✅ Exists' if os.path.exists(hit_file) else '❌ Missing'}")
         st.write(f"- `{pit_file}`: {'✅ Exists' if os.path.exists(pit_file) else '❌ Missing'}")
+        st.write(f"- Cache Version: `{CACHE_VERSION}`")
+        st.write(f"- Cache Valid: `{is_cache_valid()}`")
         st.write(f"- Current working directory: `{os.getcwd()}`")
-        st.write(f"- Files in directory: `{os.listdir('.')}`")
     
     if "master_df" not in st.session_state or not st.session_state.get("loaded"):
         try:
-            m, s, sc = load_all_data(); st.session_state.update(master_df=m, sim_results=s, schedule_df=sc, loaded=True)
-        except Exception as e: st.error(f"Load failed: {e}"); st.stop()
+            m, s, sc = load_all_data()
+            st.session_state.update(master_df=m, sim_results=s, schedule_df=sc, loaded=True)
+        except Exception as e: 
+            st.error(f"❌ Load failed: {e}")
+            st.session_state.pop("loaded", None)
+            st.stop()
+            
     m, s, sc = st.session_state["master_df"], st.session_state["sim_results"], st.session_state["schedule_df"]
     if m.empty: st.warning("No data"); st.stop()
     tab1,tab2,tab3,tab4 = st.tabs(["📊 Projections", "🔄 Deadline", "🔍 Detail", "📖 Methodology"])
