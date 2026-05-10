@@ -1,14 +1,9 @@
 """
 MLB 2026 Season Projections
-Deadline-aware Monte Carlo projections for all 30 teams.
+Network-resilient version with fallbacks for API timeouts.
 Run with: streamlit run streamlit_app.py
-
-Key Updates:
-- Added strict checks for Excel files to prevent silent failures.
-- Updated weights: Statcast (0.40), Pythag Reg (130), Luck Reg (0.50).
-- Loading percentage indicator.
 """
-import os, json, warnings, sys
+import os, json, warnings, sys, time
 import requests, numpy as np, pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -25,8 +20,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 # ==============================================================================
-# EMBEDDED PECOTA DATA (Fallbacks - MUST BE EMPTY FOR SAFETY)
-# If Excel is missing, we want to error out, not use empty defaults.
+# EMBEDDED PECOTA DATA (Fallbacks)
 # ==============================================================================
 PECOTA_HIT_EMBEDDED = '[]'
 PECOTA_PIT_EMBEDDED = '[]'
@@ -34,54 +28,53 @@ PECOTA_PIT_EMBEDDED = '[]'
 # ==============================================================================
 # CONSTANTS
 # ==============================================================================
-SEASON_YEAR              = 2026
-OPENING_DAY              = "2026-03-27"
-WORLD_SERIES_END_APPROX  = "2026-11-01"
-TRADE_DEADLINE           = "2026-07-31"
-DEADLINE_RAMP_START      = "2026-05-20"
+SEASON_YEAR = 2026
+OPENING_DAY = "2026-03-27"
+WORLD_SERIES_END_APPROX = "2026-11-01"
+TRADE_DEADLINE = "2026-07-31"
+DEADLINE_RAMP_START = "2026-05-20"
 
-MLB_API_BASE             = "https://statsapi.mlb.com/api/v1"
-N_SIMULATIONS            = 1_000
-RANDOM_SEED              = 42
-PYTHAG_EXPONENT          = 1.83
-CACHE_DIR                = "/tmp/rc_mlb_2026_v19"
-CACHE_FILE               = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION            = "v24-file-check-update"
+MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
+N_SIMULATIONS = 1_000
+RANDOM_SEED = 42
+PYTHAG_EXPONENT = 1.83
+CACHE_DIR = "/tmp/rc_mlb_2026_v19"
+CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
+CACHE_VERSION = "v25-network-resilient"
 
-PA_FULL_WEIGHT           = 400
-IP_FULL_WEIGHT_SP        = 150
-IP_FULL_WEIGHT_RP        = 40
+PA_FULL_WEIGHT = 400
+IP_FULL_WEIGHT_SP = 150
+IP_FULL_WEIGHT_RP = 40
+PRIOR_PECOTA_WEIGHT = 0.45
+PRIOR_HIST_2025_WEIGHT = 0.35
+PRIOR_HIST_2024_WEIGHT = 0.20
 
-PRIOR_PECOTA_WEIGHT      = 0.45
-PRIOR_HIST_2025_WEIGHT   = 0.35
-PRIOR_HIST_2024_WEIGHT   = 0.20
-
-# UPDATED WEIGHTS
-STATCAST_INFLUENCE       = 0.40
-ROSTER_WEIGHT_ACTIVE     = 650.0
-ROSTER_WEIGHT_IL         = 8.0
-ROSTER_WEIGHT_OTHER      = 280.0
-TYPICAL_TEAM_WARP        = 35.0
-MAX_IL_FRAC              = 0.50
-PYTHAG_REGRESSION_PA     = 130
-PROJ_WEIGHT_MAX          = 0.75
-PROJ_WEIGHT_MIN          = 0.42
-TIER_HARD_SELLER         = 4.2
-TIER_SOFT_SELLER         = 3.2
-TIER_SOFT_BUYER          = -3.0
-TIER_HARD_BUYER          = -8.5
-RD_SENSITIVITY           = 0.025
-RD_DAMPENER_START_GP     = 50
-LUCK_SENSITIVITY         = 0.50
-LUCK_DAMPENER_START_GP   = 40
-LUCK_REGRESSION_FACTOR   = 0.50
-ADJ_HARD_SELLER          = -0.12
-ADJ_SOFT_SELLER          = -0.06
-ADJ_NEUTRAL              =  0.00
-ADJ_SOFT_BUYER           = +0.04
-ADJ_HARD_BUYER           = +0.07
-ADJ_SCALE                =  0.015
-SOS_SENSITIVITY          = 0.15
+# Weights aligned to target ranges
+STATCAST_INFLUENCE = 0.40
+ROSTER_WEIGHT_ACTIVE = 650.0
+ROSTER_WEIGHT_IL = 8.0
+ROSTER_WEIGHT_OTHER = 280.0
+TYPICAL_TEAM_WARP = 35.0
+MAX_IL_FRAC = 0.50
+PYTHAG_REGRESSION_PA = 130
+PROJ_WEIGHT_MAX = 0.75
+PROJ_WEIGHT_MIN = 0.42
+TIER_HARD_SELLER = 4.2
+TIER_SOFT_SELLER = 3.2
+TIER_SOFT_BUYER = -3.0
+TIER_HARD_BUYER = -8.5
+RD_SENSITIVITY = 0.025
+RD_DAMPENER_START_GP = 50
+LUCK_SENSITIVITY = 0.50
+LUCK_DAMPENER_START_GP = 40
+LUCK_REGRESSION_FACTOR = 0.50
+ADJ_HARD_SELLER = -0.12
+ADJ_SOFT_SELLER = -0.06
+ADJ_NEUTRAL = 0.00
+ADJ_SOFT_BUYER = +0.04
+ADJ_HARD_BUYER = +0.07
+ADJ_SCALE = 0.015
+SOS_SENSITIVITY = 0.15
 
 TEAM_INFO = {
     108:("Los Angeles Angels","LAA","AL West","AL"), 109:("Arizona Diamondbacks","ARI","NL West","NL"),
@@ -103,28 +96,32 @@ TEAM_INFO = {
 PECOTA_TEAM_MAP = {v[1]: k for k, v in TEAM_INFO.items()}
 TIER_LABELS = {"hard_seller":"Hard Seller","soft_seller":"Soft Seller","neutral":"Neutral","soft_buyer":"Soft Buyer","hard_buyer":"Hard Buyer"}
 TIER_COLORS = {"hard_seller":"#d62728","soft_seller":"#ff7f0e","neutral":"#7f7f7f","soft_buyer":"#2ca02c","hard_buyer":"#1f77b4"}
-TIER_EMOJI  = {"hard_seller":"🔴","soft_seller":"🟠","neutral":"⚪","soft_buyer":"🟢","hard_buyer":"🔵"}
+TIER_EMOJI = {"hard_seller":"🔴","soft_seller":"🟠","neutral":"⚪","soft_buyer":"🟢","hard_buyer":"🔵"}
 EST = ZoneInfo("America/New_York")
 
 # ==============================================================================
 # UTILS & CACHE
 # ==============================================================================
 def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
+
 def get_season_state():
     t,o,w,d,r = date.today(),date.fromisoformat(OPENING_DAY),date.fromisoformat(WORLD_SERIES_END_APPROX),date.fromisoformat(TRADE_DEADLINE),date.fromisoformat(DEADLINE_RAMP_START)
     if t<o or t>w: return "offseason"
     elif t>d: return "post_deadline"
     elif t>=r: return "deadline_ramp"
     return "pre_deadline"
+
 def get_deadline_ramp_factor():
     t,rs,dl = date.today(),date.fromisoformat(DEADLINE_RAMP_START),date.fromisoformat(TRADE_DEADLINE)
     if t<rs: return 0.0
     if t>=dl: return 1.0
     return round(min(max((t-rs).days/max((dl-rs).days,1),0.0),1.0),4)
+
 def get_last_updated():
     _ensure_cache_dir()
     if not os.path.exists(CACHE_FILE): return "Never"
     return datetime.fromtimestamp(os.path.getmtime(CACHE_FILE),tz=EST).strftime("%B %d, %Y at %I:%M %p EST")
+
 def is_cache_valid():
     _ensure_cache_dir()
     if not os.path.exists(CACHE_FILE): return False
@@ -135,17 +132,20 @@ def is_cache_valid():
                 os.remove(CACHE_FILE); return False
     except: return False
     return True
+
 def load_cache():
     if not is_cache_valid(): return None
     try:
         with open(CACHE_FILE) as f: return json.load(f)
     except: return None
+
 def save_cache(payload):
     _ensure_cache_dir()
     try:
         payload["cache_version"] = CACHE_VERSION
         with open(CACHE_FILE,"w") as f: json.dump(payload,f,default=str)
     except Exception as e: print(f"Cache write failed: {e}")
+
 def sanitize_df(df):
     for c in df.columns:
         if pd.api.types.is_numeric_dtype(df[c]):
@@ -157,8 +157,27 @@ def sanitize_df(df):
     return df
 
 # ==============================================================================
-# DATA FETCHING
+# DATA FETCHING (With Retry & Fallback)
 # ==============================================================================
+def safe_request(url, params, timeout=30, retries=3):
+    """Helper to make requests with retry logic"""
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+            if r.status_code == 200:
+                return r.json()
+        except requests.exceptions.Timeout:
+            if attempt == retries - 1:
+                st.warning(f"⚠️ Timeout fetching {url} after {retries} attempts")
+                return None
+            time.sleep(2 ** attempt)  # Exponential backoff
+        except requests.exceptions.RequestException as e:
+            if attempt == retries - 1:
+                st.warning(f"⚠️ Error fetching {url}: {e}")
+                return None
+            time.sleep(2 ** attempt)
+    return None
+
 _ROSTER_CACHE = {}
 def fetch_team_statuses():
     today = date.today().isoformat()
@@ -166,20 +185,29 @@ def fetch_team_statuses():
     data,il_codes = {},{"IL10","IL60","DL10","DL15","DL60","7DL","10DL","60DL"}
     for tid in TEAM_INFO:
         try:
-            act = requests.get(f"{MLB_API_BASE}/teams/{tid}/roster",params={"rosterType":"active","season":SEASON_YEAR},timeout=10)
-            active_ids = {p["person"]["id"] for p in act.json().get("roster",[]) if act.status_code==200}
-            ros = requests.get(f"{MLB_API_BASE}/teams/{tid}/roster",params={"rosterType":"40Man","season":SEASON_YEAR},timeout=10)
-            il_ids = {p["person"]["id"] for p in ros.json().get("roster",[]) if p.get("status",{}).get("code","") in il_codes} if ros.status_code==200 else set()
+            act_data = safe_request(f"{MLB_API_BASE}/teams/{tid}/roster", {"rosterType":"active","season":SEASON_YEAR})
+            active_ids = {p["person"]["id"] for p in (act_data or {}).get("roster",[])} if act_data else set()
+            ros_data = safe_request(f"{MLB_API_BASE}/teams/{tid}/roster", {"rosterType":"40Man","season":SEASON_YEAR})
+            il_ids = {p["person"]["id"] for p in (ros_data or {}).get("roster",[]) if p.get("status",{}).get("code","") in il_codes} if ros_data else set()
             data[tid] = {"active":active_ids,"il":il_ids}
         except: data[tid] = {"active":set(),"il":set()}
     _ROSTER_CACHE["data"],_ROSTER_CACHE["date"] = data,today
     return data
 
 def fetch_standings():
-    resp = requests.get(f"{MLB_API_BASE}/standings",params={"leagueId":"103,104","season":SEASON_YEAR,"standingsTypes":"regularSeason","hydrate":"team,record"},timeout=15)
-    resp.raise_for_status()
+    resp_data = safe_request(f"{MLB_API_BASE}/standings", {"leagueId":"103,104","season":SEASON_YEAR,"standingsTypes":"regularSeason","hydrate":"team,record"}, timeout=30)
+    if not resp_data:
+        st.warning("⚠️ Could not fetch standings. Using cached or fallback data.")
+        # Return minimal fallback standings
+        rows = []
+        for tid, (nm,ab,div,lg) in TEAM_INFO.items():
+            rows.append({"team_id":tid,"name":nm,"abbr":ab,"division":div,"league":lg,"wins":0,"losses":0,
+                         "games_played":0,"win_pct":0.500,"div_games_back":0.0,"wc_games_back":0.0,
+                         "runs_scored":0,"runs_allowed":0,"run_differential":0})
+        return pd.DataFrame(rows)
+        
     rows = []
-    for rec in resp.json().get("records",[]):
+    for rec in resp_data.get("records",[]):
         for tr in rec.get("teamRecords",[]):
             tid = tr["team"]["id"]
             if tid not in TEAM_INFO: continue
@@ -194,7 +222,14 @@ def fetch_standings():
                          "games_played":gp,"win_pct":round(wp,4),"div_games_back":gb,"wc_games_back":0.0,
                          "runs_scored":rs,"runs_allowed":ra,"run_differential":rs-ra})
     df = pd.DataFrame(rows)
-    if df.empty: raise RuntimeError("Standings empty")
+    if df.empty: 
+        st.warning("⚠️ Standings data empty. Using fallback.")
+        rows = []
+        for tid, (nm,ab,div,lg) in TEAM_INFO.items():
+            rows.append({"team_id":tid,"name":nm,"abbr":ab,"division":div,"league":lg,"wins":0,"losses":0,
+                         "games_played":0,"win_pct":0.500,"div_games_back":0.0,"wc_games_back":0.0,
+                         "runs_scored":0,"runs_allowed":0,"run_differential":0})
+        return pd.DataFrame(rows)
     for c in ["wins","losses","games_played","runs_scored","runs_allowed","run_differential"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
     for lg in ["AL","NL"]:
@@ -217,9 +252,9 @@ def fetch_schedule():
         ce = date(cs.year,12,31) if cs.month==12 else date(cs.year,cs.month+1,1)-timedelta(days=1)
         ce = min(ce,end)
         try:
-            r = requests.get(f"{MLB_API_BASE}/schedule",params={"sportId":1,"startDate":cs.isoformat(),"endDate":ce.isoformat(),"gameType":"R","season":SEASON_YEAR},timeout=20)
-            if r.status_code==200:
-                for d in r.json().get("dates",[]):
+            r_data = safe_request(f"{MLB_API_BASE}/schedule", {"sportId":1,"startDate":cs.isoformat(),"endDate":ce.isoformat(),"gameType":"R","season":SEASON_YEAR}, timeout=30)
+            if r_data:
+                for d in r_data.get("dates",[]):
                     for g in d.get("games",[]):
                         h,a = g.get("teams",{}).get("home",{}).get("team",{}).get("id"),g.get("teams",{}).get("away",{}).get("team",{}).get("id")
                         if h and a: games.append({"game_id":g.get("gamePk"),"game_date":d.get("date"),"home_team_id":int(h),"away_team_id":int(a),"status":g.get("status",{}).get("abstractGameState"," ")})
@@ -244,12 +279,12 @@ def compute_remaining_opponents(df):
 # ==============================================================================
 # PROJECTION ENGINE
 # ==============================================================================
-LEAGUE_AVG_RPG   = 4.50
-LEAGUE_AVG_FIP   = 4.10
-LEAGUE_AVG_OPS   = 0.730
-LEAGUE_AVG_ERA   = 4.20
+LEAGUE_AVG_RPG = 4.50
+LEAGUE_AVG_FIP = 4.10
+LEAGUE_AVG_OPS = 0.730
+LEAGUE_AVG_ERA = 4.20
 LEAGUE_AVG_XWOBA = 0.315
-LEAGUE_AVG_XERA  = 4.10
+LEAGUE_AVG_XERA = 4.10
 LEAGUE_SP_IP_SHARE = 0.57
 LEAGUE_RP_IP_SHARE = 0.43
 
@@ -264,25 +299,21 @@ def _load_pecota_data():
         hit_file = "pecota2026_hitting_mar26.xlsx"
         pit_file = "pecota2026_pitching_mar26.xlsx"
         
-        # 🔴 CRITICAL CHECK: Ensure files exist
         if not os.path.exists(hit_file) or not os.path.exists(pit_file):
-            st.error(f"❌ ERROR: Missing Data Files!")
-            st.warning(f"The following files must be uploaded to your repository:\n- `{hit_file}`\n- `{pit_file}`")
+            st.error(f"❌ ERROR: Missing PECOTA Excel files!")
+            st.warning(f"Please upload these files to your repository:\n- `{hit_file}`\n- `{pit_file}`")
             st.stop()
             
         st.info(f"Loading PECOTA data from `{hit_file}`...")
         hit_df = pd.read_excel(hit_file)
         pit_df = pd.read_excel(pit_file)
         
-        # Clean column names
         hit_df.columns = [col.strip().lower() for col in hit_df.columns]
         pit_df.columns = [col.strip().lower() for col in pit_df.columns]
         
-        # Calculate OPS if missing
         if 'ops' not in hit_df.columns and 'obp' in hit_df.columns and 'slg' in hit_df.columns:
             hit_df['ops'] = hit_df['obp'] + hit_df['slg']
             
-        # Map Team IDs
         hit_df["team_id"] = hit_df["team"].map(PECOTA_TEAM_MAP)
         pit_df["team_id"] = pit_df["team"].map(PECOTA_TEAM_MAP)
         
@@ -297,7 +328,7 @@ def _fetch_statcast_hist(year,stat_type):
     try:
         import io
         url = f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type={stat_type}&year={year}&position=&team=&min=q&csv=true"
-        r = requests.get(url,timeout=20,headers={"User-Agent":"Mozilla/5.0"})
+        r = requests.get(url,timeout=30,headers={"User-Agent":"Mozilla/5.0"})
         if r.status_code!=200 or len(r.content)<500: return {}
         df = pd.read_csv(io.StringIO(r.content.decode("utf-8")))
         sc = "xwoba" if stat_type=="batter" else "xera"
@@ -318,7 +349,7 @@ def _fetch_statcast_current(year):
     for stype,out,sc,sp in [("batter",bat_out,"xwoba","pa"),("pitcher",pit_out,"xera","p_formatted_ip")]:
         try:
             url = f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type={stype}&year={year}&position=&team=&min=1&csv=true"
-            r = requests.get(url,timeout=20,headers={"User-Agent":"Mozilla/5.0"})
+            r = requests.get(url,timeout=30,headers={"User-Agent":"Mozilla/5.0"})
             if r.status_code!=200 or len(r.content)<500: continue
             df = pd.read_csv(io.StringIO(r.content.decode("utf-8")))
             if sc not in df.columns or "team_id" not in df.columns: continue
@@ -336,7 +367,7 @@ def _fetch_mlb_ops_era(year):
     bat={}; pit={}
     for group,out,key in [("hitting",bat,"ops"),("pitching",pit,"era")]:
         try:
-            r = requests.get(f"{MLB_API_BASE}/teams/stats",params={"stats":"season","group":group,"season":year,"sportId":1},timeout=10)
+            r = requests.get(f"{MLB_API_BASE}/teams/stats",params={"stats":"season","group":group,"season":year,"sportId":1},timeout=15)
             if r.status_code!=200: continue
             for sg in r.json().get("stats",[]):
                 for sp in sg.get("splits",[]):
@@ -357,7 +388,7 @@ def _load_statcast_all():
         fcur = ex.submit(_fetch_statcast_current,SEASON_YEAR)
         res = {}
         for k,f in [("h25b",f25b),("h25p",f25p),("h24b",f24b),("h24p",f24p),("mlb",fmlb),("cur",fcur)]:
-            try: res[k] = f.result(timeout=25)
+            try: res[k] = f.result(timeout=30)
             except: res[k] = {} if k not in ("mlb","cur") else ({},{})
     return res
 
