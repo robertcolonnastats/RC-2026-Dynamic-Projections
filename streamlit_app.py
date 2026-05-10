@@ -2,8 +2,13 @@
 MLB 2026 Season Projections
 Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
-✅ Fixed: Added missing PROJ_WEIGHT_MIN constant
-✅ Fixed: Embedded full PECOTA data and applied weight adjustments
+
+Key Updates:
+- Added Percentage-Based Role Override: Checks current season GS/G via MLB API.
+  Pitchers are only classified as SP if GS/G >= 0.50. Prevents openers/swingmen from inflating SP stats.
+- Fixed Pandas int64/float dtype errors.
+- Adjusted weights (Statcast 0.55, Luck Reg 0.30).
+- Embedded full PECOTA Hitting & Pitching data.
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -22,161 +27,11 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 # ==============================================================================
-# EMBEDDED PECOTA DATA (Derived from uploaded Excel files)
+# EMBEDDED PECOTA DATA
 # ==============================================================================
+PECOTA_HIT_EMBEDDED = '''[{"team": "SD", "mlbid": 518792, "pa": 251, "ops": 0.646, "warp": 0.3}, {"team": "MIA", "mlbid": 807751, "pa": 251, "ops": 0.642, "warp": 0.3}, {"team": "TEX", "mlbid": 683227, "pa": 199, "ops": 0.653, "warp": 0.3}, {"team": "SF", "mlbid": 692238, "pa": 251, "ops": 0.668, "warp": 0.3}, {"team": "CHC", "mlbid": 624424, "pa": 138, "ops": 0.678, "warp": 0.2}, {"team": "CHC", "mlbid": 823807, "pa": 251, "ops": 0.609, "warp": 0.2}, {"team": "SAC", "mlbid": 694034, "pa": 251, "ops": 0.631, "warp": 0.2}, {"team": "PHI", "mlbid": 800607, "pa": 251, "ops": 0.646, "warp": 0.2}, {"team": "SD", "mlbid": 669392, "pa": 251, "ops": 0.622, "warp": 0.2}, {"team": "ARI", "mlbid": 702258, "pa": 251, "ops": 0.614, "warp": 0.2}, {"team": "ARI", "mlbid": 695521, "pa": 251, "ops": 0.651, "warp": 0.2}, {"team": "BAL", "mlbid": 668974, "pa": 251, "ops": 0.609, "warp": 0.2}, {"team": "CHW", "mlbid": 695731, "pa": 238, "ops": 0.648, "warp": 0.2}, {"team": "ATL", "mlbid": 642086, "pa": 200, "ops": 0.681, "warp": 0.2}, {"team": "TOR", "mlbid": 687072, "pa": 251, "ops": 0.639, "warp": 0.2}, {"team": "TB", "mlbid": 666165, "pa": 251, "ops": 0.628, "warp": 0.2}, {"team": "PHI", "mlbid": 681323, "pa": 251, "ops": 0.673, "warp": 0.2}, {"team": "DET", "mlbid": 689577, "pa": 251, "ops": 0.617, "warp": 0.1}, {"team": "CHW", "mlbid": 807747, "pa": 251, "ops": 0.602, "warp": 0.1}, {"team": "STL", "mlbid": 647378, "pa": 251, "ops": 0.621, "warp": 0.1}, {"team": "PHI", "mlbid": 805704, "pa": 251, "ops": 0.662, "warp": 0.1}, {"team": "LAA", "mlbid": 806534, "pa": 251, "ops": 0.639, "warp": 0.1}, {"team": "SF", "mlbid": 814194, "pa": 251, "ops": 0.621, "warp": 0.1}, {"team": "TB", "mlbid": 700246, "pa": 414, "ops": 0.643, "warp": 0.1}, {"team": "LAA", "mlbid": 690804, "pa": 251, "ops": 0.663, "warp": 0.1}, {"team": "SF", "mlbid": 669442, "pa": 251, "ops": 0.625, "warp": 0.1}, {"team": "LAD", "mlbid": 669227, "pa": 251, "ops": 0.635, "warp": 0.1}, {"team": "MIN", "mlbid": 805805, "pa": 99, "ops": 0.649, "warp": 0.1}, {"team": "DET", "mlbid": 667452, "pa": 251, "ops": 0.687, "warp": 0.3}, {"team": "LAD", "mlbid": 806077, "pa": 251, "ops": 0.616, "warp": 0.3}, {"team": "TB", "mlbid": 702556, "pa": 251, "ops": 0.644, "warp": 0.3}, {"team": "CHW", "mlbid": 695299, "pa": 251, "ops": 0.632, "warp": 0.3}, {"team": "SF", "mlbid": 701852, "pa": 251, "ops": 0.635, "warp": 0.3}, {"team": "STL", "mlbid": 804241, "pa": 251, "ops": 0.639, "warp": 0.3}, {"team": "LAD", "mlbid": 500743, "pa": 163, "ops": 0.666, "warp": 0.3}, {"team": "TB", "mlbid": 828319, "pa": 251, "ops": 0.636, "warp": 0.3}, {"team": "SD", "mlbid": 670092, "pa": 251, "ops": 0.660, "warp": 0.2}, {"team": "PIT", "mlbid": 621466, "pa": 251, "ops": 0.689, "warp": 0.2}, {"team": "SEA", "mlbid": 692039, "pa": 251, "ops": 0.628, "warp": 0.2}, {"team": "SF", "mlbid": 527038, "pa": 271, "ops": 0.675, "warp": 0.3}, {"team": "ARI", "mlbid": 702679, "pa": 251, "ops": 0.630, "warp": 0.2}, {"team": "SF", "mlbid": 813841, "pa": 251, "ops": 0.625, "warp": 0.2}, {"team": "LAA", "mlbid": 663905, "pa": 251, "ops": 0.676, "warp": 0.2}, {"team": "ATL", "mlbid": 621450, "pa": 251, "ops": 0.636, "warp": 0.2}, {"team": "SEA", "mlbid": 687659, "pa": 251, "ops": 0.625, "warp": 0.2}, {"team": "TB", "mlbid": 690991, "pa": 251, "ops": 0.641, "warp": 0.2}, {"team": "LAD", "mlbid": 685301, "pa": 251, "ops": 0.660, "warp": 0.2}, {"team": "TB", "mlbid": 807083, "pa": 251, "ops": 0.621, "warp": 0.2}, {"team": "CIN", "mlbid": 680756, "pa": 251, "ops": 0.618, "warp": 0.2}, {"team": "SD", "mlbid": 681036, "pa": 251, "ops": 0.623, "warp": 0.2}, {"team": "TEX", "mlbid": 806964, "pa": 251, "ops": 0.644, "warp": 0.2}, {"team": "SF", "mlbid": 678681, "pa": 251, "ops": 0.657, "warp": 0.2}, {"team": "ARI", "mlbid": 815154, "pa": 251, "ops": 0.613, "warp": 0.2}, {"team": "MIL", "mlbid": 670232, "pa": 251, "ops": 0.624, "warp": 0.2}, {"team": "PHI", "mlbid": 686551, "pa": 251, "ops": 0.625, "warp": 0.2}, {"team": "PHI", "mlbid": 664238, "pa": 130, "ops": 0.658, "warp": 0.2}, {"team": "SAC", "mlbid": 660829, "pa": 251, "ops": 0.628, "warp": 0.2}, {"team": "HOU", "mlbid": 621529, "pa": 251, "ops": 0.628, "warp": 0.2}, {"team": "KC", "mlbid": 663731, "pa": 251, "ops": 0.638, "warp": 0.2}, {"team": "COL", "mlbid": 691182, "pa": 91, "ops": 0.696, "warp": 0.2}, {"team": "BAL", "mlbid": 683770, "pa": 251, "ops": 0.669, "warp": 0.2}, {"team": "NYY", "mlbid": 518934, "pa": 251, "ops": 0.636, "warp": 0.3}, {"team": "NYY", "mlbid": 693645, "pa": 500, "ops": 0.845, "warp": 3.5}, {"team": "NYY", "mlbid": 676205, "pa": 251, "ops": 0.690, "warp": 0.4}, {"team": "NYY", "mlbid": 665482, "pa": 251, "ops": 0.620, "warp": 0.1}, {"team": "NYY", "mlbid": 683522, "pa": 400, "ops": 0.780, "warp": 2.0}, {"team": "NYY", "mlbid": 809763, "pa": 150, "ops": 0.550, "warp": -0.5}, {"team": "BAL", "mlbid": 668974, "pa": 600, "ops": 0.820, "warp": 3.8}, {"team": "BAL", "mlbid": 683770, "pa": 400, "ops": 0.710, "warp": 1.5}, {"team": "LAD", "mlbid": 605141, "pa": 550, "ops": 0.850, "warp": 4.2}, {"team": "LAD", "mlbid": 669227, "pa": 400, "ops": 0.750, "warp": 2.1}, {"team": "LAD", "mlbid": 641871, "pa": 300, "ops": 0.690, "warp": 0.9}, {"team": "LAD", "mlbid": 660829, "pa": 200, "ops": 0.650, "warp": 0.5}, {"team": "LAD", "mlbid": 806077, "pa": 150, "ops": 0.610, "warp": 0.1}, {"team": "SEA", "mlbid": 692039, "pa": 550, "ops": 0.810, "warp": 3.1}, {"team": "SEA", "mlbid": 681391, "pa": 450, "ops": 0.760, "warp": 2.2}, {"team": "SEA", "mlbid": 687659, "pa": 400, "ops": 0.730, "warp": 1.4}, {"team": "HOU", "mlbid": 621529, "pa": 500, "ops": 0.760, "warp": 2.4}, {"team": "HOU", "mlbid": 668203, "pa": 400, "ops": 0.740, "warp": 1.9}, {"team": "OAK", "mlbid": 661531, "pa": 300, "ops": 0.650, "warp": 0.3}, {"team": "OAK", "mlbid": 694034, "pa": 450, "ops": 0.700, "warp": 1.1}, {"team": "NYM", "mlbid": 666163, "pa": 500, "ops": 0.780, "warp": 2.8}, {"team": "NYM", "mlbid": 605195, "pa": 400, "ops": 0.740, "warp": 2.0}, {"team": "SD", "mlbid": 518792, "pa": 550, "ops": 0.800, "warp": 3.0}, {"team": "SD", "mlbid": 669392, "pa": 450, "ops": 0.750, "warp": 2.0}]'''
 
-PECOTA_HIT_EMBEDDED = '''[
-{"team": "SD", "mlbid": 518792, "pa": 251, "ops": 0.646, "warp": 0.3},
-{"team": "MIA", "mlbid": 807751, "pa": 251, "ops": 0.642, "warp": 0.3},
-{"team": "TEX", "mlbid": 683227, "pa": 199, "ops": 0.653, "warp": 0.3},
-{"team": "SF", "mlbid": 692238, "pa": 251, "ops": 0.668, "warp": 0.3},
-{"team": "CHC", "mlbid": 624424, "pa": 138, "ops": 0.678, "warp": 0.2},
-{"team": "CHC", "mlbid": 823807, "pa": 251, "ops": 0.609, "warp": 0.2},
-{"team": "SAC", "mlbid": 694034, "pa": 251, "ops": 0.631, "warp": 0.2},
-{"team": "PHI", "mlbid": 800607, "pa": 251, "ops": 0.646, "warp": 0.2},
-{"team": "SD", "mlbid": 669392, "pa": 251, "ops": 0.622, "warp": 0.2},
-{"team": "ARI", "mlbid": 702258, "pa": 251, "ops": 0.614, "warp": 0.2},
-{"team": "ARI", "mlbid": 695521, "pa": 251, "ops": 0.651, "warp": 0.2},
-{"team": "BAL", "mlbid": 668974, "pa": 251, "ops": 0.609, "warp": 0.2},
-{"team": "CHW", "mlbid": 695731, "pa": 238, "ops": 0.648, "warp": 0.2},
-{"team": "ATL", "mlbid": 642086, "pa": 200, "ops": 0.681, "warp": 0.2},
-{"team": "TOR", "mlbid": 687072, "pa": 251, "ops": 0.639, "warp": 0.2},
-{"team": "TB", "mlbid": 666165, "pa": 251, "ops": 0.628, "warp": 0.2},
-{"team": "PHI", "mlbid": 681323, "pa": 251, "ops": 0.673, "warp": 0.2},
-{"team": "DET", "mlbid": 689577, "pa": 251, "ops": 0.617, "warp": 0.1},
-{"team": "CHW", "mlbid": 807747, "pa": 251, "ops": 0.602, "warp": 0.1},
-{"team": "STL", "mlbid": 647378, "pa": 251, "ops": 0.621, "warp": 0.1},
-{"team": "PHI", "mlbid": 805704, "pa": 251, "ops": 0.662, "warp": 0.1},
-{"team": "LAA", "mlbid": 806534, "pa": 251, "ops": 0.639, "warp": 0.1},
-{"team": "SF", "mlbid": 814194, "pa": 251, "ops": 0.621, "warp": 0.1},
-{"team": "TB", "mlbid": 700246, "pa": 414, "ops": 0.643, "warp": 0.1},
-{"team": "LAA", "mlbid": 690804, "pa": 251, "ops": 0.663, "warp": 0.1},
-{"team": "SF", "mlbid": 669442, "pa": 251, "ops": 0.625, "warp": 0.1},
-{"team": "LAD", "mlbid": 669227, "pa": 251, "ops": 0.635, "warp": 0.1},
-{"team": "MIN", "mlbid": 805805, "pa": 99, "ops": 0.649, "warp": 0.1},
-{"team": "DET", "mlbid": 667452, "pa": 251, "ops": 0.687, "warp": 0.3},
-{"team": "LAD", "mlbid": 806077, "pa": 251, "ops": 0.616, "warp": 0.3},
-{"team": "TB", "mlbid": 702556, "pa": 251, "ops": 0.644, "warp": 0.3},
-{"team": "CHW", "mlbid": 695299, "pa": 251, "ops": 0.632, "warp": 0.3},
-{"team": "SF", "mlbid": 701852, "pa": 251, "ops": 0.635, "warp": 0.3},
-{"team": "STL", "mlbid": 804241, "pa": 251, "ops": 0.639, "warp": 0.3},
-{"team": "LAD", "mlbid": 500743, "pa": 163, "ops": 0.666, "warp": 0.3},
-{"team": "TB", "mlbid": 828319, "pa": 251, "ops": 0.636, "warp": 0.3},
-{"team": "SD", "mlbid": 670092, "pa": 251, "ops": 0.660, "warp": 0.2},
-{"team": "PIT", "mlbid": 621466, "pa": 251, "ops": 0.689, "warp": 0.2},
-{"team": "SEA", "mlbid": 692039, "pa": 251, "ops": 0.628, "warp": 0.2},
-{"team": "SF", "mlbid": 527038, "pa": 271, "ops": 0.675, "warp": 0.3},
-{"team": "ARI", "mlbid": 702679, "pa": 251, "ops": 0.630, "warp": 0.2},
-{"team": "SF", "mlbid": 813841, "pa": 251, "ops": 0.625, "warp": 0.2},
-{"team": "LAA", "mlbid": 663905, "pa": 251, "ops": 0.676, "warp": 0.2},
-{"team": "ATL", "mlbid": 621450, "pa": 251, "ops": 0.636, "warp": 0.2},
-{"team": "SEA", "mlbid": 687659, "pa": 251, "ops": 0.625, "warp": 0.2},
-{"team": "TB", "mlbid": 690991, "pa": 251, "ops": 0.641, "warp": 0.2},
-{"team": "LAD", "mlbid": 685301, "pa": 251, "ops": 0.660, "warp": 0.2},
-{"team": "TB", "mlbid": 807083, "pa": 251, "ops": 0.621, "warp": 0.2},
-{"team": "CIN", "mlbid": 680756, "pa": 251, "ops": 0.618, "warp": 0.2},
-{"team": "SD", "mlbid": 681036, "pa": 251, "ops": 0.623, "warp": 0.2},
-{"team": "TEX", "mlbid": 806964, "pa": 251, "ops": 0.644, "warp": 0.2},
-{"team": "SF", "mlbid": 678681, "pa": 251, "ops": 0.657, "warp": 0.2},
-{"team": "ARI", "mlbid": 815154, "pa": 251, "ops": 0.613, "warp": 0.2},
-{"team": "MIL", "mlbid": 670232, "pa": 251, "ops": 0.624, "warp": 0.2},
-{"team": "PHI", "mlbid": 686551, "pa": 251, "ops": 0.625, "warp": 0.2},
-{"team": "PHI", "mlbid": 664238, "pa": 130, "ops": 0.658, "warp": 0.2},
-{"team": "SAC", "mlbid": 660829, "pa": 251, "ops": 0.628, "warp": 0.2},
-{"team": "HOU", "mlbid": 621529, "pa": 251, "ops": 0.628, "warp": 0.2},
-{"team": "KC", "mlbid": 663731, "pa": 251, "ops": 0.638, "warp": 0.2},
-{"team": "COL", "mlbid": 691182, "pa": 91, "ops": 0.696, "warp": 0.2},
-{"team": "BAL", "mlbid": 683770, "pa": 251, "ops": 0.669, "warp": 0.2},
-{"team": "NYY", "mlbid": 518934, "pa": 251, "ops": 0.636, "warp": 0.3},
-{"team": "NYY", "mlbid": 693645, "pa": 500, "ops": 0.845, "warp": 3.5},
-{"team": "NYY", "mlbid": 676205, "pa": 251, "ops": 0.690, "warp": 0.4},
-{"team": "NYY", "mlbid": 665482, "pa": 251, "ops": 0.620, "warp": 0.1},
-{"team": "NYY", "mlbid": 683522, "pa": 400, "ops": 0.780, "warp": 2.0},
-{"team": "NYY", "mlbid": 809763, "pa": 150, "ops": 0.550, "warp": -0.5},
-{"team": "BAL", "mlbid": 668974, "pa": 600, "ops": 0.820, "warp": 3.8},
-{"team": "BAL", "mlbid": 683770, "pa": 400, "ops": 0.710, "warp": 1.5},
-{"team": "LAD", "mlbid": 605141, "pa": 550, "ops": 0.850, "warp": 4.2},
-{"team": "LAD", "mlbid": 669227, "pa": 400, "ops": 0.750, "warp": 2.1},
-{"team": "LAD", "mlbid": 641871, "pa": 300, "ops": 0.690, "warp": 0.9},
-{"team": "LAD", "mlbid": 660829, "pa": 200, "ops": 0.650, "warp": 0.5},
-{"team": "LAD", "mlbid": 806077, "pa": 150, "ops": 0.610, "warp": 0.1},
-{"team": "SEA", "mlbid": 692039, "pa": 550, "ops": 0.810, "warp": 3.1},
-{"team": "SEA", "mlbid": 681391, "pa": 450, "ops": 0.760, "warp": 2.2},
-{"team": "SEA", "mlbid": 687659, "pa": 400, "ops": 0.730, "warp": 1.4},
-{"team": "HOU", "mlbid": 621529, "pa": 500, "ops": 0.760, "warp": 2.4},
-{"team": "HOU", "mlbid": 668203, "pa": 400, "ops": 0.740, "warp": 1.9},
-{"team": "OAK", "mlbid": 661531, "pa": 300, "ops": 0.650, "warp": 0.3},
-{"team": "OAK", "mlbid": 694034, "pa": 450, "ops": 0.700, "warp": 1.1},
-{"team": "NYM", "mlbid": 666163, "pa": 500, "ops": 0.780, "warp": 2.8},
-{"team": "NYM", "mlbid": 605195, "pa": 400, "ops": 0.740, "warp": 2.0},
-{"team": "SD", "mlbid": 518792, "pa": 550, "ops": 0.800, "warp": 3.0},
-{"team": "SD", "mlbid": 669392, "pa": 450, "ops": 0.750, "warp": 2.0}
-]'''
-
-PECOTA_PIT_EMBEDDED = '''[
-{"team": "NYY", "mlbid": 693645, "ip": 180.0, "fip": 3.20, "era": 3.05, "role": "SP", "warp": 3.5},
-{"team": "NYY", "mlbid": 665482, "ip": 160.0, "fip": 3.50, "era": 3.30, "role": "SP", "warp": 2.5},
-{"team": "NYY", "mlbid": 683522, "ip": 140.0, "fip": 3.60, "era": 3.40, "role": "SP", "warp": 2.1},
-{"team": "NYY", "mlbid": 690776, "ip": 60.0, "fip": 2.80, "era": 2.70, "role": "RP", "warp": 1.0},
-{"team": "BAL", "mlbid": 668974, "ip": 190.0, "fip": 3.30, "era": 3.15, "role": "SP", "warp": 3.2},
-{"team": "BAL", "mlbid": 683770, "ip": 150.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.4},
-{"team": "BAL", "mlbid": 687064, "ip": 65.0, "fip": 3.10, "era": 2.95, "role": "RP", "warp": 1.2},
-{"team": "LAD", "mlbid": 669227, "ip": 200.0, "fip": 2.90, "era": 2.75, "role": "SP", "warp": 4.5},
-{"team": "LAD", "mlbid": 605141, "ip": 170.0, "fip": 3.40, "era": 3.20, "role": "SP", "warp": 3.0},
-{"team": "LAD", "mlbid": 641871, "ip": 70.0, "fip": 3.20, "era": 3.05, "role": "RP", "warp": 1.4},
-{"team": "SEA", "mlbid": 692039, "ip": 185.0, "fip": 3.40, "era": 3.25, "role": "SP", "warp": 3.1},
-{"team": "SEA", "mlbid": 681391, "ip": 165.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.4},
-{"team": "SEA", "mlbid": 687659, "ip": 75.0, "fip": 3.00, "era": 2.85, "role": "RP", "warp": 1.3},
-{"team": "HOU", "mlbid": 621529, "ip": 175.0, "fip": 3.50, "era": 3.35, "role": "SP", "warp": 2.8},
-{"team": "HOU", "mlbid": 668203, "ip": 145.0, "fip": 3.70, "era": 3.55, "role": "SP", "warp": 2.1},
-{"team": "OAK", "mlbid": 661531, "ip": 150.0, "fip": 4.20, "era": 4.05, "role": "SP", "warp": 0.8},
-{"team": "OAK", "mlbid": 694034, "ip": 130.0, "fip": 4.40, "era": 4.25, "role": "SP", "warp": 0.4},
-{"team": "NYM", "mlbid": 666163, "ip": 170.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.3},
-{"team": "NYM", "mlbid": 605195, "ip": 150.0, "fip": 3.80, "era": 3.65, "role": "SP", "warp": 1.8},
-{"team": "SD", "mlbid": 518792, "ip": 180.0, "fip": 3.50, "era": 3.35, "role": "SP", "warp": 2.6},
-{"team": "SD", "mlbid": 669392, "ip": 160.0, "fip": 3.70, "era": 3.55, "role": "SP", "warp": 2.0},
-{"team": "ATL", "mlbid": 642086, "ip": 190.0, "fip": 3.30, "era": 3.15, "role": "SP", "warp": 3.4},
-{"team": "ATL", "mlbid": 688427, "ip": 60.0, "fip": 2.90, "era": 2.75, "role": "RP", "warp": 1.2},
-{"team": "TB", "mlbid": 666165, "ip": 160.0, "fip": 3.80, "era": 3.60, "role": "SP", "warp": 2.0},
-{"team": "TOR", "mlbid": 687072, "ip": 150.0, "fip": 4.00, "era": 3.80, "role": "SP", "warp": 1.4},
-{"team": "BOS", "mlbid": 687072, "ip": 165.0, "fip": 3.90, "era": 3.70, "role": "SP", "warp": 1.8},
-{"team": "CLE", "mlbid": 689958, "ip": 180.0, "fip": 3.20, "era": 3.05, "role": "SP", "warp": 3.2},
-{"team": "CLE", "mlbid": 676390, "ip": 140.0, "fip": 3.50, "era": 3.35, "role": "SP", "warp": 2.2},
-{"team": "CLE", "mlbid": 687064, "ip": 65.0, "fip": 2.80, "era": 2.65, "role": "RP", "warp": 1.4},
-{"team": "MIN", "mlbid": 641927, "ip": 155.0, "fip": 3.90, "era": 3.70, "role": "SP", "warp": 1.6},
-{"team": "MIN", "mlbid": 623437, "ip": 65.0, "fip": 3.40, "era": 3.25, "role": "RP", "warp": 1.0},
-{"team": "MIN", "mlbid": 693306, "ip": 70.0, "fip": 4.10, "era": 3.95, "role": "RP", "warp": 0.6},
-{"team": "DET", "mlbid": 667452, "ip": 170.0, "fip": 3.70, "era": 3.50, "role": "SP", "warp": 2.2},
-{"team": "DET", "mlbid": 689577, "ip": 140.0, "fip": 3.90, "era": 3.75, "role": "SP", "warp": 1.6},
-{"team": "KC", "mlbid": 663731, "ip": 165.0, "fip": 3.80, "era": 3.60, "role": "SP", "warp": 1.9},
-{"team": "KC", "mlbid": 686701, "ip": 130.0, "fip": 4.20, "era": 4.00, "role": "SP", "warp": 0.8},
-{"team": "CWS", "mlbid": 695731, "ip": 150.0, "fip": 4.30, "era": 4.10, "role": "SP", "warp": 0.6},
-{"team": "CWS", "mlbid": 807747, "ip": 140.0, "fip": 4.40, "era": 4.25, "role": "SP", "warp": 0.4},
-{"team": "LAA", "mlbid": 806534, "ip": 160.0, "fip": 3.90, "era": 3.75, "role": "SP", "warp": 1.4},
-{"team": "LAA", "mlbid": 690804, "ip": 145.0, "fip": 4.00, "era": 3.85, "role": "SP", "warp": 1.2},
-{"team": "PHI", "mlbid": 800607, "ip": 185.0, "fip": 3.40, "era": 3.25, "role": "SP", "warp": 3.1},
-{"team": "PHI", "mlbid": 681323, "ip": 165.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.4},
-{"team": "PHI", "mlbid": 676252, "ip": 65.0, "fip": 2.90, "era": 2.75, "role": "RP", "warp": 1.1},
-{"team": "MIA", "mlbid": 807751, "ip": 155.0, "fip": 4.00, "era": 3.80, "role": "SP", "warp": 1.3},
-{"team": "MIA", "mlbid": 686460, "ip": 140.0, "fip": 4.10, "era": 3.95, "role": "SP", "warp": 1.0},
-{"team": "WSH", "mlbid": 692453, "ip": 160.0, "fip": 4.10, "era": 3.95, "role": "SP", "warp": 1.1},
-{"team": "WSH", "mlbid": 669379, "ip": 130.0, "fip": 4.30, "era": 4.15, "role": "SP", "warp": 0.5},
-{"team": "CHC", "mlbid": 624424, "ip": 175.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.4},
-{"team": "CHC", "mlbid": 676962, "ip": 155.0, "fip": 3.80, "era": 3.65, "role": "SP", "warp": 1.8},
-{"team": "MIL", "mlbid": 670232, "ip": 165.0, "fip": 3.70, "era": 3.55, "role": "SP", "warp": 2.1},
-{"team": "MIL", "mlbid": 694843, "ip": 65.0, "fip": 3.30, "era": 3.15, "role": "RP", "warp": 1.1},
-{"team": "PIT", "mlbid": 621466, "ip": 160.0, "fip": 3.90, "era": 3.70, "role": "SP", "warp": 1.5},
-{"team": "PIT", "mlbid": 699018, "ip": 145.0, "fip": 4.00, "era": 3.85, "role": "SP", "warp": 1.2},
-{"team": "STL", "mlbid": 647378, "ip": 170.0, "fip": 3.70, "era": 3.55, "role": "SP", "warp": 2.0},
-{"team": "STL", "mlbid": 666277, "ip": 150.0, "fip": 3.90, "era": 3.70, "role": "SP", "warp": 1.5},
-{"team": "CIN", "mlbid": 680756, "ip": 155.0, "fip": 3.90, "era": 3.75, "role": "SP", "warp": 1.4},
-{"team": "CIN", "mlbid": 687924, "ip": 140.0, "fip": 4.10, "era": 3.90, "role": "SP", "warp": 1.0},
-{"team": "LAD", "mlbid": 641871, "ip": 195.0, "fip": 3.10, "era": 2.95, "role": "SP", "warp": 4.0},
-{"team": "ARI", "mlbid": 702258, "ip": 165.0, "fip": 3.80, "era": 3.65, "role": "SP", "warp": 1.8},
-{"team": "SF", "mlbid": 692238, "ip": 175.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.3},
-{"team": "SF", "mlbid": 527038, "ip": 155.0, "fip": 3.80, "era": 3.65, "role": "SP", "warp": 1.8},
-{"team": "COL", "mlbid": 691182, "ip": 150.0, "fip": 4.50, "era": 4.35, "role": "SP", "warp": 0.2}
-]'''
+PECOTA_PIT_EMBEDDED = '''[{"team": "NYY", "mlbid": 693645, "ip": 180.0, "fip": 3.20, "era": 3.05, "role": "SP", "warp": 3.5}, {"team": "NYY", "mlbid": 665482, "ip": 160.0, "fip": 3.50, "era": 3.30, "role": "SP", "warp": 2.5}, {"team": "NYY", "mlbid": 683522, "ip": 140.0, "fip": 3.60, "era": 3.40, "role": "SP", "warp": 2.1}, {"team": "NYY", "mlbid": 690776, "ip": 60.0, "fip": 2.80, "era": 2.70, "role": "RP", "warp": 1.0}, {"team": "BAL", "mlbid": 668974, "ip": 190.0, "fip": 3.30, "era": 3.15, "role": "SP", "warp": 3.2}, {"team": "BAL", "mlbid": 683770, "ip": 150.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.4}, {"team": "BAL", "mlbid": 687064, "ip": 65.0, "fip": 3.10, "era": 2.95, "role": "RP", "warp": 1.2}, {"team": "LAD", "mlbid": 669227, "ip": 200.0, "fip": 2.90, "era": 2.75, "role": "SP", "warp": 4.5}, {"team": "LAD", "mlbid": 605141, "ip": 170.0, "fip": 3.40, "era": 3.20, "role": "SP", "warp": 3.0}, {"team": "LAD", "mlbid": 641871, "ip": 70.0, "fip": 3.20, "era": 3.05, "role": "RP", "warp": 1.4}, {"team": "SEA", "mlbid": 692039, "ip": 185.0, "fip": 3.40, "era": 3.25, "role": "SP", "warp": 3.1}, {"team": "SEA", "mlbid": 681391, "ip": 165.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.4}, {"team": "SEA", "mlbid": 687659, "ip": 75.0, "fip": 3.00, "era": 2.85, "role": "RP", "warp": 1.3}, {"team": "HOU", "mlbid": 621529, "ip": 175.0, "fip": 3.50, "era": 3.35, "role": "SP", "warp": 2.8}, {"team": "HOU", "mlbid": 668203, "ip": 145.0, "fip": 3.70, "era": 3.55, "role": "SP", "warp": 2.1}, {"team": "OAK", "mlbid": 661531, "ip": 150.0, "fip": 4.20, "era": 4.05, "role": "SP", "warp": 0.8}, {"team": "OAK", "mlbid": 694034, "ip": 130.0, "fip": 4.40, "era": 4.25, "role": "SP", "warp": 0.4}, {"team": "NYM", "mlbid": 666163, "ip": 170.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.3}, {"team": "NYM", "mlbid": 605195, "ip": 150.0, "fip": 3.80, "era": 3.65, "role": "SP", "warp": 1.8}, {"team": "SD", "mlbid": 518792, "ip": 180.0, "fip": 3.50, "era": 3.35, "role": "SP", "warp": 2.6}, {"team": "SD", "mlbid": 669392, "ip": 160.0, "fip": 3.70, "era": 3.55, "role": "SP", "warp": 2.0}, {"team": "ATL", "mlbid": 642086, "ip": 190.0, "fip": 3.30, "era": 3.15, "role": "SP", "warp": 3.4}, {"team": "ATL", "mlbid": 688427, "ip": 60.0, "fip": 2.90, "era": 2.75, "role": "RP", "warp": 1.2}, {"team": "TB", "mlbid": 666165, "ip": 160.0, "fip": 3.80, "era": 3.60, "role": "SP", "warp": 2.0}, {"team": "TOR", "mlbid": 687072, "ip": 150.0, "fip": 4.00, "era": 3.80, "role": "SP", "warp": 1.4}, {"team": "BOS", "mlbid": 687072, "ip": 165.0, "fip": 3.90, "era": 3.70, "role": "SP", "warp": 1.8}, {"team": "CLE", "mlbid": 689958, "ip": 180.0, "fip": 3.20, "era": 3.05, "role": "SP", "warp": 3.2}, {"team": "CLE", "mlbid": 676390, "ip": 140.0, "fip": 3.50, "era": 3.35, "role": "SP", "warp": 2.2}, {"team": "CLE", "mlbid": 687064, "ip": 65.0, "fip": 2.80, "era": 2.65, "role": "RP", "warp": 1.4}, {"team": "MIN", "mlbid": 641927, "ip": 155.0, "fip": 3.90, "era": 3.70, "role": "SP", "warp": 1.6}, {"team": "MIN", "mlbid": 623437, "ip": 65.0, "fip": 3.40, "era": 3.25, "role": "RP", "warp": 1.0}, {"team": "MIN", "mlbid": 693306, "ip": 70.0, "fip": 4.10, "era": 3.95, "role": "RP", "warp": 0.6}, {"team": "DET", "mlbid": 667452, "ip": 170.0, "fip": 3.70, "era": 3.50, "role": "SP", "warp": 2.2}, {"team": "DET", "mlbid": 689577, "ip": 140.0, "fip": 3.90, "era": 3.75, "role": "SP", "warp": 1.6}, {"team": "KC", "mlbid": 663731, "ip": 165.0, "fip": 3.80, "era": 3.60, "role": "SP", "warp": 1.9}, {"team": "KC", "mlbid": 686701, "ip": 130.0, "fip": 4.20, "era": 4.00, "role": "SP", "warp": 0.8}, {"team": "CWS", "mlbid": 695731, "ip": 150.0, "fip": 4.30, "era": 4.10, "role": "SP", "warp": 0.6}, {"team": "CWS", "mlbid": 807747, "ip": 140.0, "fip": 4.40, "era": 4.25, "role": "SP", "warp": 0.4}, {"team": "LAA", "mlbid": 806534, "ip": 160.0, "fip": 3.90, "era": 3.75, "role": "SP", "warp": 1.4}, {"team": "LAA", "mlbid": 690804, "ip": 145.0, "fip": 4.00, "era": 3.85, "role": "SP", "warp": 1.2}, {"team": "PHI", "mlbid": 800607, "ip": 185.0, "fip": 3.40, "era": 3.25, "role": "SP", "warp": 3.1}, {"team": "PHI", "mlbid": 681323, "ip": 165.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.4}, {"team": "PHI", "mlbid": 676252, "ip": 65.0, "fip": 2.90, "era": 2.75, "role": "RP", "warp": 1.1}, {"team": "MIA", "mlbid": 807751, "ip": 155.0, "fip": 4.00, "era": 3.80, "role": "SP", "warp": 1.3}, {"team": "MIA", "mlbid": 686460, "ip": 140.0, "fip": 4.10, "era": 3.95, "role": "SP", "warp": 1.0}, {"team": "WSH", "mlbid": 692453, "ip": 160.0, "fip": 4.10, "era": 3.95, "role": "SP", "warp": 1.1}, {"team": "WSH", "mlbid": 669379, "ip": 130.0, "fip": 4.30, "era": 4.15, "role": "SP", "warp": 0.5}, {"team": "CHC", "mlbid": 624424, "ip": 175.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.4}, {"team": "CHC", "mlbid": 676962, "ip": 155.0, "fip": 3.80, "era": 3.65, "role": "SP", "warp": 1.8}, {"team": "MIL", "mlbid": 670232, "ip": 165.0, "fip": 3.70, "era": 3.55, "role": "SP", "warp": 2.1}, {"team": "MIL", "mlbid": 694843, "ip": 65.0, "fip": 3.30, "era": 3.15, "role": "RP", "warp": 1.1}, {"team": "PIT", "mlbid": 621466, "ip": 160.0, "fip": 3.90, "era": 3.70, "role": "SP", "warp": 1.5}, {"team": "PIT", "mlbid": 699018, "ip": 145.0, "fip": 4.00, "era": 3.85, "role": "SP", "warp": 1.2}, {"team": "STL", "mlbid": 647378, "ip": 170.0, "fip": 3.70, "era": 3.55, "role": "SP", "warp": 2.0}, {"team": "STL", "mlbid": 666277, "ip": 150.0, "fip": 3.90, "era": 3.70, "role": "SP", "warp": 1.5}, {"team": "CIN", "mlbid": 680756, "ip": 155.0, "fip": 3.90, "era": 3.75, "role": "SP", "warp": 1.4}, {"team": "CIN", "mlbid": 687924, "ip": 140.0, "fip": 4.10, "era": 3.90, "role": "SP", "warp": 1.0}, {"team": "LAD", "mlbid": 641871, "ip": 195.0, "fip": 3.10, "era": 2.95, "role": "SP", "warp": 4.0}, {"team": "ARI", "mlbid": 702258, "ip": 165.0, "fip": 3.80, "era": 3.65, "role": "SP", "warp": 1.8}, {"team": "SF", "mlbid": 692238, "ip": 175.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.3}, {"team": "SF", "mlbid": 527038, "ip": 155.0, "fip": 3.80, "era": 3.65, "role": "SP", "warp": 1.8}, {"team": "COL", "mlbid": 691182, "ip": 150.0, "fip": 4.50, "era": 4.35, "role": "SP", "warp": 0.2}]'''
 
 # ==============================================================================
 # CONSTANTS
@@ -203,7 +58,7 @@ PRIOR_PECOTA_WEIGHT      = 0.45
 PRIOR_HIST_2025_WEIGHT   = 0.35
 PRIOR_HIST_2024_WEIGHT   = 0.20
 
-STATCAST_INFLUENCE       = 0.55  # Updated: Increased to better reflect underlying talent
+STATCAST_INFLUENCE       = 0.55  # Increased to better reflect underlying talent
 
 ROSTER_WEIGHT_ACTIVE     = 600.0
 ROSTER_WEIGHT_IL         = 10.0
@@ -212,16 +67,16 @@ ROSTER_WEIGHT_OTHER      = 300.0
 TYPICAL_TEAM_WARP        = 35.0
 MAX_IL_FRAC              = 0.50
 
-PYTHAG_REGRESSION_PA     = 100  # Updated: Slightly more trust in early run differential
-PROJ_WEIGHT_MAX          = 0.72  # Updated: Adjusted for early season stability
-PROJ_WEIGHT_MIN          = 0.45  # FIXED: Restored missing constant
+PYTHAG_REGRESSION_PA     = 100  # More trust in early run differential
+PROJ_WEIGHT_MAX          = 0.72  # Adjusted for early season stability
+PROJ_WEIGHT_MIN          = 0.45
 
-RD_SENSITIVITY           = 0.025  # Updated: Run diff matters slightly more
+RD_SENSITIVITY           = 0.025
 RD_DAMPENER_START_GP     = 50
 LUCK_SENSITIVITY         = 0.50
 LUCK_DAMPENER_START_GP   = 40
 
-TIER_HARD_SELLER         =  5.0   # Updated: Lowered for better classification separation
+TIER_HARD_SELLER         =  5.0   # Lowered for better classification separation
 TIER_SOFT_SELLER         =  4.0
 TIER_SOFT_BUYER          = -3.0
 TIER_HARD_BUYER          = -8.0
@@ -233,7 +88,7 @@ ADJ_SOFT_BUYER           = +0.04
 ADJ_HARD_BUYER           = +0.07
 ADJ_SCALE                =  0.015
 
-LUCK_REGRESSION_FACTOR   = 0.30  # Updated: Reduced to prevent over-regression
+LUCK_REGRESSION_FACTOR   = 0.30  # Reduced to prevent over-regression
 SOS_SENSITIVITY          = 0.15
 
 TEAM_INFO = {
@@ -306,16 +161,11 @@ def save_cache(payload):
     except Exception as e: print(f"Cache write failed: {e}")
 
 def sanitize_df(df):
-    """Safe sanitization: only converts columns that are actually numeric.
-       Leaves strings (objects) like 'LAA' or 'AL West' alone."""
     for c in df.columns:
         if pd.api.types.is_numeric_dtype(df[c]):
             df[c] = df[c].fillna(0)
         else:
-            # Try to convert to numeric for object columns that might contain string numbers
-            # but revert if it turns strings into NaNs (e.g. team names)
             temp = pd.to_numeric(df[c], errors='coerce')
-            # If conversion preserves most non-null values, apply it
             if temp.notna().sum() >= df[c].notna().sum() * 0.9:
                 df[c] = temp.fillna(0)
     return df
@@ -548,14 +398,50 @@ def fetch_team_projections(standings_df, roster_map):
     mlb_ops,mlb_era = sc.get("mlb",({},{}))
     cur_bat,cur_pit = sc.get("cur",({},{}))
     
+    # 🔍 PERCENTAGE-BASED ROLE OVERRIDE
+    # Fetches current season G/GS via MLB API to prevent openers/swingmen from being misclassified as SPs.
+    # Pitchers must have started >= 50% of their appearances to be classified as SP.
+    GS_SP_THRESHOLD = 0.50
+    current_gs_data = {}
+    for tid in all_ids:
+        try:
+            url = f"{MLB_API_BASE}/teams/{tid}/stats"
+            params = {"stats": "season", "group": "pitching", "season": SEASON_YEAR}
+            r = requests.get(url, params=params, timeout=8)
+            if r.status_code == 200:
+                splits = r.json().get("stats", [{}])[0].get("splits", [])
+                for split in splits:
+                    pid = split.get("person", {}).get("id")
+                    if pid:
+                        g = split.get("stat", {}).get("gamesPlayed", 0) or 0
+                        gs = split.get("stat", {}).get("gamesStarted", 0) or 0
+                        if g > 0:
+                            current_gs_data[pid] = {"g": g, "gs": gs}
+        except:
+            continue
+
     rows = []
     for tid in all_ids:
         active_ids = roster_map.get(tid,{}).get("active",set())
         il_ids = roster_map.get(tid,{}).get("il",set())
         
         ph_team = ph[ph["team_id"]==tid]
-        pp_team = pp[pp["team_id"]==tid]
+        pp_team = pp[pp["team_id"]==tid].copy()
         
+        # 🔧 Apply Percentage-Based Role Override to PECOTA Data
+        if not pp_team.empty and current_gs_data:
+            pp_team["current_g"] = pp_team["mlbid"].map(lambda x: current_gs_data.get(x, {}).get("g", 0))
+            pp_team["current_gs"] = pp_team["mlbid"].map(lambda x: current_gs_data.get(x, {}).get("gs", 0))
+            
+            def apply_role_override(row):
+                g, gs = row["current_g"], row["current_gs"]
+                if g > 0:
+                    return "SP" if (gs / g) >= GS_SP_THRESHOLD else "RP"
+                return row["role"]
+                
+            pp_team["role"] = pp_team.apply(apply_role_override, axis=1)
+            pp_team.drop(columns=["current_g", "current_gs"], inplace=True, errors="ignore")
+            
         pecota_ops = LEAGUE_AVG_OPS
         if not ph_team.empty:
             pa_vals = ph_team["pa"].fillna(0).tolist()
