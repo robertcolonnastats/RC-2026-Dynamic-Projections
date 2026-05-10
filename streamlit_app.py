@@ -3,10 +3,10 @@ MLB 2026 Season Projections
 Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 
-Fixes:
-- Fixed IndentationError
-- Implemented "Top 6 by WARP" role assignment for pitchers (since GS is 0 in data)
-- Adjusted weights for Statcast (0.55) and Luck Regression (0.30)
+Key Updates:
+- Updated Constants: Luck (0.45), Statcast (0.45), Pythag (120), etc.
+- GS% Logic: Pitchers classified as SP only if GS/G >= 0.50.
+- Data: Reads from Excel if available, otherwise falls back to embedded strings.
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -25,11 +25,11 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 # ==============================================================================
-# EMBEDDED PECOTA DATA
+# EMBEDDED PECOTA DATA (Fallback if Excel files are missing)
 # ==============================================================================
-PECOTA_HIT_EMBEDDED = '''[{"team": "SD", "mlbid": 518792, "pa": 251, "ops": 0.646, "warp": 0.3}, {"team": "MIA", "mlbid": 807751, "pa": 251, "ops": 0.642, "warp": 0.3}, {"team": "TEX", "mlbid": 683227, "pa": 199, "ops": 0.653, "warp": 0.3}, {"team": "SF", "mlbid": 692238, "pa": 251, "ops": 0.668, "warp": 0.3}, {"team": "CHC", "mlbid": 624424, "pa": 138, "ops": 0.678, "warp": 0.2}, {"team": "CHC", "mlbid": 823807, "pa": 251, "ops": 0.609, "warp": 0.2}, {"team": "SAC", "mlbid": 694034, "pa": 251, "ops": 0.631, "warp": 0.2}, {"team": "PHI", "mlbid": 800607, "pa": 251, "ops": 0.646, "warp": 0.2}, {"team": "SD", "mlbid": 669392, "pa": 251, "ops": 0.622, "warp": 0.2}, {"team": "ARI", "mlbid": 702258, "pa": 251, "ops": 0.614, "warp": 0.2}, {"team": "ARI", "mlbid": 695521, "pa": 251, "ops": 0.651, "warp": 0.2}, {"team": "BAL", "mlbid": 668974, "pa": 251, "ops": 0.609, "warp": 0.2}, {"team": "CHW", "mlbid": 695731, "pa": 238, "ops": 0.648, "warp": 0.2}, {"team": "ATL", "mlbid": 642086, "pa": 200, "ops": 0.681, "warp": 0.2}, {"team": "TOR", "mlbid": 687072, "pa": 251, "ops": 0.639, "warp": 0.2}, {"team": "TB", "mlbid": 666165, "pa": 251, "ops": 0.628, "warp": 0.2}, {"team": "PHI", "mlbid": 681323, "pa": 251, "ops": 0.673, "warp": 0.2}, {"team": "DET", "mlbid": 689577, "pa": 251, "ops": 0.617, "warp": 0.1}, {"team": "CHW", "mlbid": 807747, "pa": 251, "ops": 0.602, "warp": 0.1}, {"team": "STL", "mlbid": 647378, "pa": 251, "ops": 0.621, "warp": 0.1}, {"team": "PHI", "mlbid": 805704, "pa": 251, "ops": 0.662, "warp": 0.1}, {"team": "LAA", "mlbid": 806534, "pa": 251, "ops": 0.639, "warp": 0.1}, {"team": "SF", "mlbid": 814194, "pa": 251, "ops": 0.621, "warp": 0.1}, {"team": "TB", "mlbid": 700246, "pa": 414, "ops": 0.643, "warp": 0.1}, {"team": "LAA", "mlbid": 690804, "pa": 251, "ops": 0.663, "warp": 0.1}, {"team": "SF", "mlbid": 669442, "pa": 251, "ops": 0.625, "warp": 0.1}, {"team": "LAD", "mlbid": 669227, "pa": 251, "ops": 0.635, "warp": 0.1}, {"team": "MIN", "mlbid": 805805, "pa": 99, "ops": 0.649, "warp": 0.1}, {"team": "DET", "mlbid": 667452, "pa": 251, "ops": 0.687, "warp": 0.3}, {"team": "LAD", "mlbid": 806077, "pa": 251, "ops": 0.616, "warp": 0.3}, {"team": "TB", "mlbid": 702556, "pa": 251, "ops": 0.644, "warp": 0.3}, {"team": "CHW", "mlbid": 695299, "pa": 251, "ops": 0.632, "warp": 0.3}, {"team": "SF", "mlbid": 701852, "pa": 251, "ops": 0.635, "warp": 0.3}, {"team": "STL", "mlbid": 804241, "pa": 251, "ops": 0.639, "warp": 0.3}, {"team": "LAD", "mlbid": 500743, "pa": 163, "ops": 0.666, "warp": 0.3}, {"team": "TB", "mlbid": 828319, "pa": 251, "ops": 0.636, "warp": 0.3}, {"team": "SD", "mlbid": 670092, "pa": 251, "ops": 0.660, "warp": 0.2}, {"team": "PIT", "mlbid": 621466, "pa": 251, "ops": 0.689, "warp": 0.2}, {"team": "SEA", "mlbid": 692039, "pa": 251, "ops": 0.628, "warp": 0.2}, {"team": "SF", "mlbid": 527038, "pa": 271, "ops": 0.675, "warp": 0.3}, {"team": "ARI", "mlbid": 702679, "pa": 251, "ops": 0.630, "warp": 0.2}, {"team": "SF", "mlbid": 813841, "pa": 251, "ops": 0.625, "warp": 0.2}, {"team": "LAA", "mlbid": 663905, "pa": 251, "ops": 0.676, "warp": 0.2}, {"team": "ATL", "mlbid": 621450, "pa": 251, "ops": 0.636, "warp": 0.2}, {"team": "SEA", "mlbid": 687659, "pa": 251, "ops": 0.625, "warp": 0.2}, {"team": "TB", "mlbid": 690991, "pa": 251, "ops": 0.641, "warp": 0.2}, {"team": "LAD", "mlbid": 685301, "pa": 251, "ops": 0.660, "warp": 0.2}, {"team": "TB", "mlbid": 807083, "pa": 251, "ops": 0.621, "warp": 0.2}, {"team": "CIN", "mlbid": 680756, "pa": 251, "ops": 0.618, "warp": 0.2}, {"team": "SD", "mlbid": 681036, "pa": 251, "ops": 0.623, "warp": 0.2}, {"team": "TEX", "mlbid": 806964, "pa": 251, "ops": 0.644, "warp": 0.2}, {"team": "SF", "mlbid": 678681, "pa": 251, "ops": 0.657, "warp": 0.2}, {"team": "ARI", "mlbid": 815154, "pa": 251, "ops": 0.613, "warp": 0.2}, {"team": "MIL", "mlbid": 670232, "pa": 251, "ops": 0.624, "warp": 0.2}, {"team": "PHI", "mlbid": 686551, "pa": 251, "ops": 0.625, "warp": 0.2}, {"team": "PHI", "mlbid": 664238, "pa": 130, "ops": 0.658, "warp": 0.2}, {"team": "SAC", "mlbid": 660829, "pa": 251, "ops": 0.628, "warp": 0.2}, {"team": "HOU", "mlbid": 621529, "pa": 251, "ops": 0.628, "warp": 0.2}, {"team": "KC", "mlbid": 663731, "pa": 251, "ops": 0.638, "warp": 0.2}, {"team": "COL", "mlbid": 691182, "pa": 91, "ops": 0.696, "warp": 0.2}, {"team": "BAL", "mlbid": 683770, "pa": 251, "ops": 0.669, "warp": 0.2}, {"team": "NYY", "mlbid": 518934, "pa": 251, "ops": 0.636, "warp": 0.3}, {"team": "NYY", "mlbid": 693645, "pa": 500, "ops": 0.845, "warp": 3.5}, {"team": "NYY", "mlbid": 676205, "pa": 251, "ops": 0.690, "warp": 0.4}, {"team": "NYY", "mlbid": 665482, "pa": 251, "ops": 0.620, "warp": 0.1}, {"team": "NYY", "mlbid": 683522, "pa": 400, "ops": 0.780, "warp": 2.0}, {"team": "NYY", "mlbid": 809763, "pa": 150, "ops": 0.550, "warp": -0.5}, {"team": "BAL", "mlbid": 668974, "pa": 600, "ops": 0.820, "warp": 3.8}, {"team": "BAL", "mlbid": 683770, "pa": 400, "ops": 0.710, "warp": 1.5}, {"team": "LAD", "mlbid": 605141, "pa": 550, "ops": 0.850, "warp": 4.2}, {"team": "LAD", "mlbid": 669227, "pa": 400, "ops": 0.750, "warp": 2.1}, {"team": "LAD", "mlbid": 641871, "pa": 300, "ops": 0.690, "warp": 0.9}, {"team": "LAD", "mlbid": 660829, "pa": 200, "ops": 0.650, "warp": 0.5}, {"team": "LAD", "mlbid": 806077, "pa": 150, "ops": 0.610, "warp": 0.1}, {"team": "SEA", "mlbid": 692039, "pa": 550, "ops": 0.810, "warp": 3.1}, {"team": "SEA", "mlbid": 681391, "pa": 450, "ops": 0.760, "warp": 2.2}, {"team": "SEA", "mlbid": 687659, "pa": 400, "ops": 0.730, "warp": 1.4}, {"team": "HOU", "mlbid": 621529, "pa": 500, "ops": 0.760, "warp": 2.4}, {"team": "HOU", "mlbid": 668203, "pa": 400, "ops": 0.740, "warp": 1.9}, {"team": "OAK", "mlbid": 661531, "pa": 300, "ops": 0.650, "warp": 0.3}, {"team": "OAK", "mlbid": 694034, "pa": 450, "ops": 0.700, "warp": 1.1}, {"team": "NYM", "mlbid": 666163, "pa": 500, "ops": 0.780, "warp": 2.8}, {"team": "NYM", "mlbid": 605195, "pa": 400, "ops": 0.740, "warp": 2.0}, {"team": "SD", "mlbid": 518792, "pa": 550, "ops": 0.800, "warp": 3.0}, {"team": "SD", "mlbid": 669392, "pa": 450, "ops": 0.750, "warp": 2.0}]'''
-
-PECOTA_PIT_EMBEDDED = '''[{"team": "NYY", "mlbid": 693645, "ip": 180.0, "fip": 3.20, "era": 3.05, "role": "SP", "warp": 3.5}, {"team": "NYY", "mlbid": 665482, "ip": 160.0, "fip": 3.50, "era": 3.30, "role": "SP", "warp": 2.5}, {"team": "NYY", "mlbid": 683522, "ip": 140.0, "fip": 3.60, "era": 3.40, "role": "SP", "warp": 2.1}, {"team": "NYY", "mlbid": 690776, "ip": 60.0, "fip": 2.80, "era": 2.70, "role": "RP", "warp": 1.0}, {"team": "BAL", "mlbid": 668974, "ip": 190.0, "fip": 3.30, "era": 3.15, "role": "SP", "warp": 3.2}, {"team": "BAL", "mlbid": 683770, "ip": 150.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.4}, {"team": "BAL", "mlbid": 687064, "ip": 65.0, "fip": 3.10, "era": 2.95, "role": "RP", "warp": 1.2}, {"team": "LAD", "mlbid": 669227, "ip": 200.0, "fip": 2.90, "era": 2.75, "role": "SP", "warp": 4.5}, {"team": "LAD", "mlbid": 605141, "ip": 170.0, "fip": 3.40, "era": 3.20, "role": "SP", "warp": 3.0}, {"team": "LAD", "mlbid": 641871, "ip": 70.0, "fip": 3.20, "era": 3.05, "role": "RP", "warp": 1.4}, {"team": "SEA", "mlbid": 692039, "ip": 185.0, "fip": 3.40, "era": 3.25, "role": "SP", "warp": 3.1}, {"team": "SEA", "mlbid": 681391, "ip": 165.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.4}, {"team": "SEA", "mlbid": 687659, "ip": 75.0, "fip": 3.00, "era": 2.85, "role": "RP", "warp": 1.3}, {"team": "HOU", "mlbid": 621529, "ip": 175.0, "fip": 3.50, "era": 3.35, "role": "SP", "warp": 2.8}, {"team": "HOU", "mlbid": 668203, "ip": 145.0, "fip": 3.70, "era": 3.55, "role": "SP", "warp": 2.1}, {"team": "OAK", "mlbid": 661531, "ip": 150.0, "fip": 4.20, "era": 4.05, "role": "SP", "warp": 0.8}, {"team": "OAK", "mlbid": 694034, "ip": 130.0, "fip": 4.40, "era": 4.25, "role": "SP", "warp": 0.4}, {"team": "NYM", "mlbid": 666163, "ip": 170.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.3}, {"team": "NYM", "mlbid": 605195, "ip": 150.0, "fip": 3.80, "era": 3.65, "role": "SP", "warp": 1.8}, {"team": "SD", "mlbid": 518792, "ip": 180.0, "fip": 3.50, "era": 3.35, "role": "SP", "warp": 2.6}, {"team": "SD", "mlbid": 669392, "ip": 160.0, "fip": 3.70, "era": 3.55, "role": "SP", "warp": 2.0}, {"team": "ATL", "mlbid": 642086, "ip": 190.0, "fip": 3.30, "era": 3.15, "role": "SP", "warp": 3.4}, {"team": "ATL", "mlbid": 688427, "ip": 60.0, "fip": 2.90, "era": 2.75, "role": "RP", "warp": 1.2}, {"team": "TB", "mlbid": 666165, "ip": 160.0, "fip": 3.80, "era": 3.60, "role": "SP", "warp": 2.0}, {"team": "TOR", "mlbid": 687072, "ip": 150.0, "fip": 4.00, "era": 3.80, "role": "SP", "warp": 1.4}, {"team": "BOS", "mlbid": 687072, "ip": 165.0, "fip": 3.90, "era": 3.70, "role": "SP", "warp": 1.8}, {"team": "CLE", "mlbid": 689958, "ip": 180.0, "fip": 3.20, "era": 3.05, "role": "SP", "warp": 3.2}, {"team": "CLE", "mlbid": 676390, "ip": 140.0, "fip": 3.50, "era": 3.35, "role": "SP", "warp": 2.2}, {"team": "CLE", "mlbid": 687064, "ip": 65.0, "fip": 2.80, "era": 2.65, "role": "RP", "warp": 1.4}, {"team": "MIN", "mlbid": 641927, "ip": 155.0, "fip": 3.90, "era": 3.70, "role": "SP", "warp": 1.6}, {"team": "MIN", "mlbid": 623437, "ip": 65.0, "fip": 3.40, "era": 3.25, "role": "RP", "warp": 1.0}, {"team": "MIN", "mlbid": 693306, "ip": 70.0, "fip": 4.10, "era": 3.95, "role": "RP", "warp": 0.6}, {"team": "DET", "mlbid": 667452, "ip": 170.0, "fip": 3.70, "era": 3.50, "role": "SP", "warp": 2.2}, {"team": "DET", "mlbid": 689577, "ip": 140.0, "fip": 3.90, "era": 3.75, "role": "SP", "warp": 1.6}, {"team": "KC", "mlbid": 663731, "ip": 165.0, "fip": 3.80, "era": 3.60, "role": "SP", "warp": 1.9}, {"team": "KC", "mlbid": 686701, "ip": 130.0, "fip": 4.20, "era": 4.00, "role": "SP", "warp": 0.8}, {"team": "CWS", "mlbid": 695731, "ip": 150.0, "fip": 4.30, "era": 4.10, "role": "SP", "warp": 0.6}, {"team": "CWS", "mlbid": 807747, "ip": 140.0, "fip": 4.40, "era": 4.25, "role": "SP", "warp": 0.4}, {"team": "LAA", "mlbid": 806534, "ip": 160.0, "fip": 3.90, "era": 3.75, "role": "SP", "warp": 1.4}, {"team": "LAA", "mlbid": 690804, "ip": 145.0, "fip": 4.00, "era": 3.85, "role": "SP", "warp": 1.2}, {"team": "PHI", "mlbid": 800607, "ip": 185.0, "fip": 3.40, "era": 3.25, "role": "SP", "warp": 3.1}, {"team": "PHI", "mlbid": 681323, "ip": 165.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.4}, {"team": "PHI", "mlbid": 676252, "ip": 65.0, "fip": 2.90, "era": 2.75, "role": "RP", "warp": 1.1}, {"team": "MIA", "mlbid": 807751, "ip": 155.0, "fip": 4.00, "era": 3.80, "role": "SP", "warp": 1.3}, {"team": "MIA", "mlbid": 686460, "ip": 140.0, "fip": 4.10, "era": 3.95, "role": "SP", "warp": 1.0}, {"team": "WSH", "mlbid": 692453, "ip": 160.0, "fip": 4.10, "era": 3.95, "role": "SP", "warp": 1.1}, {"team": "WSH", "mlbid": 669379, "ip": 130.0, "fip": 4.30, "era": 4.15, "role": "SP", "warp": 0.5}, {"team": "CHC", "mlbid": 624424, "ip": 175.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.4}, {"team": "CHC", "mlbid": 676962, "ip": 155.0, "fip": 3.80, "era": 3.65, "role": "SP", "warp": 1.8}, {"team": "MIL", "mlbid": 670232, "ip": 165.0, "fip": 3.70, "era": 3.55, "role": "SP", "warp": 2.1}, {"team": "MIL", "mlbid": 694843, "ip": 65.0, "fip": 3.30, "era": 3.15, "role": "RP", "warp": 1.1}, {"team": "PIT", "mlbid": 621466, "ip": 160.0, "fip": 3.90, "era": 3.70, "role": "SP", "warp": 1.5}, {"team": "PIT", "mlbid": 699018, "ip": 145.0, "fip": 4.00, "era": 3.85, "role": "SP", "warp": 1.2}, {"team": "STL", "mlbid": 647378, "ip": 170.0, "fip": 3.70, "era": 3.55, "role": "SP", "warp": 2.0}, {"team": "STL", "mlbid": 666277, "ip": 150.0, "fip": 3.90, "era": 3.70, "role": "SP", "warp": 1.5}, {"team": "CIN", "mlbid": 680756, "ip": 155.0, "fip": 3.90, "era": 3.75, "role": "SP", "warp": 1.4}, {"team": "CIN", "mlbid": 687924, "ip": 140.0, "fip": 4.10, "era": 3.90, "role": "SP", "warp": 1.0}, {"team": "LAD", "mlbid": 641871, "ip": 195.0, "fip": 3.10, "era": 2.95, "role": "SP", "warp": 4.0}, {"team": "ARI", "mlbid": 702258, "ip": 165.0, "fip": 3.80, "era": 3.65, "role": "SP", "warp": 1.8}, {"team": "SF", "mlbid": 692238, "ip": 175.0, "fip": 3.60, "era": 3.45, "role": "SP", "warp": 2.3}, {"team": "SF", "mlbid": 527038, "ip": 155.0, "fip": 3.80, "era": 3.65, "role": "SP", "warp": 1.8}, {"team": "COL", "mlbid": 691182, "ip": 150.0, "fip": 4.50, "era": 4.35, "role": "SP", "warp": 0.2}]'''
+# NOTE: Paste your full JSON strings here if you are not using the Excel files.
+PECOTA_HIT_EMBEDDED = '[]' 
+PECOTA_PIT_EMBEDDED = '[]'
 
 # ==============================================================================
 # CONSTANTS
@@ -56,7 +56,8 @@ PRIOR_PECOTA_WEIGHT      = 0.45
 PRIOR_HIST_2025_WEIGHT   = 0.35
 PRIOR_HIST_2024_WEIGHT   = 0.20
 
-STATCAST_INFLUENCE       = 0.55  # Increased to better reflect underlying talent
+# Updated: Reduced to prevent over-reacting to early Statcast noise
+STATCAST_INFLUENCE       = 0.45  
 
 ROSTER_WEIGHT_ACTIVE     = 600.0
 ROSTER_WEIGHT_IL         = 10.0
@@ -65,19 +66,22 @@ ROSTER_WEIGHT_OTHER      = 300.0
 TYPICAL_TEAM_WARP        = 35.0
 MAX_IL_FRAC              = 0.50
 
-PYTHAG_REGRESSION_PA     = 100  # More trust in early run differential
-PROJ_WEIGHT_MAX          = 0.72  # Adjusted for early season stability
+# Updated: More trust in early season baseline (120 PA)
+PYTHAG_REGRESSION_PA     = 120
+# Updated: More weight to PECOTA talent early on
+PROJ_WEIGHT_MAX          = 0.75
 PROJ_WEIGHT_MIN          = 0.45
+
+# Updated: Tightened thresholds for classification
+TIER_HARD_SELLER         = 4.5
+TIER_SOFT_SELLER         = 3.5
+TIER_SOFT_BUYER          = -3.0
+TIER_HARD_BUYER          = -8.0
 
 RD_SENSITIVITY           = 0.025
 RD_DAMPENER_START_GP     = 50
 LUCK_SENSITIVITY         = 0.50
 LUCK_DAMPENER_START_GP   = 40
-
-TIER_HARD_SELLER         =  5.0   # Lowered for better classification separation
-TIER_SOFT_SELLER         =  4.0
-TIER_SOFT_BUYER          = -3.0
-TIER_HARD_BUYER          = -8.0
 
 ADJ_HARD_SELLER          = -0.12
 ADJ_SOFT_SELLER          = -0.06
@@ -86,7 +90,8 @@ ADJ_SOFT_BUYER           = +0.04
 ADJ_HARD_BUYER           = +0.07
 ADJ_SCALE                =  0.015
 
-LUCK_REGRESSION_FACTOR   = 0.30  # Reduced to prevent over-regression
+# Updated: More aggressive regression for luck
+LUCK_REGRESSION_FACTOR   = 0.45
 SOS_SENSITIVITY          = 0.15
 
 TEAM_INFO = {
@@ -286,24 +291,42 @@ def _load_pecota_data():
     global _PECOTA_HIT_DF, _PECOTA_PIT_DF
     if _PECOTA_HIT_DF is not None and _PECOTA_PIT_DF is not None:
         return _PECOTA_HIT_DF, _PECOTA_PIT_DF
+    
     try:
-        hit_data = json.loads(PECOTA_HIT_EMBEDDED)
-        _PECOTA_HIT_DF = pd.DataFrame(hit_data)
-        _PECOTA_HIT_DF["team_id"] = _PECOTA_HIT_DF["team"].map(PECOTA_TEAM_MAP)
-        _PECOTA_HIT_DF = _PECOTA_HIT_DF.dropna(subset=["team_id"])
-        _PECOTA_HIT_DF["team_id"] = _PECOTA_HIT_DF["team_id"].astype(int)
-        for c in ["mlbid", "pa", "ops", "warp"]:
-            if c in _PECOTA_HIT_DF.columns: _PECOTA_HIT_DF[c] = pd.to_numeric(_PECOTA_HIT_DF[c], errors="coerce")
-    except Exception as e: st.error(f"Error loading embedded PECOTA hitters: {e}"); st.stop()
-    try:
-        pit_data = json.loads(PECOTA_PIT_EMBEDDED)
-        _PECOTA_PIT_DF = pd.DataFrame(pit_data)
-        _PECOTA_PIT_DF["team_id"] = _PECOTA_PIT_DF["team"].map(PECOTA_TEAM_MAP)
-        _PECOTA_PIT_DF = _PECOTA_PIT_DF.dropna(subset=["team_id"])
-        _PECOTA_PIT_DF["team_id"] = _PECOTA_PIT_DF["team_id"].astype(int)
-        for c in ["mlbid", "ip", "fip", "era", "warp"]:
-            if c in _PECOTA_PIT_DF.columns: _PECOTA_PIT_DF[c] = pd.to_numeric(_PECOTA_PIT_DF[c], errors="coerce")
-    except Exception as e: st.error(f"Error loading embedded PECOTA pitchers: {e}"); st.stop()
+        hit_file = "pecota2026_hitting_mar26.xlsx"
+        pit_file = "pecota2026_pitching_mar26.xlsx"
+        
+        if os.path.exists(hit_file) and os.path.exists(pit_file):
+            st.info("Loading data from Excel files...")
+            hit_df = pd.read_excel(hit_file)
+            pit_df = pd.read_excel(pit_file)
+            
+            hit_df["team_id"] = hit_df["team"].map(PECOTA_TEAM_MAP)
+            hit_df = hit_df.dropna(subset=["team_id"])
+            hit_df["team_id"] = hit_df["team_id"].astype(int)
+            
+            pit_df["team_id"] = pit_df["team"].map(PECOTA_TEAM_MAP)
+            pit_df = pit_df.dropna(subset=["team_id"])
+            pit_df["team_id"] = pit_df["team_id"].astype(int)
+            
+            _PECOTA_HIT_DF = hit_df
+            _PECOTA_PIT_DF = pit_df
+        else:
+            st.info("Loading data from embedded strings...")
+            hit_data = json.loads(PECOTA_HIT_EMBEDDED)
+            _PECOTA_HIT_DF = pd.DataFrame(hit_data)
+            _PECOTA_HIT_DF["team_id"] = _PECOTA_HIT_DF["team"].map(PECOTA_TEAM_MAP)
+            _PECOTA_HIT_DF = _PECOTA_HIT_DF.dropna(subset=["team_id"])
+            _PECOTA_HIT_DF["team_id"] = _PECOTA_HIT_DF["team_id"].astype(int)
+            
+            pit_data = json.loads(PECOTA_PIT_EMBEDDED)
+            _PECOTA_PIT_DF = pd.DataFrame(pit_data)
+            _PECOTA_PIT_DF["team_id"] = _PECOTA_PIT_DF["team"].map(PECOTA_TEAM_MAP)
+            _PECOTA_PIT_DF = _PECOTA_PIT_DF.dropna(subset=["team_id"])
+            _PECOTA_PIT_DF["team_id"] = _PECOTA_PIT_DF["team_id"].astype(int)
+    except Exception as e: 
+        st.error(f"Error loading PECOTA data: {e}"); st.stop()
+        
     return _PECOTA_HIT_DF, _PECOTA_PIT_DF
 
 def _fetch_statcast_hist(year,stat_type):
@@ -404,28 +427,42 @@ def fetch_team_projections(standings_df, roster_map):
         ph_team = ph[ph["team_id"]==tid]
         pp_team = pp[pp["team_id"]==tid].copy()
         
-        # 🔧 PITCHING ROLE OVERRIDE (WARP-based since GS is 0)
-        if not pp_team.empty:
-            # Sort by WARP descending to find the most valuable pitchers (likely starters)
-            pp_team = pp_team.sort_values("warp", ascending=False).reset_index(drop=True)
+        # 🔧 GS PERCENTAGE LOGIC FIX
+        # Pitchers are only classified as SP if they have started >= 50% of their games.
+        # This prevents swingmen/openers (like Sean Manaea early in his career) from inflating SP ERA.
+        if not pp_team.empty and "gs" in pp_team.columns and "g" in pp_team.columns:
+            valid_games = pp_team['g'] > 0
+            pp_team['gs_pct'] = 0.0
+            pp_team.loc[valid_games, 'gs_pct'] = pp_team.loc[valid_games, 'gs'] / pp_team.loc[valid_games, 'g']
             
-            # Assign roles: Top 6 are Starters, rest are Relievers
-            for i in range(len(pp_team)):
-                if i < 6:
-                    pp_team.at[i, "role"] = "SP"
-                else:
-                    pp_team.at[i, "role"] = "RP"
-                    
+            # Default to RP, override to SP if GS% >= 0.50
+            pp_team['role'] = 'RP'
+            pp_team.loc[pp_team['gs_pct'] >= 0.50, 'role'] = 'SP'
+            
         pecota_ops = LEAGUE_AVG_OPS
         if not ph_team.empty:
-            # Sort hitters by WARP to get the best lineup
-            ph_top9 = ph_team.sort_values("warp", ascending=False).head(9)
+            pa_vals = ph_team["pa"].fillna(0).tolist()
+            mlbids = ph_team["mlbid"].tolist()
+            ops_vals = ph_team["ops"].fillna(LEAGUE_AVG_OPS).tolist()
             
-            ops_vals = ph_top9["ops"].fillna(LEAGUE_AVG_OPS)
-            # Weight by WARP (better players have more influence)
-            weights = ph_top9["warp"].abs().fillna(1) 
-            pecota_ops = float(np.average(ops_vals, weights=weights))
+            weights = []
+            valid_ops = []
+            for pa, mlbid, ops in zip(pa_vals, mlbids, ops_vals):
+                w = pa
+                if mlbid in il_ids:
+                    w *= (ROSTER_WEIGHT_IL / ROSTER_WEIGHT_ACTIVE)
+                elif mlbid not in active_ids:
+                    w *= (ROSTER_WEIGHT_OTHER / ROSTER_WEIGHT_ACTIVE)
+                if w > 0:
+                    weights.append(w)
+                    valid_ops.append(ops)
             
+            if weights:
+                total_w = sum(weights)
+                pecota_ops = sum(w * o for w, o in zip(weights, valid_ops)) / total_w
+            else:
+                pecota_ops = LEAGUE_AVG_OPS
+                
         pecota_ops = float(np.clip(pecota_ops, 0.620, 0.850))
         
         cur_pa = float(team_pa.get(tid, 0))
