@@ -2,13 +2,8 @@
 MLB 2026 Season Projections
 Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
-
-Key Updates:
-- Adjusted STATCAST_INFLUENCE (0.55) to properly reward elite underlying metrics.
-- Adjusted LUCK_REGRESSION_FACTOR (0.30) to prevent over-regressing hot teams like NYY.
-- Adjusted PYTHAG_REGRESSION_PA (100) for smoother early-season blending.
-- Embedded full PECOTA Hitting & Pitching data.
-- Implemented robust sanitization to prevent Pandas dtype crashes.
+✅ Fixed: Added missing PROJ_WEIGHT_MIN constant
+✅ Fixed: Embedded full PECOTA data and applied weight adjustments
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -27,7 +22,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 # ==============================================================================
-# EMBEDDED PECOTA DATA
+# EMBEDDED PECOTA DATA (Derived from uploaded Excel files)
 # ==============================================================================
 
 PECOTA_HIT_EMBEDDED = '''[
@@ -219,6 +214,7 @@ MAX_IL_FRAC              = 0.50
 
 PYTHAG_REGRESSION_PA     = 100  # Updated: Slightly more trust in early run differential
 PROJ_WEIGHT_MAX          = 0.72  # Updated: Adjusted for early season stability
+PROJ_WEIGHT_MIN          = 0.45  # FIXED: Restored missing constant
 
 RD_SENSITIVITY           = 0.025  # Updated: Run diff matters slightly more
 RD_DAMPENER_START_GP     = 50
