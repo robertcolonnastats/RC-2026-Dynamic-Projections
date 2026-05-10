@@ -4,10 +4,10 @@ Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 
 Key Updates:
-- Fixed TYPICAL_TEAM_WARP undefined error
-- Hardened 'role' column assignment for pitchers
-- Improved Excel column cleaning and type safety
-- Aligned weights to target projection ranges
+- Fixed KeyError in Team Detail tab by mapping to correct DataFrame columns
+- Dynamic projection calculation ensures detail view matches leaderboard
+- Updated weights: Statcast (0.40), Pythag Reg (130), Luck Reg (0.50)
+- Loading percentage indicator & updated methodology docs
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -61,26 +61,20 @@ STATCAST_INFLUENCE       = 0.40
 ROSTER_WEIGHT_ACTIVE     = 650.0
 ROSTER_WEIGHT_IL         = 8.0
 ROSTER_WEIGHT_OTHER      = 280.0
-
-# FIXED: Explicitly defined to prevent NameError
 TYPICAL_TEAM_WARP        = 35.0
 MAX_IL_FRAC              = 0.50
-
 PYTHAG_REGRESSION_PA     = 130
 PROJ_WEIGHT_MAX          = 0.75
 PROJ_WEIGHT_MIN          = 0.42
-
 TIER_HARD_SELLER         = 4.2
 TIER_SOFT_SELLER         = 3.2
 TIER_SOFT_BUYER          = -3.0
 TIER_HARD_BUYER          = -8.5
-
 RD_SENSITIVITY           = 0.025
 RD_DAMPENER_START_GP     = 50
 LUCK_SENSITIVITY         = 0.50
 LUCK_DAMPENER_START_GP   = 40
 LUCK_REGRESSION_FACTOR   = 0.50
-
 ADJ_HARD_SELLER          = -0.12
 ADJ_SOFT_SELLER          = -0.06
 ADJ_NEUTRAL              =  0.00
@@ -116,25 +110,21 @@ EST = ZoneInfo("America/New_York")
 # UTILS & CACHE
 # ==============================================================================
 def _ensure_cache_dir(): os.makedirs(CACHE_DIR, exist_ok=True)
-
 def get_season_state():
     t,o,w,d,r = date.today(),date.fromisoformat(OPENING_DAY),date.fromisoformat(WORLD_SERIES_END_APPROX),date.fromisoformat(TRADE_DEADLINE),date.fromisoformat(DEADLINE_RAMP_START)
     if t<o or t>w: return "offseason"
     elif t>d: return "post_deadline"
     elif t>=r: return "deadline_ramp"
     return "pre_deadline"
-
 def get_deadline_ramp_factor():
     t,rs,dl = date.today(),date.fromisoformat(DEADLINE_RAMP_START),date.fromisoformat(TRADE_DEADLINE)
     if t<rs: return 0.0
     if t>=dl: return 1.0
     return round(min(max((t-rs).days/max((dl-rs).days,1),0.0),1.0),4)
-
 def get_last_updated():
     _ensure_cache_dir()
     if not os.path.exists(CACHE_FILE): return "Never"
     return datetime.fromtimestamp(os.path.getmtime(CACHE_FILE),tz=EST).strftime("%B %d, %Y at %I:%M %p EST")
-
 def is_cache_valid():
     _ensure_cache_dir()
     if not os.path.exists(CACHE_FILE): return False
@@ -145,20 +135,17 @@ def is_cache_valid():
                 os.remove(CACHE_FILE); return False
     except: return False
     return True
-
 def load_cache():
     if not is_cache_valid(): return None
     try:
         with open(CACHE_FILE) as f: return json.load(f)
     except: return None
-
 def save_cache(payload):
     _ensure_cache_dir()
     try:
         payload["cache_version"] = CACHE_VERSION
         with open(CACHE_FILE,"w") as f: json.dump(payload,f,default=str)
     except Exception as e: print(f"Cache write failed: {e}")
-
 def sanitize_df(df):
     for c in df.columns:
         if pd.api.types.is_numeric_dtype(df[c]):
@@ -388,9 +375,7 @@ def fetch_team_projections(standings_df, roster_map):
         il_ids = roster_map.get(tid,{}).get("il",set())
         ph_team = ph[ph["team_id"]==tid]
         pp_team = pp[pp["team_id"]==tid].copy()
-        
-        # FIXED: Safe role assignment that won't crash if columns are missing
-        pp_team['role'] = 'RP'  # Default to RP
+        pp_team['role'] = 'RP'
         if not pp_team.empty:
             if 'gs' in pp_team.columns and 'g' in pp_team.columns:
                 pp_team['gs'] = pd.to_numeric(pp_team['gs'], errors='coerce').fillna(0)
@@ -398,7 +383,6 @@ def fetch_team_projections(standings_df, roster_map):
                 valid_games = pp_team['g'] > 0
                 pp_team.loc[valid_games, 'gs_pct'] = pp_team.loc[valid_games, 'gs'] / pp_team.loc[valid_games, 'g']
                 pp_team.loc[pp_team['gs_pct'] >= 0.50, 'role'] = 'SP'
-                
         pecota_ops = LEAGUE_AVG_OPS
         if not ph_team.empty:
             pa_vals = ph_team["pa"].fillna(0).tolist()
@@ -602,14 +586,13 @@ def run_simulation(mdf, sch):
 def render_projections_tab(mdf, sim):
     st.markdown("## 2026 MLB Season Projections")
     st.caption("Updated daily · Projections aligned with target ranges")
-    mdf['Proj W'] = (mdf['blended_win_pct'] * 162).round().astype(int)
-    mdf['Proj L'] = 162 - mdf['Proj W']
     rows = []
     for _, r in mdf.iterrows():
+        t = int(r["team_id"]); pw = int(round(sim["proj_wins"].get(t, r["wins"])))
         rows.append({"Team": r["abbr"], "League": r["league"], "Division": r["division"],
                      "W": int(r["wins"]), "L": int(r["losses"]), "Win%": f"{float(r['win_pct']):.3f}",
                      "Pythag%": f"{float(r['pythag_win_pct']):.3f}", "WC GB": f"{float(r['wc_games_back']):.1f}" if r["wc_games_back"] > 0 else "—",
-                     "Proj W": int(r["Proj W"]), "Proj L": int(r["Proj L"]), 
+                     "Proj W": pw, "Proj L": 162 - pw, 
                      "Status": r.get("tier_label", "Neutral"), "tier": r.get("tier", "neutral"), "SoS": r.get("sos_label", "—")})
     df = pd.DataFrame(rows)
     df = df.sort_values("Proj W", ascending=False).reset_index(drop=True)
@@ -641,28 +624,37 @@ def render_deadline_tab(mdf, sim):
     fig.update_layout(title="Playoff Odds Change: Pre vs Post Deadline", plot_bgcolor="rgba(0,0,0,0)", height=420)
     fig.add_hline(y=0, line_dash="dash"); st.plotly_chart(fig, width="stretch")
 
+# FIXED: Mapped keys to actual DataFrame columns
 def render_team_tab(mdf, sim):
     opts = sorted([(r["name"], int(r["team_id"])) for _, r in mdf.iterrows()])
     sel = st.selectbox("Select Team", [o[0] for o in opts], key="team_sel")
-    tid = next(o[1] for o in opts if o[0] == sel); r = mdf[mdf["team_id"] == tid].iloc[0]; tier = r.get("tier", "neutral")
+    tid = next(o[1] for o in opts if o[0] == sel)
+    r = mdf[mdf["team_id"] == tid].iloc[0]
+    
+    # Dynamic projection calculation to match leaderboard
+    pw = int(round(sim["proj_wins"].get(int(tid), r["wins"])))
+    pl = 162 - pw
+    
     st.markdown(f"## {r['name']} ({r['league']})")
-    st.caption(f"{r['division']} · {TIER_EMOJI.get(tier, '⚪')} {r.get('tier_label', 'Neutral')}")
-    pw = int(r["Proj W"]); pl = int(r["Proj L"])
     st.markdown("### Season Projections")
     m1,m2,m3,m4,m5,m6 = st.columns(6)
-    m1.metric("Record", f"{int(r['W'])}-{int(r['L'])}"); m2.metric("Proj Rec", f"{pw}-{pl}")
-    m3.metric("Win%", f"{float(r['Win%']):.3f}"); m4.metric("Pythag%", f"{float(r['Pythag%']):.3f}")
-    m5.metric("WC GB", f"{r['WC GB']}"); m6.metric("SoS", r['SoS'])
+    m1.metric("Record", f"{int(r['wins'])}-{int(r['losses'])}")
+    m2.metric("Proj Rec", f"{pw}-{pl}")
+    m3.metric("Win%", f"{float(r['win_pct']):.3f}")
+    m4.metric("Pythag%", f"{float(r['pythag_win_pct']):.3f}")
+    m5.metric("WC GB", f"{float(r['wc_games_back']):.1f}" if r['wc_games_back'] > 0 else "—")
+    m6.metric("SoS", r['sos_label'])
+    
     st.markdown("---")
     st.markdown("### Classification Drivers")
     ci1,ci2 = st.columns(2)
     with ci1:
         st.markdown("**Inputs**")
-        for k, v in [("Wins", int(r['W'])), ("Losses", int(r['L'])), ("Win%", f"{float(r['Win%']):.3f}"), ("Pythag%", f"{float(r['Pythag%']):.3f}"), ("Proj W", pw), ("Proj L", pl), ("Status", r['Status']), ("SoS", r['SoS'])]:
+        for k, v in [("Wins", int(r['wins'])), ("Losses", int(r['losses'])), ("Win%", f"{float(r['win_pct']):.3f}"), ("Pythag%", f"{float(r['pythag_win_pct']):.3f}"), ("Proj W", pw), ("Proj L", pl), ("Status", r['tier_label']), ("SoS", r['sos_label'])]:
             st.markdown(f"- **{k}:** {v}")
     with ci2:
         st.markdown("**Note**")
-        st.info("Team detail view is simplified in CSV-first mode. Re-enable dynamic projection engine for full deadline impact, luck regression, and simulation odds.")
+        st.info("Team detail view uses master dataframe columns. Re-enable dynamic projection engine for full deadline impact, luck regression, and simulation odds.")
 
 def render_methodology_tab():
     st.markdown("## 📖 Methodology & Data Flow")
