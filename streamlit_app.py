@@ -4,10 +4,9 @@ Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 
 Key Updates:
-- Fixed f-string typo in caption
-- Restored full Team Detail tab with all metrics & odds
-- Added Excel column validator for debugging
-- Verified all dynamic functions (buyer/seller, luck regression, sim) are intact
+- Fixed status timing: Teams now show "Neutral" until ramp starts (May 20)
+- Fixed null mapping: Drops empty Excel rows & cleans whitespace
+- Added exact unmapped value to diagnostics for debugging
 - Updated weights: Statcast (0.40), Pythag (130), Luck (0.50)
 """
 import os, json, warnings, sys
@@ -41,7 +40,7 @@ RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v33-ui-stabilized"
+CACHE_VERSION = "v34-timing-and-null-fix"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -303,13 +302,17 @@ def _load_pecota_data():
             hit_df.columns = [col.strip().lower() for col in hit_df.columns]
             pit_df.columns = [col.strip().lower() for col in pit_df.columns]
             
-            # Store debug info for UI
+            # Store debug info
             _PECOTA_DEBUG_INFO['hit_cols'] = list(hit_df.columns)
             _PECOTA_DEBUG_INFO['pit_cols'] = list(pit_df.columns)
             if 'team' in hit_df.columns:
-                _PECOTA_DEBUG_INFO['excel_teams'] = list(hit_df['team'].unique())
+                _PECOTA_DEBUG_INFO['excel_teams'] = list(hit_df['team'].dropna().unique())
             else:
                 _PECOTA_DEBUG_INFO['excel_teams'] = ["Column 'team' not found!"]
+            
+            # FIX: Drop empty rows that cause the null mapping
+            if 'team' in hit_df.columns: hit_df = hit_df.dropna(subset=['team'])
+            if 'team' in pit_df.columns: pit_df = pit_df.dropna(subset=['team'])
             
             # Normalize team column: strip, uppercase, map to abbreviation
             def normalize_team(val):
@@ -317,6 +320,7 @@ def _load_pecota_data():
                 val = str(val).strip().upper()
                 if val in PECOTA_TEAM_MAP:
                     return val
+                _PECOTA_DEBUG_INFO.setdefault('unmapped', []).append(val)
                 return None
             
             hit_df['team_norm'] = hit_df['team'].apply(normalize_team)
@@ -561,7 +565,10 @@ def compute_buyer_seller(df):
     luck_mod = (df["luck_wins"] * LUCK_SENSITIVITY * ((df["games_played"] - LUCK_DAMPENER_START_GP) / 60.0).clip(0, 1)).astype(float)
     pre = df["wc_games_back"] + rd_mod + luck_mod
     damp = df["games_played"].apply(lambda g: 0.5 if g <= 30 else 0.75 if g <= 55 else 0.9 if g <= 81 else 1.0)
-    dp = min(max((date.today() - date(SEASON_YEAR, 4, 1)).days / max((date(SEASON_YEAR, 6, 15) - date(SEASON_YEAR, 4, 1)).days, 1), 0.4), 1.0)
+    
+    # FIX: Align dp with the actual deadline ramp start date (May 20)
+    dp = get_deadline_ramp_factor()
+    
     df["adjusted_score"] = (pre * damp * dp).astype(float)
     df["base_adj"] = pd.Series(np.clip(-df["adjusted_score"].values * ADJ_SCALE, ADJ_HARD_SELLER, ADJ_HARD_BUYER), index=df.index).astype(float)
     df["tier"] = df["adjusted_score"].apply(lambda s: "hard_seller" if s >= TIER_HARD_SELLER else "soft_seller" if s >= TIER_SOFT_SELLER else "neutral" if s >= TIER_SOFT_BUYER else "soft_buyer" if s >= TIER_HARD_BUYER else "hard_buyer")
@@ -676,10 +683,9 @@ def render_projections_tab(mdf, sim):
     if _PECOTA_DEBUG_INFO:
         with st.expander("🔍 PECOTA Data Diagnostics", expanded=False):
             st.write(f"**Teams loaded:** {len(set(_PECOTA_HIT_DF['team_id'].unique()) | set(_PECOTA_PIT_DF['team_id'].unique()))}/30")
-            st.write("**Excel Hitting Columns:**")
-            st.json(_PECOTA_DEBUG_INFO.get('hit_cols', []))
-            st.write("**Excel Pitching Columns:**")
-            st.json(_PECOTA_DEBUG_INFO.get('pit_cols', []))
+            if 'unmapped' in _PECOTA_DEBUG_INFO:
+                st.write("**⚠️ Unmapped Excel Values (Fix in Excel file):**")
+                st.json(list(set(_PECOTA_DEBUG_INFO['unmapped'])))
             st.write("**Unique Team Names from Excel:**")
             st.json(_PECOTA_DEBUG_INFO.get('excel_teams', []))
     
@@ -746,7 +752,6 @@ def render_team_tab(mdf, sim):
     tid = next(o[1] for o in opts if o[0] == sel)
     r = mdf[mdf["team_id"] == tid].iloc[0]
     
-    # Dynamic projection calculation
     pw = int(round(sim["proj_wins"].get(int(tid), r["wins"])))
     pl = 162 - pw
     
@@ -760,7 +765,6 @@ def render_team_tab(mdf, sim):
     m5.metric("WC GB", f"{float(r['wc_games_back']):.1f}" if r['wc_games_back'] > 0 else "—")
     m6.metric("SoS", r['sos_label'])
     
-    # Deadline & Playoff Odds
     pre_po = sim.get("pre_deadline_playoff_odds", {}).get(int(tid), 0)
     post_po = sim.get("playoff_odds", {}).get(int(tid), 0)
     pre_ws = sim.get("pre_deadline_ws_odds", {}).get(int(tid), 0)
@@ -843,6 +847,7 @@ def render_methodology_tab():
         - Run Diff modifier starts at `{RD_DAMPENER_START_GP}` GP (sensitivity `{RD_SENSITIVITY}`)
         - Luck modifier starts at `{LUCK_DAMPENER_START_GP}` GP (sensitivity `{LUCK_SENSITIVITY}`)
         - Games Played dampener: `50% ≤30` · `75% 31–55` · `90% 56–81` · `100% 82+`
+        - **Status remains Neutral until ramp starts on May 20**
         
         **Tiers & Adjustments:**
         | Tier | Threshold | Win % Adjustment |
