@@ -4,10 +4,10 @@ Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 
 Key Updates:
-- COMPREHENSIVE DIAGNOSTICS TAB: Checks every constraint, file, and logic step.
+- FIXED DIAGNOSTICS CRASH: Replaced 'Proj W' lookup with dynamic calculation.
+- COMPREHENSIVE DIAGNOSTICS TAB: Inspects every variable, constraint, and logic gate.
 - ROBUST MAPPING: Added TEAM_NORMALIZATION to handle full names/aliases.
 - COMPRESSION FIX: Reduced Pythag Regression (130 -> 50) and Disabled Luck Regression.
-- NO TRUNCATION: Full embedded data and constants included.
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -813,7 +813,7 @@ def render_diagnostics_tab(mdf, sim):
     }
     
     const_df = pd.DataFrame(list(constants.items()), columns=["Constant", "Value"])
-    st.dataframe(const_df, hide_index=True)
+    st.dataframe(const_df, hide_index=True, use_container_width=True)
 
     # 4. Mapping Logic
     st.header("4. Mapping & Normalization Logic")
@@ -859,6 +859,7 @@ def render_diagnostics_tab(mdf, sim):
         gp = w + l
         proj_wp = row['proj_win_pct']
         pythag_wp = row['pythag_win_pct']
+        blended_wp = row['blended_win_pct']
         
         # Regression Formula
         reg_factor = gp / (gp + PYTHAG_REGRESSION_PA)
@@ -880,11 +881,12 @@ def render_diagnostics_tab(mdf, sim):
         st.write(f"- Dynamic Projection Weight: {base_proj_w:.2f}")
         
         st.write(f"**Final Output**:")
-        st.write(f"- Blended Win%: {row['blended_win_pct']:.3f}")
-        st.write(f"- Projected Wins: {row['Proj W']}")
+        st.write(f"- Blended Win%: {blended_wp:.3f}")
+        # FIXED: Calculate Proj W dynamically to avoid KeyError
+        st.write(f"- Projected Wins: {int(round(blended_wp * 162))}")
         
         # Check if 0
-        if row['blended_win_pct'] == 0.500:
+        if blended_wp == 0.500:
             st.warning("Blended Win% is exactly 0.500. This indicates a fallback or regression to mean.")
         else:
             st.success("Blended Win% is non-trivial. Logic is active.")
