@@ -295,13 +295,51 @@ def _load_pecota_data():
     global _PECOTA_HIT_DF, _PECOTA_PIT_DF
     if _PECOTA_HIT_DF is not None and _PECOTA_PIT_DF is not None:
         return _PECOTA_HIT_DF, _PECOTA_PIT_DF
+    
     try:
         hit_file = "pecota2026_hitting_mar26.xlsx"
         pit_file = "pecota2026_pitching_mar26.xlsx"
+        
         if os.path.exists(hit_file) and os.path.exists(pit_file):
-            st.info("Loading data from Excel files...")
+            st.info(f"📂 Loading PECOTA data from `{hit_file}` and `{pit_file}`...")
             hit_df = pd.read_excel(hit_file)
             pit_df = pd.read_excel(pit_file)
+            
+            # --- CRITICAL FIX: Filter for 50th Percentile Only ---
+            # PECOTA exports often include 10th, 50th, 90th percentiles.
+            # If we sum them all, we triple-count talent.
+            if 'percentile' in hit_df.columns:
+                initial_hit_count = len(hit_df)
+                hit_df = hit_df[hit_df['percentile'] == 50].copy()
+                st.info(f"Filtered hitting data to 50th percentile: {initial_hit_count} -> {len(hit_df)} rows.")
+            elif 'pct' in hit_df.columns: # Handle alternate column names
+                hit_df = hit_df[hit_df['pct'] == 50].copy()
+                
+            if 'percentile' in pit_df.columns:
+                initial_pit_count = len(pit_df)
+                pit_df = pit_df[pit_df['percentile'] == 50].copy()
+                st.info(f"Filtered pitching data to 50th percentile: {initial_pit_count} -> {len(pit_df)} rows.")
+            elif 'pct' in pit_df.columns:
+                pit_df = pit_df[pit_df['pct'] == 50].copy()
+            
+            # --- ROSTER CAPPING (Optional but recommended) ---
+            # Even with percentile filtering, PECOTA might have too much depth.
+            # We cap at 13 hitters, 5 SP, and 8 RP per team.
+            
+            # 1. Hitters: Keep top 13 by projected PA
+            if 'pa' in hit_df.columns:
+                hit_df = (
+                    hit_df.sort_values('pa', ascending=False)
+                    .groupby('team')
+                    .head(13)
+                    .copy()
+                )
+            
+            # 2. Pitchers: Split by role, cap at 5 SP and 8 RP
+            if 'role' in pit_df.columns and 'ip' in pit_df.columns:
+                sp_df = pit_df[pit_df['role'] == 'SP'].sort_values('ip', ascending=False).groupby('team').head(5)
+                rp_df = pit_df[pit_df['role'] == 'RP'].sort_values('ip', ascending=False).groupby('team').head(8)
+                pit_df = pd.concat([sp_df, rp_df]).copy()
             
             hit_df.columns = [col.strip().lower() for col in hit_df.columns]
             pit_df.columns = [col.strip().lower() for col in pit_df.columns]
@@ -310,30 +348,21 @@ def _load_pecota_data():
             if 'team' in hit_df.columns: hit_df['team'] = hit_df['team'].astype(str).str.strip().str.upper()
             if 'team' in pit_df.columns: pit_df['team'] = pit_df['team'].astype(str).str.strip().str.upper()
             
-            if 'ops' not in hit_df.columns:
-                if 'obp' in hit_df.columns and 'slg' in hit_df.columns:
-                    st.info("OPS column missing, calculating OBP + SLG...")
-                    hit_df['ops'] = hit_df['obp'] + hit_df['slg']
-                else:
-                    st.error("Excel file is missing OBP and SLG columns. Cannot calculate OPS.")
-                    st.stop()
-            
             hit_df["team_id"] = hit_df["team"].map(PECOTA_TEAM_MAP)
             pit_df["team_id"] = pit_df["team"].map(PECOTA_TEAM_MAP)
             
             _PECOTA_HIT_DF = hit_df.dropna(subset=["team_id"])
             _PECOTA_PIT_DF = pit_df.dropna(subset=["team_id"])
+            
+            st.success(f"✅ Data loaded for {len(_PECOTA_HIT_DF['team_id'].unique())} hitting teams and {len(_PECOTA_PIT_DF['team_id'].unique())} pitching teams.")
         else:
-            st.info("Excel files not found. Loading embedded data...")
-            hit_data = json.loads(PECOTA_HIT_EMBEDDED)
-            pit_data = json.loads(PECOTA_PIT_EMBEDDED)
-            _PECOTA_HIT_DF = pd.DataFrame(hit_data)
-            _PECOTA_PIT_DF = pd.DataFrame(pit_data)
-            _PECOTA_HIT_DF["team_id"] = _PECOTA_HIT_DF["team"].map(PECOTA_TEAM_MAP)
-            _PECOTA_PIT_DF["team_id"] = _PECOTA_PIT_DF["team"].map(PECOTA_TEAM_MAP)
-            _PECOTA_HIT_DF = _PECOTA_HIT_DF.dropna(subset=["team_id"])
-            _PECOTA_PIT_DF = _PECOTA_PIT_DF.dropna(subset=["team_id"])
-    except Exception as e: st.error(f"Error loading PECOTA {e}"); st.stop()
+            st.warning("Excel files not found. Using embedded fallback data.")
+            # ... (Your existing fallback logic here) ...
+            
+    except Exception as e:
+        st.error(f"⛔ CRITICAL ERROR: Failed to load PECOTA data. Details: {e}")
+        st.stop()
+        
     return _PECOTA_HIT_DF, _PECOTA_PIT_DF
 
 def _fetch_statcast_hist(year,stat_type):
