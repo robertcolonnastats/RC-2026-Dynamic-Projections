@@ -325,8 +325,6 @@ def _load_pecota_data():
             # --- ROSTER CAPPING (Optional but recommended) ---
             # Even with percentile filtering, PECOTA might have too much depth.
             # We cap at 13 hitters, 5 SP, and 8 RP per team.
-            
-          For 1. Am I cheanging the head section for that?
 
  # 1. Hitters: Keep top 10 by projected PA
 if 'pa' in hit_df.columns:
