@@ -326,32 +326,32 @@ def _load_pecota_data():
             # Even with percentile filtering, PECOTA might have too much depth.
             # We cap at 13 hitters, 5 SP, and 8 RP per team.
 
- # 1. Hitters: Keep top 10 by projected PA
-if 'pa' in hit_df.columns:
-    hit_df = (
-        hit_df.sort_values('pa', ascending=False)
-        .groupby('team')
-        .head(10)
-        .copy()
-    )
+            # 1. Hitters: Keep top 10 by projected PA
+            if 'pa' in hit_df.columns:
+                hit_df = (
+                    hit_df.sort_values('pa', ascending=False)
+                    .groupby('team')
+                    .head(10)
+                    .copy()
+                )
+            
+            # 2. Pitchers: Split by role, cap at 5 SP and 6 RP
+            if 'role' in pit_df.columns and 'ip' in pit_df.columns:
+                sp_df = (
+                    pit_df[pit_df['role'] == 'SP']
+                    .sort_values('ip', ascending=False)
+                    .groupby('team')
+                    .head(5)
+                )
+            
+                rp_df = (
+                    pit_df[pit_df['role'] == 'RP']
+                    .sort_values('ip', ascending=False)
+                    .groupby('team')
+                    .head(6)
+                )
 
-# 2. Pitchers: Split by role, cap at 5 SP and 6 RP
-if 'role' in pit_df.columns and 'ip' in pit_df.columns:
-    sp_df = (
-        pit_df[pit_df['role'] == 'SP']
-        .sort_values('ip', ascending=False)
-        .groupby('team')
-        .head(5)
-    )
-
-    rp_df = (
-        pit_df[pit_df['role'] == 'RP']
-        .sort_values('ip', ascending=False)
-        .groupby('team')
-        .head(6)
-    )
-
-    pit_df = pd.concat([sp_df, rp_df]).copy()
+            pit_df = pd.concat([sp_df, rp_df]).copy()
             
             # Normalize Team Names to Uppercase for Mapping
             if 'team' in hit_df.columns: hit_df['team'] = hit_df['team'].astype(str).str.strip().str.upper()
