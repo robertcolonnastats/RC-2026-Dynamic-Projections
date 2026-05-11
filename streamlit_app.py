@@ -325,16 +325,16 @@ def _load_pecota_data():
             # --- ROSTER CAPPING (Optional but recommended) ---
             # Even with percentile filtering, PECOTA might have too much depth.
             # We cap at 13 hitters, 5 SP, and 8 RP per team.
-
+            
             # 1. Hitters: Keep top 13 by projected PA
-                    if 'pa' in hit_df.columns:
-                            hit_df = (
-                                hit_df.sort_values('pa', ascending=False)
-                                .groupby('team')
-                                .head(13)
-                                .copy()
-                            )
-                        
+            if 'pa' in hit_df.columns:
+                hit_df = (
+                    hit_df.sort_values('pa', ascending=False)
+                    .groupby('team')
+                    .head(13)
+                    .copy()
+                )
+            
             # 2. Pitchers: Split by role, cap at 5 SP and 8 RP
             if 'role' in pit_df.columns and 'ip' in pit_df.columns:
                 sp_df = pit_df[pit_df['role'] == 'SP'].sort_values('ip', ascending=False).groupby('team').head(5)
@@ -364,7 +364,7 @@ def _load_pecota_data():
         st.stop()
         
     return _PECOTA_HIT_DF, _PECOTA_PIT_DF
-
+    
 def _fetch_statcast_hist(year,stat_type):
     try:
         import io
