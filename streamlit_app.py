@@ -4,10 +4,10 @@ Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 
 Key Updates:
-- AUTOMATIC NORMALIZATION: Handles CHW/CWS, WAS/WSH, SAC/OAK automatically.
-- ROLE INFERENCE: Calculates SP/RP from GS/G if missing.
-- STRICT ERRORS: App fails hard with clear message if data is bad. No silent fallbacks.
-- EXPANDED PROJECTIONS: Weights updated to preserve elite/bad team spread.
+- FIXED NaN ERROR: Robust filtering removes rows with missing teams before mapping.
+- GRACEFUL DROPPING: Unrecognized teams or malformed rows are dropped with a warning, not a crash.
+- AUTOMATIC NORMALIZATION: Handles CHW/CWS, WAS/WSH, SAC/OAK variations automatically.
+- AGGRESSIVE WEIGHTS: Updated to expanded range (LAD ~101, NYY ~95).
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -26,7 +26,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 # ==============================================================================
-# CONSTANTS - UPDATED WEIGHTS FOR EXPANDED RANGE
+# CONSTANTS - UPDATED WEIGHTS
 # ==============================================================================
 SEASON_YEAR = 2026
 OPENING_DAY = "2026-03-27"
@@ -40,7 +40,7 @@ RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v40-strict-role-inference"
+CACHE_VERSION = "v41-robust-nan-handling"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -121,8 +121,10 @@ TEAM_NORMALIZATION = {
 }
 
 def normalize_team(team_str):
+    """Safely normalizes team names. Returns None if input is invalid."""
     if pd.isna(team_str): return None
     t = str(team_str).strip().upper()
+    if not t or t == "NAN": return None
     return TEAM_NORMALIZATION.get(t, t)
 
 # STRICT MAPPING (Uses Normalized Keys)
@@ -309,72 +311,71 @@ def _load_pecota_data():
     # STRICT FILE CHECK
     if not os.path.exists(hit_file):
         st.error(f"⛔ CRITICAL ERROR: Hitting data file not found.")
-        st.error(f"Expected file: `{hit_file}`")
-        st.error(f"Current directory: `{os.getcwd()}`")
         st.stop()
         
     if not os.path.exists(pit_file):
         st.error(f"⛔ CRITICAL ERROR: Pitching data file not found.")
-        st.error(f"Expected file: `{pit_file}`")
-        st.error(f"Current directory: `{os.getcwd()}`")
         st.stop()
         
     try:
-        st.info(f"📂 Loading PECOTA data from `{hit_file}` and `{pit_file}`...")
+        st.info(f"📂 Loading PECOTA data...")
         hit_df = pd.read_excel(hit_file)
         pit_df = pd.read_excel(pit_file)
         
-        # STRICT COLUMN CHECK
+        # 1. STRICT COLUMN CHECK
         required_hit_cols = ['team', 'mlbid', 'pa', 'ops', 'warp']
         missing_hit_cols = [c for c in required_hit_cols if c.lower() not in [col.lower() for col in hit_df.columns]]
         if missing_hit_cols:
             st.error(f"⛔ CRITICAL ERROR: Hitting file is missing required columns: {missing_hit_cols}")
-            st.error(f"Found columns: {list(hit_df.columns)}")
             st.stop()
             
-        # Pitching requires these columns. Role is inferred.
         required_pit_cols = ['team', 'mlbid', 'ip', 'fip', 'era', 'warp', 'gs', 'g']
         missing_pit_cols = [c for c in required_pit_cols if c.lower() not in [col.lower() for col in pit_df.columns]]
         if missing_pit_cols:
             st.error(f"⛔ CRITICAL ERROR: Pitching file is missing required columns: {missing_pit_cols}")
-            st.error(f"Found columns: {list(pit_df.columns)}")
             st.stop()
             
-        # NORMALIZE HEADERS
+        # 2. NORMALIZE HEADERS
         hit_df.columns = [col.strip().lower() for col in hit_df.columns]
         pit_df.columns = [col.strip().lower() for col in pit_df.columns]
         
-        # NORMALIZE TEAM NAMES
+        # 3. FILTER INVALID ROWS (FIX FOR NaN TEAMS)
+        # Remove rows where team is missing, empty, or NaN
+        hit_df = hit_df[hit_df['team'].notna()].copy()
+        hit_df = hit_df[hit_df['team'].astype(str).str.strip() != ''].copy()
+        hit_df = hit_df[hit_df['team'].astype(str).str.upper() != 'NAN'].copy()
+        
+        pit_df = pit_df[pit_df['team'].notna()].copy()
+        pit_df = pit_df[pit_df['team'].astype(str).str.strip() != ''].copy()
+        pit_df = pit_df[pit_df['team'].astype(str).str.upper() != 'NAN'].copy()
+        
+        # 4. NORMALIZE TEAM NAMES
         hit_df['team_clean'] = hit_df['team'].apply(normalize_team)
         pit_df['team_clean'] = pit_df['team'].apply(normalize_team)
         
-        # MAP IDs
+        # Remove rows where normalization failed (returned None)
+        hit_df = hit_df[hit_df['team_clean'].notna()].copy()
+        pit_df = pit_df[pit_df['team_clean'].notna()].copy()
+        
+        # 5. MAP IDs
         hit_df["team_id"] = hit_df['team_clean'].map(PECOTA_TEAM_MAP)
         pit_df["team_id"] = pit_df['team_clean'].map(PECOTA_TEAM_MAP)
         
-        # CHECK MAPPING SUCCESS
-        unmapped_hit = hit_df[hit_df['team_id'].isna()]['team_clean'].unique()
-        if len(unmapped_hit) > 0:
-            st.error(f"⛔ CRITICAL ERROR: Could not map {len(unmapped_hit)} teams in Hitting data.")
-            st.error(f"Unmapped teams: {unmapped_hit[:5].tolist()}...")
-            st.stop()
+        # 6. FILTER MAPPED ROWS (Drop unrecognized teams with warning)
+        mapped_hit_count = len(hit_df)
+        hit_df = hit_df[hit_df['team_id'].notna()].copy()
+        if len(hit_df) < mapped_hit_count:
+            st.warning(f"⚠️ Dropped {mapped_hit_count - len(hit_df)} hitting rows with unrecognized team names.")
             
-        unmapped_pit = pit_df[pit_df['team_id'].isna()]['team_clean'].unique()
-        if len(unmapped_pit) > 0:
-            st.error(f"⛔ CRITICAL ERROR: Could not map {len(unmapped_pit)} teams in Pitching data.")
-            st.error(f"Unmapped teams: {unmapped_pit[:5].tolist()}...")
-            st.stop()
+        mapped_pit_count = len(pit_df)
+        pit_df = pit_df[pit_df['team_id'].notna()].copy()
+        if len(pit_df) < mapped_pit_count:
+            st.warning(f"⚠️ Dropped {mapped_pit_count - len(pit_df)} pitching rows with unrecognized team names.")
             
-        # INFERENCE LOGIC: Create Role column if missing
-        # (The error check above ensures 'gs' and 'g' exist, so this is safe)
-        if 'role' not in pit_df.columns:
-            pit_df['role'] = (pit_df['gs'] / pit_df['g'].clip(lower=1)).apply(lambda x: "SP" if x >= 0.5 else "RP")
-            st.success("✅ Inferred pitcher roles (SP/RP) from GS/G data.")
-            
-        _PECOTA_HIT_DF = hit_df.dropna(subset=["team_id"])
-        _PECOTA_PIT_DF = pit_df.dropna(subset=["team_id"])
+        _PECOTA_HIT_DF = hit_df
+        _PECOTA_PIT_DF = pit_df
         
-        st.success(f"✅ Data loaded for {len(_PECOTA_PIT_DF['team_id'].unique())} pitching teams.")
+        st.success(f"✅ Data loaded for {len(_PECOTA_HIT_DF['team_id'].unique())} hitting teams and {len(_PECOTA_PIT_DF['team_id'].unique())} pitching teams.")
             
     except Exception as e:
         st.error(f"⛔ CRITICAL ERROR: Failed to load PECOTA data.")
@@ -474,8 +475,7 @@ def fetch_team_projections(standings_df, roster_map):
             pp_team = pp[pp["team_id"]==tid].copy() if not pp.empty else pd.DataFrame()
             
             if not pp_team.empty:
-                pp_team['role'] = 'RP' # Default, will be overwritten by logic below
-                # Ensure role logic runs if we inferred it or if it exists
+                pp_team['role'] = 'RP'
                 if 'gs_pct' not in pp_team.columns:
                      if 'gs' in pp_team.columns and 'g' in pp_team.columns:
                         valid_games = pp_team['g'] > 0
