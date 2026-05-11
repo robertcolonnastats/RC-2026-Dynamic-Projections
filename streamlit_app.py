@@ -4,11 +4,10 @@ Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 
 Key Updates:
-- REMOVED ALL FALLBACKS: No embedded data. App fails hard if Excel files are missing.
-- STRICT ERROR HANDLING: Clear error messages for missing files or mapping failures.
-- AGGRESSIVE WEIGHTS: Updated to expanded range (LAD ~101, NYY ~95).
-- ENHANCED MAPPING: Expanded team name map to handle variations.
-- ROBUST CLEANING: Auto-strips whitespace and normalizes case for Excel inputs.
+- AUTOMATIC NORMALIZATION: Handles CHW/CWS, WAS/WSH, SAC/OAK automatically.
+- ROLE INFERENCE: Calculates SP/RP from GS/G if missing.
+- STRICT ERRORS: App fails hard with clear message if data is bad. No silent fallbacks.
+- EXPANDED PROJECTIONS: Weights updated to preserve elite/bad team spread.
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -27,7 +26,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 # ==============================================================================
-# CONSTANTS - UPDATED WEIGHTS
+# CONSTANTS - UPDATED WEIGHTS FOR EXPANDED RANGE
 # ==============================================================================
 SEASON_YEAR = 2026
 OPENING_DAY = "2026-03-27"
@@ -41,7 +40,7 @@ RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v39-strict-mode"
+CACHE_VERSION = "v40-strict-role-inference"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -76,6 +75,7 @@ ADJ_HARD_BUYER = +0.07
 ADJ_SCALE = 0.015
 SOS_SENSITIVITY = 0.09  # DECREASED
 
+# STANDARDIZED TEAM INFO
 TEAM_INFO = {
     108:("Los Angeles Angels","LAA","AL West","AL"), 109:("Arizona Diamondbacks","ARI","NL West","NL"),
     110:("Baltimore Orioles","BAL","AL East","AL"),  111:("Boston Red Sox","BOS","AL East","AL"),
@@ -98,6 +98,41 @@ TIER_LABELS = {"hard_seller":"Hard Seller","soft_seller":"Soft Seller","neutral"
 TIER_COLORS = {"hard_seller":"#d62728","soft_seller":"#ff7f0e","neutral":"#7f7f7f","soft_buyer":"#2ca02c","hard_buyer":"#1f77b4"}
 TIER_EMOJI = {"hard_seller":"🔴","soft_seller":"🟠","neutral":"⚪","soft_buyer":"🟢","hard_buyer":"🔵"}
 EST = ZoneInfo("America/New_York")
+
+# ==============================================================================
+# TEAM NORMALIZATION (Fixes CHW/CWS, WAS/WSH, SAC/OAK issues)
+# ==============================================================================
+TEAM_NORMALIZATION = {
+    "CHW": "CWS", "CWS": "CWS", "CHICAGO WHITE SOX": "CWS",
+    "WAS": "WSH", "WSN": "WSH", "WSH": "WSH", "WASHINGTON NATIONALS": "WSH",
+    "SFG": "SF", "SF": "SF", "SAN FRANCISCO GIANTS": "SF",
+    "SDP": "SD", "SD": "SD", "SAN DIEGO PADRES": "SD",
+    "TBR": "TB", "TB": "TB", "TAMPA BAY RAYS": "TB",
+    "OAK": "OAK", "SAC": "OAK", "OAKLAND ATHLETICS": "OAK", "SACRAMENTO RIVER CATS": "OAK",
+    # Add full names for all teams to ensure robust matching
+    "ARIZONA DIAMONDBACKS": "ARI", "ATLANTA BRAVES": "ATL", "BALTIMORE ORIOLES": "BAL", 
+    "BOSTON RED SOX": "BOS", "CHICAGO CUBS": "CHC", "CINCINNATI REDS": "CIN",
+    "CLEVELAND GUARDIANS": "CLE", "COLORADO ROCKIES": "COL", "DETROIT TIGERS": "DET",
+    "HOUSTON ASTROS": "HOU", "KANSAS CITY ROYALS": "KC", "LOS ANGELES ANGELS": "LAA",
+    "LOS ANGELES DODGERS": "LAD", "NEW YORK METS": "NYM", "NEW YORK YANKEES": "NYY",
+    "PHILADELPHIA PHILLIES": "PHI", "PITTSBURGH PIRATES": "PIT", "SEATTLE MARINERS": "SEA",
+    "ST. LOUIS CARDINALS": "STL", "TEXAS RANGERS": "TEX", "TORONTO BLUE JAYS": "TOR",
+    "MINNESOTA TWINS": "MIN", "MIAMI MARLINS": "MIA", "MILWAUKEE BREWERS": "MIL"
+}
+
+def normalize_team(team_str):
+    if pd.isna(team_str): return None
+    t = str(team_str).strip().upper()
+    return TEAM_NORMALIZATION.get(t, t)
+
+# STRICT MAPPING (Uses Normalized Keys)
+PECOTA_TEAM_MAP = {
+    "ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CWS":145, "CIN":113,
+    "CLE":114, "COL":115, "DET":116, "HOU":117, "KC":118, "LAA":108, "LAD":119,
+    "MIA":146, "MIL":158, "MIN":142, "NYM":121, "NYY":147, "PHI":143, "PIT":134,
+    "OAK":133, "SD":135, "SEA":136, "SF":137, "STL":138, "TB":139,
+    "TEX":140, "TOR":141, "WSH":120
+}
 
 # ==============================================================================
 # UTILS & CACHE
@@ -213,7 +248,7 @@ def fetch_standings():
             df.loc[df["league"]==lg,"wc_games_back"] = vals.values
         return sanitize_df(df.sort_values(["league","division","wins"],ascending=[True,True,False]))
     except Exception as e:
-        st.error(f" STANDINGS FETCH FAILED: {e}")
+        st.error(f"⛔ CRITICAL ERROR: Standings fetch failed: {e}")
         st.stop()
 
 def fetch_schedule():
@@ -263,24 +298,6 @@ LEAGUE_RP_IP_SHARE = 0.43
 _PECOTA_HIT_DF = None
 _PECOTA_PIT_DF = None
 
-# STRICT MAPPING
-PECOTA_TEAM_MAP = {
-    "ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CHW":145, "CWS":145, "CIN":113,
-    "CLE":114, "COL":115, "DET":116, "HOU":117, "KC":118, "LAA":108, "LAD":119,
-    "MIA":146, "MIL":158, "MIN":142, "NYM":121, "NYY":147, "PHI":143, "PIT":134,
-    "OAK":133, "SD":135, "SDP":135, "SEA":136, "SF":137, "SFG":137, "STL":138, "TB":139,
-    "TBR":139, "TEX":140, "TOR":141, "WSH":120, "WAS":120, "WSN":120, "SAC":133,
-    # Full Names
-    "ARIZONA DIAMONDBACKS":109, "ATLANTA BRAVES":144, "BALTIMORE ORIOLES":110, "BOSTON RED SOX":111,
-    "CHICAGO CUBS":112, "CHICAGO WHITE SOX":145, "CINCINNATI REDS":113, "CLEVELAND GUARDIANS":114,
-    "COLORADO ROCKIES":115, "DETROIT TIGERS":116, "HOUSTON ASTROS":117, "KANSAS CITY ROYALS":118,
-    "LOS ANGELES ANGELS":108, "LOS ANGELES DODGERS":119, "WASHINGTON NATIONALS":120, "NEW YORK METS":121,
-    "OAKLAND ATHLETICS":133, "PITTSBURGH PIRATES":134, "SAN DIEGO PADRES":135, "SEATTLE MARINERS":136,
-    "SAN FRANCISCO GIANTS":137, "ST. LOUIS CARDINALS":138, "TAMPA BAY RAYS":139, "TEXAS RANGERS":140,
-    "TORONTO BLUE JAYS":141, "MINNESOTA TWINS":142, "PHILADELPHIA PHILLIES":143, "MIAMI MARLINS":146,
-    "NEW YORK YANKEES":147, "MILWAUKEE BREWERS":158, "SACRAMENTO RIVER CATS":133
-}
-
 def _load_pecota_data():
     global _PECOTA_HIT_DF, _PECOTA_PIT_DF
     if _PECOTA_HIT_DF is not None and _PECOTA_PIT_DF is not None:
@@ -315,7 +332,8 @@ def _load_pecota_data():
             st.error(f"Found columns: {list(hit_df.columns)}")
             st.stop()
             
-        required_pit_cols = ['team', 'mlbid', 'ip', 'fip', 'era', 'role', 'warp']
+        # Pitching requires these columns. Role is inferred.
+        required_pit_cols = ['team', 'mlbid', 'ip', 'fip', 'era', 'warp', 'gs', 'g']
         missing_pit_cols = [c for c in required_pit_cols if c.lower() not in [col.lower() for col in pit_df.columns]]
         if missing_pit_cols:
             st.error(f"⛔ CRITICAL ERROR: Pitching file is missing required columns: {missing_pit_cols}")
@@ -327,8 +345,8 @@ def _load_pecota_data():
         pit_df.columns = [col.strip().lower() for col in pit_df.columns]
         
         # NORMALIZE TEAM NAMES
-        hit_df['team_clean'] = hit_df['team'].astype(str).str.strip().str.upper()
-        pit_df['team_clean'] = pit_df['team'].astype(str).str.strip().str.upper()
+        hit_df['team_clean'] = hit_df['team'].apply(normalize_team)
+        pit_df['team_clean'] = pit_df['team'].apply(normalize_team)
         
         # MAP IDs
         hit_df["team_id"] = hit_df['team_clean'].map(PECOTA_TEAM_MAP)
@@ -347,10 +365,16 @@ def _load_pecota_data():
             st.error(f"Unmapped teams: {unmapped_pit[:5].tolist()}...")
             st.stop()
             
+        # INFERENCE LOGIC: Create Role column if missing
+        # (The error check above ensures 'gs' and 'g' exist, so this is safe)
+        if 'role' not in pit_df.columns:
+            pit_df['role'] = (pit_df['gs'] / pit_df['g'].clip(lower=1)).apply(lambda x: "SP" if x >= 0.5 else "RP")
+            st.success("✅ Inferred pitcher roles (SP/RP) from GS/G data.")
+            
         _PECOTA_HIT_DF = hit_df.dropna(subset=["team_id"])
         _PECOTA_PIT_DF = pit_df.dropna(subset=["team_id"])
         
-        st.success(f"✅ Data loaded for {len(_PECOTA_HIT_DF['team_id'].unique())} hitting teams and {len(_PECOTA_PIT_DF['team_id'].unique())} pitching teams.")
+        st.success(f"✅ Data loaded for {len(_PECOTA_PIT_DF['team_id'].unique())} pitching teams.")
             
     except Exception as e:
         st.error(f"⛔ CRITICAL ERROR: Failed to load PECOTA data.")
@@ -450,13 +474,16 @@ def fetch_team_projections(standings_df, roster_map):
             pp_team = pp[pp["team_id"]==tid].copy() if not pp.empty else pd.DataFrame()
             
             if not pp_team.empty:
-                pp_team['role'] = 'RP'
-                if 'gs' in pp_team.columns and 'g' in pp_team.columns:
-                    pp_team['gs'] = pd.to_numeric(pp_team['gs'], errors='coerce').fillna(0)
-                    pp_team['g'] = pd.to_numeric(pp_team['g'], errors='coerce').fillna(0)
-                    valid_games = pp_team['g'] > 0
-                    pp_team.loc[valid_games, 'gs_pct'] = pp_team.loc[valid_games, 'gs'] / pp_team.loc[valid_games, 'g']
-                    pp_team.loc[pp_team['gs_pct'] >= 0.50, 'role'] = 'SP'
+                pp_team['role'] = 'RP' # Default, will be overwritten by logic below
+                # Ensure role logic runs if we inferred it or if it exists
+                if 'gs_pct' not in pp_team.columns:
+                     if 'gs' in pp_team.columns and 'g' in pp_team.columns:
+                        valid_games = pp_team['g'] > 0
+                        pp_team['gs_pct'] = 0.0
+                        pp_team.loc[valid_games, 'gs_pct'] = pp_team.loc[valid_games, 'gs'] / pp_team.loc[valid_games, 'g']
+                        pp_team.loc[pp_team['gs_pct'] >= 0.50, 'role'] = 'SP'
+                else:
+                     pp_team.loc[pp_team['gs_pct'] >= 0.50, 'role'] = 'SP'
             
             pecota_ops = LEAGUE_AVG_OPS
             if not ph_team.empty:
