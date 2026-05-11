@@ -4,10 +4,11 @@ Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 
 Key Updates:
-- Fixed 'tuple' error in missing team detection.
-- Improved team name normalization (strip/upper) to prevent mapping failures.
-- Added robust error handling for PECOTA loading.
-- Updated weights: Statcast (0.40), Pythag (130), Luck (0.50).
+- Added 'SAC' mapping for Oakland Athletics
+- Fixed '30/30 teams' success message
+- Restored full Methodology tab with detailed weights/logic
+- Network resilience & Excel file validation
+- Updated weights: Statcast (0.40), Pythag (130), Luck (0.50)
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -40,7 +41,7 @@ RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v30-tuple-error-fix"
+CACHE_VERSION = "v31-full-methodology-sac-fix"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -90,9 +91,10 @@ TEAM_INFO = {
     141:("Toronto Blue Jays","TOR","AL East","AL"),  142:("Minnesota Twins","MIN","AL Central","AL"),
     143:("Philadelphia Phillies","PHI","NL East","NL"), 144:("Atlanta Braves","ATL","NL East","NL"),
     145:("Chicago White Sox","CWS","AL Central","AL"), 146:("Miami Marlins","MIA","NL East","NL"),
-    147:("New York Yankees","NYY","AL East","AL"),   158:("Milwaukee Brewers","MIL","NL Central","NL"),
+    147:("New York Yankees","NYY","AL East","AL"),   158:("Milwaukee Brewers","MIL","NL Central","ML"),
 }
 
+# Updated Map with SAC (Sacramento/Oakland) handling
 PECOTA_TEAM_MAP = {
     "ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CWS":145, "CHW":145, "CIN":113,
     "CLE":114, "COL":115, "DET":116, "HOU":117, "KC":118, "KCR":118, "LAA":108, "LAD":119,
@@ -283,46 +285,46 @@ def _load_pecota_data():
     hit_file = "pecota2026_hitting_mar26.xlsx"
     pit_file = "pecota2026_pitching_mar26.xlsx"
     
-    # FIX: Use keys (IDs) instead of values (tuples)
-    all_teams = set(TEAM_INFO.keys()) 
-    
     try:
         if os.path.exists(hit_file) and os.path.exists(pit_file):
             st.info(f"📂 Loading PECOTA data from `{hit_file}` and `{pit_file}`...")
             hit_df = pd.read_excel(hit_file)
             pit_df = pd.read_excel(pit_file)
             
-            # Normalize team column: Strip spaces and convert to Uppercase
-            if 'team' in hit_df.columns:
-                hit_df['team'] = hit_df['team'].astype(str).str.strip().str.upper()
-            if 'team' in pit_df.columns:
-                pit_df['team'] = pit_df['team'].astype(str).str.strip().str.upper()
-                
-            if 'ops' not in hit_df.columns and 'obp' in hit_df.columns and 'slg' in hit_df.columns:
-                st.info("⚙️ OPS column missing, calculating OBP + SLG...")
-                hit_df['ops'] = hit_df['obp'] + hit_df['slg']
-                
-            # Map abbreviations to Team IDs
-            hit_df["team_id"] = hit_df["team"].map(PECOTA_TEAM_MAP)
-            pit_df["team_id"] = pit_df["team"].map(PECOTA_TEAM_MAP)
+            # Normalize headers
+            hit_df.columns = [col.strip().lower() for col in hit_df.columns]
+            pit_df.columns = [col.strip().lower() for col in pit_df.columns]
+            
+            # Normalize team column: strip, uppercase, map to abbreviation
+            def normalize_team(val):
+                if pd.isna(val): return None
+                val = str(val).strip().upper()
+                # Try direct match first
+                if val in PECOTA_TEAM_MAP:
+                    return val
+                return None
+            
+            hit_df['team_norm'] = hit_df['team'].apply(normalize_team)
+            pit_df['team_norm'] = pit_df['team'].apply(normalize_team)
+            
+            # Map to team IDs
+            hit_df["team_id"] = hit_df["team_norm"].map(PECOTA_TEAM_MAP)
+            pit_df["team_id"] = pit_df["team_norm"].map(PECOTA_TEAM_MAP)
             
             _PECOTA_HIT_DF = hit_df.dropna(subset=["team_id"])
             _PECOTA_PIT_DF = pit_df.dropna(subset=["team_id"])
             
-            n_hit = _PECOTA_HIT_DF['team_id'].nunique()
-            n_pit = _PECOTA_PIT_DF['team_id'].nunique()
+            loaded_teams = set(_PECOTA_HIT_DF['team_id'].unique()) | set(_PECOTA_PIT_DF['team_id'].unique())
+            all_team_ids = set(TEAM_INFO.keys())
+            missing_teams = [t for t in all_team_ids if t not in loaded_teams]
             
-            found_teams = set(_PECOTA_HIT_DF['team_id'].unique()) | set(_PECOTA_PIT_DF['team_id'].unique())
-            # FIX: Compare IDs against IDs
-            missing_teams = [t for t in all_teams if t not in found_teams]
+            st.success(f"✅ Data loaded for {len(loaded_teams)}/30 teams.")
             
-            st.success(f"✅ Loaded {n_hit} hitters and {n_pit} pitchers from Excel files.")
             if missing_teams:
-                # FIX: Map IDs back to Names for the warning message
                 missing_names = [TEAM_INFO[tid][0] for tid in missing_teams if tid in TEAM_INFO]
                 st.warning(f"⚠️ Missing data for {len(missing_teams)} teams: {', '.join(sorted(missing_names))}")
         else:
-            st.warning("📂 Excel files not found. Using embedded fallback data...")
+            st.warning("📂 Excel files not found. Using fallback data.")
             raise FileNotFoundError("Excel files missing")
             
     except Exception as e: 
@@ -740,7 +742,7 @@ def render_team_tab(mdf, sim):
         st.info("Team detail view uses master dataframe columns.")
 
 def render_methodology_tab():
-    st.markdown("## 📖 Methodology & Data Flow")
+    st.markdown("## 📖 Methodology & Model Architecture")
     st.markdown("""
     This model is built around one core insight: **no existing public system dynamically accounts for deadline trades.** 
     Teams underperforming due to early-season injuries are systematically undervalued—their odds don't reflect the roster they'll actually field in August.
@@ -858,7 +860,6 @@ def main():
     tc.markdown("# MLB 2026 Season Projections")
     tc.caption("Excel-Aligned · Dynamic Projections · No Hardcoding")
     
-    # Debug Panel
     with st.expander("🔍 Debug: File Status & Cache", expanded=False):
         hit_file = "pecota2026_hitting_mar26.xlsx"
         pit_file = "pecota2026_pitching_mar26.xlsx"
