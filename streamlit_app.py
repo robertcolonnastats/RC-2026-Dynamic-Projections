@@ -328,26 +328,32 @@ def _load_pecota_data():
             
           For 1. Am I cheanging the head section for that?
 
- # 1. Hitters: Keep top 13 by projected PA
-            if 'pa' in hit_df.columns:
-                hit_df = (
-                    hit_df.sort_values('pa', ascending=False)
-                    .groupby('team')
-                    .head(13)
-                    .copy()
-                )
-            
-            # 2. Pitchers: Split by role, cap at 5 SP and 8 RP
-            if 'role' in pit_df.columns and 'ip' in pit_df.columns:
-                sp_df = pit_df[pit_df['role'] == 'SP'].sort_values('ip', ascending=False).groupby('team').head(5)
-                rp_df = pit_df[pit_df['role'] == 'RP'].sort_values('ip', ascending=False).groupby('team').head(8)
-                pit_df = pd.concat([sp_df, rp_df]).copy()
-            
-            hit_df.columns = [col.strip().lower() for col in hit_df.columns]
-            pit_df.columns = [col.strip().lower() for col in pit_df.columns]
-            
-            hit_df.columns = [col.strip().lower() for col in hit_df.columns]
-            pit_df.columns = [col.strip().lower() for col in pit_df.columns]
+ # 1. Hitters: Keep top 10 by projected PA
+if 'pa' in hit_df.columns:
+    hit_df = (
+        hit_df.sort_values('pa', ascending=False)
+        .groupby('team')
+        .head(10)
+        .copy()
+    )
+
+# 2. Pitchers: Split by role, cap at 5 SP and 6 RP
+if 'role' in pit_df.columns and 'ip' in pit_df.columns:
+    sp_df = (
+        pit_df[pit_df['role'] == 'SP']
+        .sort_values('ip', ascending=False)
+        .groupby('team')
+        .head(5)
+    )
+
+    rp_df = (
+        pit_df[pit_df['role'] == 'RP']
+        .sort_values('ip', ascending=False)
+        .groupby('team')
+        .head(6)
+    )
+
+    pit_df = pd.concat([sp_df, rp_df]).copy()
             
             # Normalize Team Names to Uppercase for Mapping
             if 'team' in hit_df.columns: hit_df['team'] = hit_df['team'].astype(str).str.strip().str.upper()
