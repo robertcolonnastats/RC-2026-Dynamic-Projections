@@ -4,10 +4,11 @@ Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 
 Key Updates:
-- Expanded PECOTA_TEAM_MAP to include full team names and abbreviations.
-- Added UI diagnostics to show exactly which team names are read from Excel.
-- Fixed league column logic to prevent 'ML' anomalies.
-- Updated weights: Statcast (0.40), Pythag (130), Luck (0.50).
+- Fixed f-string typo in caption
+- Restored full Team Detail tab with all metrics & odds
+- Added Excel column validator for debugging
+- Verified all dynamic functions (buyer/seller, luck regression, sim) are intact
+- Updated weights: Statcast (0.40), Pythag (130), Luck (0.50)
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -40,7 +41,7 @@ RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v32-diagnostics-and-mapping-fix"
+CACHE_VERSION = "v33-ui-stabilized"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -93,15 +94,12 @@ TEAM_INFO = {
     147:("New York Yankees","NYY","AL East","AL"),   158:("Milwaukee Brewers","MIL","NL Central","NL"),
 }
 
-# Expanded map with full names and abbreviations to catch any format
 PECOTA_TEAM_MAP = {
-    # Abbreviations
     "ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CWS":145, "CHW":145, "CIN":113,
     "CLE":114, "COL":115, "DET":116, "HOU":117, "KC":118, "KCR":118, "LAA":108, "LAD":119,
     "MIA":146, "MIL":158, "MIN":142, "NYM":121, "NYY":147, "PHI":143, "PIT":134,
     "OAK":133, "SD":135, "SDP":135, "SEA":136, "SF":137, "SFG":137, "STL":138, "TB":139,
     "TBR":139, "TEX":140, "TOR":141, "WSH":120, "WAS":120, "WSN":120, "SAC":133,
-    # Full Names
     "ARIZONA DIAMONDBACKS":109, "ATLANTA BRAVES":144, "BALTIMORE ORIOLES":110, "BOSTON RED SOX":111,
     "CHICAGO CUBS":112, "CHICAGO WHITE SOX":145, "CINCINNATI REDS":113, "CLEVELAND GUARDIANS":114,
     "COLORADO ROCKIES":115, "DETROIT TIGERS":116, "HOUSTON ASTROS":117, "KANSAS CITY ROYALS":118,
@@ -305,7 +303,9 @@ def _load_pecota_data():
             hit_df.columns = [col.strip().lower() for col in hit_df.columns]
             pit_df.columns = [col.strip().lower() for col in pit_df.columns]
             
-            # Store debug info
+            # Store debug info for UI
+            _PECOTA_DEBUG_INFO['hit_cols'] = list(hit_df.columns)
+            _PECOTA_DEBUG_INFO['pit_cols'] = list(pit_df.columns)
             if 'team' in hit_df.columns:
                 _PECOTA_DEBUG_INFO['excel_teams'] = list(hit_df['team'].unique())
             else:
@@ -670,12 +670,16 @@ def run_simulation(mdf, sch):
 # ==============================================================================
 def render_projections_tab(mdf, sim):
     st.markdown("## 2026 MLB Season Projections")
-    st.caption("Live Data · {N_SIMULATIONS:,}-sim Monte Carlo · PECOTA + Statcast")
+    st.caption(f"Live Data · {N_SIMULATIONS:,}-sim Monte Carlo · PECOTA + Statcast")
     
     # Diagnostics
     if _PECOTA_DEBUG_INFO:
         with st.expander("🔍 PECOTA Data Diagnostics", expanded=False):
             st.write(f"**Teams loaded:** {len(set(_PECOTA_HIT_DF['team_id'].unique()) | set(_PECOTA_PIT_DF['team_id'].unique()))}/30")
+            st.write("**Excel Hitting Columns:**")
+            st.json(_PECOTA_DEBUG_INFO.get('hit_cols', []))
+            st.write("**Excel Pitching Columns:**")
+            st.json(_PECOTA_DEBUG_INFO.get('pit_cols', []))
             st.write("**Unique Team Names from Excel:**")
             st.json(_PECOTA_DEBUG_INFO.get('excel_teams', []))
     
@@ -741,8 +745,11 @@ def render_team_tab(mdf, sim):
     sel = st.selectbox("Select Team", [o[0] for o in opts], key="team_sel")
     tid = next(o[1] for o in opts if o[0] == sel)
     r = mdf[mdf["team_id"] == tid].iloc[0]
+    
+    # Dynamic projection calculation
     pw = int(round(sim["proj_wins"].get(int(tid), r["wins"])))
     pl = 162 - pw
+    
     st.markdown(f"## {r['name']} ({r['league']})")
     st.markdown("### Season Projections")
     m1,m2,m3,m4,m5,m6 = st.columns(6)
@@ -752,16 +759,47 @@ def render_team_tab(mdf, sim):
     m4.metric("Pythag%", f"{float(r['pythag_win_pct']):.3f}")
     m5.metric("WC GB", f"{float(r['wc_games_back']):.1f}" if r['wc_games_back'] > 0 else "—")
     m6.metric("SoS", r['sos_label'])
+    
+    # Deadline & Playoff Odds
+    pre_po = sim.get("pre_deadline_playoff_odds", {}).get(int(tid), 0)
+    post_po = sim.get("playoff_odds", {}).get(int(tid), 0)
+    pre_ws = sim.get("pre_deadline_ws_odds", {}).get(int(tid), 0)
+    post_ws = sim.get("ws_odds", {}).get(int(tid), 0)
+    pre_dv = sim.get("pre_deadline_division_odds", {}).get(int(tid), 0)
+    post_dv = sim.get("division_odds", {}).get(int(tid), 0)
+    
+    st.markdown("### Deadline Impact")
+    d1, d2, d3 = st.columns(3)
+    d1.metric("Division Odds", f"{post_dv:.1%}", f"{post_dv - pre_dv:+.1%} vs pre-DL")
+    d2.metric("Playoff Odds", f"{post_po:.1%}", f"{post_po - pre_po:+.1%} vs pre-DL")
+    d3.metric("WS Odds", f"{post_ws:.2%}", f"{post_ws - pre_ws:+.2%} vs pre-DL")
+    
     st.markdown("---")
     st.markdown("### Classification Drivers")
-    ci1,ci2 = st.columns(2)
+    ci1, ci2 = st.columns(2)
     with ci1:
         st.markdown("**Inputs**")
-        for k, v in [("Wins", int(r['wins'])), ("Losses", int(r['losses'])), ("Win%", f"{float(r['win_pct']):.3f}"), ("Pythag%", f"{float(r['pythag_win_pct']):.3f}"), ("Proj W", pw), ("Proj L", pl), ("Status", r['tier_label']), ("SoS", r['sos_label'])]:
+        for k, v in [("WC Games Back", f"{float(r.get('wc_games_back', 0)):.1f}"), 
+                     ("Run Diff/162", f"{float(r.get('rd_per_162', 0)):+.0f}"), 
+                     ("Actual Win%", f"{float(r.get('win_pct', 0)):.3f}"), 
+                     ("Pythagorean Win%", f"{float(r.get('pythag_win_pct', 0)):.3f}"), 
+                     ("PECOTA Proj Win%", f"{float(r.get('proj_win_pct', 0)):.3f}"), 
+                     ("Blended Win%", f"{float(r.get('blended_win_pct', 0)):.3f}"), 
+                     ("Luck (wins +/-)", f"{float(r.get('luck_wins', 0)):+.1f}"), 
+                     ("IL WARP (missing)", f"{float(r.get('il_warp', 0)):.1f}")]:
             st.markdown(f"- **{k}:** {v}")
     with ci2:
-        st.markdown("**Note**")
-        st.info("Team detail view uses master dataframe columns.")
+        st.markdown("**Score & Adjustments**")
+        gr = max(r.get("games_remaining", 1), 1)
+        lw = float(r.get("luck_wins", 0))
+        for k, v in [("Adjusted Score", f"{float(r.get('adjusted_score', 0)):.2f}"), 
+                     ("Base Win Adj", f"{float(r.get('base_adj', 0)):+.3f}"), 
+                     ("Ramped Adj (today)", f"{float(r.get('ramped_adj', 0)):+.3f}"), 
+                     ("Luck Regression", f"{-(lw * LUCK_REGRESSION_FACTOR) / gr:+.4f}"), 
+                     ("SoS Adjustment", f"{float(r.get('sos_adjustment', 0)):+.4f}"), 
+                     ("Final Adj Win%", f"{float(r.get('adj_win_pct', 0)):.3f}"), 
+                     ("Deadline Ramp", f"{get_deadline_ramp_factor():.1%}")]:
+            st.markdown(f"- **{k}:** {v}")
 
 def render_methodology_tab():
     st.markdown("## 📖 Methodology & Data Flow")
