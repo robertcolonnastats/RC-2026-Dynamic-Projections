@@ -26,54 +26,72 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 # ==============================================================================
-# CONSTANTS
 # ==============================================================================
-SEASON_YEAR = 2026
-OPENING_DAY = "2026-03-27"
-WORLD_SERIES_END_APPROX = "2026-11-01"
-TRADE_DEADLINE = "2026-07-31"
-DEADLINE_RAMP_START = "2026-05-20"
+# CONSTANTS - UPDATED WEIGHTS
+# ==============================================================================
+SEASON_YEAR              = 2026
+OPENING_DAY              = "2026-03-27"
+WORLD_SERIES_END_APPROX  = "2026-11-01"
+TRADE_DEADLINE           = "2026-07-31"
+DEADLINE_RAMP_START      = "2026-05-20"
 
-MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
-N_SIMULATIONS = 1_000
-RANDOM_SEED = 42
-PYTHAG_EXPONENT = 1.83
-CACHE_DIR = "/tmp/rc_mlb_2026_v19"
-CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v34-timing-and-null-fix"
+MLB_API_BASE             = "https://statsapi.mlb.com/api/v1"
+N_SIMULATIONS            = 1_000
+RANDOM_SEED              = 42
+PYTHAG_EXPONENT          = 1.83
+CACHE_DIR                = "/tmp/rc_mlb_2026_v19"
+CACHE_FILE               = "/tmp/rc_mlb_2026_v19/latest.json"
+CACHE_VERSION            = "v35-expanded-projection-range"
 
-PA_FULL_WEIGHT = 400
-IP_FULL_WEIGHT_SP = 150
-IP_FULL_WEIGHT_RP = 40
-PRIOR_PECOTA_WEIGHT = 0.55
-PRIOR_HIST_2025_WEIGHT = 0.35
-PRIOR_HIST_2024_WEIGHT = 0.20
+PA_FULL_WEIGHT           = 400
+IP_FULL_WEIGHT_SP        = 150
+IP_FULL_WEIGHT_RP        = 40
 
-STATCAST_INFLUENCE = 0.25
-ROSTER_WEIGHT_ACTIVE = 650.0
-ROSTER_WEIGHT_IL = 8.0
-ROSTER_WEIGHT_OTHER = 280.0
-TYPICAL_TEAM_WARP = 35.0
-MAX_IL_FRAC = 0.50
-PYTHAG_REGRESSION_PA = 240
-PROJ_WEIGHT_MAX = 0.90
-PROJ_WEIGHT_MIN = 0.32
-TIER_HARD_SELLER = 4.2
-TIER_SOFT_SELLER = 3.2
-TIER_SOFT_BUYER = -3.0
-TIER_HARD_BUYER = -8.5
-RD_SENSITIVITY = 0.025
-RD_DAMPENER_START_GP = 50
-LUCK_SENSITIVITY = 0.50
-LUCK_DAMPENER_START_GP = 40
-LUCK_REGRESSION_FACTOR = 0.24
-ADJ_HARD_SELLER = -0.12
-ADJ_SOFT_SELLER = -0.06
-ADJ_NEUTRAL = 0.00
-ADJ_SOFT_BUYER = +0.04
-ADJ_HARD_BUYER = +0.07
-ADJ_SCALE = 0.015
-SOS_SENSITIVITY = 0.08
+# UPDATED: More trust in PECOTA baseline
+PRIOR_PECOTA_WEIGHT      = 0.58  # ↑ Increased from 0.45
+PRIOR_HIST_2025_WEIGHT   = 0.35
+PRIOR_HIST_2024_WEIGHT   = 0.20
+
+# UPDATED: Reduced Statcast noise impact early season
+STATCAST_INFLUENCE       = 0.22  # ↓ Decreased from 0.40
+
+# UPDATED: Adjusted roster weighting for cleaner talent signal
+ROSTER_WEIGHT_ACTIVE     = 650.0
+ROSTER_WEIGHT_IL         = 8.0
+ROSTER_WEIGHT_OTHER      = 280.0
+TYPICAL_TEAM_WARP        = 35.0
+MAX_IL_FRAC              = 0.50
+
+# UPDATED: Slower regression to current record (keeps elite talent projections longer)
+PYTHAG_REGRESSION_PA     = 190   # ↑ Increased from 130
+
+# UPDATED: Higher initial trust in PECOTA talent
+PROJ_WEIGHT_MAX          = 0.89  # ↑ Increased from 0.78
+PROJ_WEIGHT_MIN          = 0.42
+
+# UPDATED: Tighter buyer/seller thresholds
+TIER_HARD_SELLER         = 4.2
+TIER_SOFT_SELLER         = 3.2
+TIER_SOFT_BUYER          = -3.0
+TIER_HARD_BUYER          = -8.5
+
+RD_SENSITIVITY           = 0.025
+RD_DAMPENER_START_GP     = 50
+LUCK_SENSITIVITY         = 0.50
+LUCK_DAMPENER_START_GP   = 40
+
+# UPDATED: Less punishment for lucky teams (stops dragging elite teams down)
+LUCK_REGRESSION_FACTOR   = 0.28  # ↓ Decreased from 0.50
+
+ADJ_HARD_SELLER          = -0.12
+ADJ_SOFT_SELLER          = -0.06
+ADJ_NEUTRAL              =  0.00
+ADJ_SOFT_BUYER           = +0.04
+ADJ_HARD_BUYER           = +0.07
+ADJ_SCALE                =  0.015
+
+# UPDATED: Reduced schedule of strength penalty
+SOS_SENSITIVITY          = 0.09  # ↓ Decreased from 0.15
 
 TEAM_INFO = {
     108:("Los Angeles Angels","LAA","AL West","AL"), 109:("Arizona Diamondbacks","ARI","NL West","NL"),
