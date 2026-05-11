@@ -4,11 +4,10 @@ Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 
 Key Updates:
-- Added 'SAC' mapping for Oakland Athletics
-- Fixed '30/30 teams' success message
-- Restored full Methodology tab with detailed weights/logic
-- Network resilience & Excel file validation
-- Updated weights: Statcast (0.40), Pythag (130), Luck (0.50)
+- Expanded PECOTA_TEAM_MAP to include full team names and abbreviations.
+- Added UI diagnostics to show exactly which team names are read from Excel.
+- Fixed league column logic to prevent 'ML' anomalies.
+- Updated weights: Statcast (0.40), Pythag (130), Luck (0.50).
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -41,7 +40,7 @@ RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v31-full-methodology-sac-fix"
+CACHE_VERSION = "v32-diagnostics-and-mapping-fix"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -91,16 +90,26 @@ TEAM_INFO = {
     141:("Toronto Blue Jays","TOR","AL East","AL"),  142:("Minnesota Twins","MIN","AL Central","AL"),
     143:("Philadelphia Phillies","PHI","NL East","NL"), 144:("Atlanta Braves","ATL","NL East","NL"),
     145:("Chicago White Sox","CWS","AL Central","AL"), 146:("Miami Marlins","MIA","NL East","NL"),
-    147:("New York Yankees","NYY","AL East","AL"),   158:("Milwaukee Brewers","MIL","NL Central","ML"),
+    147:("New York Yankees","NYY","AL East","AL"),   158:("Milwaukee Brewers","MIL","NL Central","NL"),
 }
 
-# Updated Map with SAC (Sacramento/Oakland) handling
+# Expanded map with full names and abbreviations to catch any format
 PECOTA_TEAM_MAP = {
+    # Abbreviations
     "ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CWS":145, "CHW":145, "CIN":113,
     "CLE":114, "COL":115, "DET":116, "HOU":117, "KC":118, "KCR":118, "LAA":108, "LAD":119,
     "MIA":146, "MIL":158, "MIN":142, "NYM":121, "NYY":147, "PHI":143, "PIT":134,
     "OAK":133, "SD":135, "SDP":135, "SEA":136, "SF":137, "SFG":137, "STL":138, "TB":139,
-    "TBR":139, "TEX":140, "TOR":141, "WSH":120, "WAS":120, "WSN":120, "SAC":133
+    "TBR":139, "TEX":140, "TOR":141, "WSH":120, "WAS":120, "WSN":120, "SAC":133,
+    # Full Names
+    "ARIZONA DIAMONDBACKS":109, "ATLANTA BRAVES":144, "BALTIMORE ORIOLES":110, "BOSTON RED SOX":111,
+    "CHICAGO CUBS":112, "CHICAGO WHITE SOX":145, "CINCINNATI REDS":113, "CLEVELAND GUARDIANS":114,
+    "COLORADO ROCKIES":115, "DETROIT TIGERS":116, "HOUSTON ASTROS":117, "KANSAS CITY ROYALS":118,
+    "LOS ANGELES ANGELS":108, "LOS ANGELES DODGERS":119, "WASHINGTON NATIONALS":120, "NEW YORK METS":121,
+    "OAKLAND ATHLETICS":133, "PITTSBURGH PIRATES":134, "SAN DIEGO PADRES":135, "SEATTLE MARINERS":136,
+    "SAN FRANCISCO GIANTS":137, "ST. LOUIS CARDINALS":138, "TAMPA BAY RAYS":139, "TEXAS RANGERS":140,
+    "TORONTO BLUE JAYS":141, "MINNESOTA TWINS":142, "PHILADELPHIA PHILLIES":143, "MIAMI MARLINS":146,
+    "NEW YORK YANKEES":147, "MILWAUKEE BREWERS":158, "SACRAMENTO RIVER CATS":133
 }
 
 TIER_LABELS = {"hard_seller":"Hard Seller","soft_seller":"Soft Seller","neutral":"Neutral","soft_buyer":"Soft Buyer","hard_buyer":"Hard Buyer"}
@@ -276,9 +285,10 @@ LEAGUE_RP_IP_SHARE = 0.43
 
 _PECOTA_HIT_DF = None
 _PECOTA_PIT_DF = None
+_PECOTA_DEBUG_INFO = {}
 
 def _load_pecota_data():
-    global _PECOTA_HIT_DF, _PECOTA_PIT_DF
+    global _PECOTA_HIT_DF, _PECOTA_PIT_DF, _PECOTA_DEBUG_INFO
     if _PECOTA_HIT_DF is not None and _PECOTA_PIT_DF is not None:
         return _PECOTA_HIT_DF, _PECOTA_PIT_DF
     
@@ -295,11 +305,16 @@ def _load_pecota_data():
             hit_df.columns = [col.strip().lower() for col in hit_df.columns]
             pit_df.columns = [col.strip().lower() for col in pit_df.columns]
             
+            # Store debug info
+            if 'team' in hit_df.columns:
+                _PECOTA_DEBUG_INFO['excel_teams'] = list(hit_df['team'].unique())
+            else:
+                _PECOTA_DEBUG_INFO['excel_teams'] = ["Column 'team' not found!"]
+            
             # Normalize team column: strip, uppercase, map to abbreviation
             def normalize_team(val):
                 if pd.isna(val): return None
                 val = str(val).strip().upper()
-                # Try direct match first
                 if val in PECOTA_TEAM_MAP:
                     return val
                 return None
@@ -657,6 +672,13 @@ def render_projections_tab(mdf, sim):
     st.markdown("## 2026 MLB Season Projections")
     st.caption("Live Data · {N_SIMULATIONS:,}-sim Monte Carlo · PECOTA + Statcast")
     
+    # Diagnostics
+    if _PECOTA_DEBUG_INFO:
+        with st.expander("🔍 PECOTA Data Diagnostics", expanded=False):
+            st.write(f"**Teams loaded:** {len(set(_PECOTA_HIT_DF['team_id'].unique()) | set(_PECOTA_PIT_DF['team_id'].unique()))}/30")
+            st.write("**Unique Team Names from Excel:**")
+            st.json(_PECOTA_DEBUG_INFO.get('excel_teams', []))
+    
     mdf_display = mdf.copy()
     mdf_display['Proj W'] = (mdf_display['blended_win_pct'] * 162).round().astype(int)
     mdf_display['Proj L'] = 162 - mdf_display['Proj W']
@@ -742,7 +764,7 @@ def render_team_tab(mdf, sim):
         st.info("Team detail view uses master dataframe columns.")
 
 def render_methodology_tab():
-    st.markdown("## 📖 Methodology & Model Architecture")
+    st.markdown("## 📖 Methodology & Data Flow")
     st.markdown("""
     This model is built around one core insight: **no existing public system dynamically accounts for deadline trades.** 
     Teams underperforming due to early-season injuries are systematically undervalued—their odds don't reflect the roster they'll actually field in August.
@@ -859,15 +881,6 @@ def main():
     lc.markdown("⚾")
     tc.markdown("# MLB 2026 Season Projections")
     tc.caption("Excel-Aligned · Dynamic Projections · No Hardcoding")
-    
-    with st.expander("🔍 Debug: File Status & Cache", expanded=False):
-        hit_file = "pecota2026_hitting_mar26.xlsx"
-        pit_file = "pecota2026_pitching_mar26.xlsx"
-        st.write(f"- `{hit_file}`: {'✅ Exists' if os.path.exists(hit_file) else '❌ Missing'}")
-        st.write(f"- `{pit_file}`: {'✅ Exists' if os.path.exists(pit_file) else '❌ Missing'}")
-        st.write(f"- Cache Version: `{CACHE_VERSION}`")
-        st.write(f"- Cache Valid: `{is_cache_valid()}`")
-        st.write(f"- Current working directory: `{os.getcwd()}`")
     
     if "master_df" not in st.session_state or not st.session_state.get("loaded"):
         try:
