@@ -4,7 +4,7 @@ Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 
 Key Updates:
-- FIXED: Added "48 + WARP" baseline logic to fix broken PECOTA conversion.
+- FIXED: Added "46 + WARP" baseline logic to fix broken PECOTA conversion.
 - FIXED: Force Uppercase team names to prevent mapping errors.
 - ADDED: Debug logging for Cleveland (CLE) to diagnose data reading issues.
 """
@@ -469,12 +469,12 @@ def fetch_team_projections(standings_df, roster_map):
                 pp_team['role'] = 'RP'
                 pp_team.loc[pp_team['gs_pct'] >= 0.50, 'role'] = 'SP'
             
-            # FIX: Calculate WARP-based Wins Baseline (48 Wins + WARP)
+            # FIX: Calculate WARP-based Wins Baseline (46 Wins + WARP)
             team_warp_sum = 0.0
             if not ph.empty and not ph_team.empty:
                 team_warp_sum = ph_team["warp"].sum()
             
-            replacement_level_wins = 48.0 # Standard replacement level
+            replacement_level_wins = 46.0 # Standard replacement level
             warp_projected_wins = replacement_level_wins + team_warp_sum
             warp_projected_wpct = warp_projected_wins / 162.0
             
