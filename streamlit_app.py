@@ -354,7 +354,7 @@ def _load_pecota_data():
                 hit_df = (
                     hit_df.sort_values('pa', ascending=False)
                     .groupby('team')
-                    .head(10)
+                    .head
                     .copy()
                 )
             
