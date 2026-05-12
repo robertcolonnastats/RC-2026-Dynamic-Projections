@@ -467,49 +467,59 @@ def fetch_team_projections(standings_df, roster_map):
     mlb_ops,mlb_era = sc.get("mlb",({},{}))
     cur_bat,cur_pit = sc.get("cur",({},{}))
     
+    # --- PARK FACTORS ---
+    # Normalized to 1.0 (1.0 = neutral, >1.0 = hitter friendly, <1.0 = pitcher friendly)
+    # Source: FanGraphs / Baseball-Reference multi-year averages
+    PARK_FACTORS = {
+        115: 1.14,  # COL: Coors Field (~14% boost)
+        136: 0.94,  # SEA: pitcher-friendly
+        137: 0.96,  # SF: pitcher-friendly
+        119: 1.03,  # LAD: slight hitter boost
+        147: 1.02,  # NYY: slight hitter boost
+        143: 1.01,  # PHI
+        112: 0.98,  # CHC
+        144: 0.99,  # ATL
+        114: 0.97,  # CLE
+        141: 0.98,  # TOR
+        139: 0.95,  # TB
+        110: 0.99,  # BAL
+        134: 1.00,  # PIT
+        158: 0.97,  # MIL
+        117: 1.02,  # HOU
+        140: 1.04,  # TEX
+        111: 0.99,  # BOS
+        146: 1.00,  # MIA
+        121: 1.01,  # NYM
+        116: 0.98,  # DET
+        118: 1.01,  # KC
+        142: 0.98,  # MIN
+        135: 1.00,  # SD
+        138: 1.00,  # STL
+        109: 1.05,  # ARI (Chase Field)
+        145: 0.97,  # CWS
+        113: 1.02,  # CIN
+        133: 0.96,  # OAK
+        108: 1.03,  # LAA
+        120: 1.01,  # WSH
+    }
+    
     rows = []
     for tid in all_ids:
         try:
             active_ids = roster_map.get(tid,{}).get("active",set())
             il_ids = roster_map.get(tid,{}).get("il",set())
-            ph_team = ph[ph["team_id"]==tid]
-            pp_team = pp[pp["team_id"]==tid].copy()
+            ph_team = ph[ph["team_id"]==tid] if not ph.empty else pd.DataFrame()
+            pp_team = pp[pp["team_id"]==tid].copy() if not pp.empty else pd.DataFrame()
             
-            # --- DEBUG LOGGING FOR CLE (ID 114) ---
-            if tid == 114:
-                print(f"DEBUG CLE: Found {len(ph_team)} hitting rows and {len(pp_team)} pitching rows.")
-                if not ph_team.empty: print(f"DEBUG CLE OPS: {ph_team['ops'].mean()}")
-                if not pp_team.empty: print(f"DEBUG CLE FIP: {pp_team['fip'].mean()}")
-            # --------------------------------------
-
-            if not pp_team.empty and "gs" in pp_team.columns and "g" in pp_team.columns:
-                valid_games = pp_team['g'] > 0
-                pp_team['gs_pct'] = 0.0
-                pp_team.loc[valid_games, 'gs_pct'] = pp_team.loc[valid_games, 'gs'] / pp_team.loc[valid_games, 'g']
+            if not pp_team.empty:
                 pp_team['role'] = 'RP'
-                pp_team.loc[pp_team['gs_pct'] >= 0.50, 'role'] = 'SP'
+                if 'gs' in pp_team.columns and 'g' in pp_team.columns:
+                    pp_team['gs'] = pd.to_numeric(pp_team['gs'], errors='coerce').fillna(0)
+                    pp_team['g'] = pd.to_numeric(pp_team['g'], errors='coerce').fillna(0)
+                    valid_games = pp_team['g'] > 0
+                    pp_team.loc[valid_games, 'gs_pct'] = pp_team.loc[valid_games, 'gs'] / pp_team.loc[valid_games, 'g']
+                    pp_team.loc[pp_team['gs_pct'] >= 0.50, 'role'] = 'SP'
             
-            # FIX: Calculate WARP-based Wins Baseline (46 Wins + WARP)
-            team_warp_sum = 0.0
-            if not ph.empty and not ph_team.empty:
-                team_warp_sum = ph_team["warp"].sum()
-            
-            replacement_level_wins = 46.0 # Standard replacement level
-            warp_projected_wins = replacement_level_wins + team_warp_sum
-            warp_projected_wpct = warp_projected_wins / 162.0
-            
-            # If WARP data is valid (between 40 and 120 wins), use it as a sanity check
-            if 40 < warp_projected_wins < 120:
-                 # Use WARP projection if OPS/FIP data is missing or broken
-                 if ph_team.empty or pp_team.empty:
-                    pecota_ops = LEAGUE_AVG_OPS
-                    # We will rely on the warp projection logic later or set defaults
-                 else:
-                    pecota_ops = LEAGUE_AVG_OPS # Placeholder, logic below handles blending
-            else:
-                # Fallback to average if WARP is crazy
-                warp_projected_wpct = 0.500
-
             pecota_ops = LEAGUE_AVG_OPS
             if not ph_team.empty:
                 pa_vals = ph_team["pa"].fillna(0).tolist()
@@ -563,26 +573,20 @@ def fetch_team_projections(standings_df, roster_map):
             sp_era = float(np.clip(sp_base * (1 + sc_adj), 2.80, 5.50))
             rp_era = float(np.clip(rp_base * (1 + sc_adj), 3.00, 5.50))
             proj_rapg = float(np.clip((sp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE + (rp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE, 2.5, 7.5))
+            
+            # --- PARK FACTOR ADJUSTMENT ---
+            park_factor = PARK_FACTORS.get(tid, 1.0)
+            if park_factor != 1.0:
+                # Regress extreme park effects toward league average (50% adjustment)
+                proj_rpg = proj_rpg * (1.0 + (park_factor - 1.0) * 0.5)
+                proj_rapg = proj_rapg * (1.0 + (1.0/park_factor - 1.0) * 0.5)
+            
             proj_wp = float(proj_rpg**PYTHAG_EXPONENT / (proj_rpg**PYTHAG_EXPONENT + proj_rapg**PYTHAG_EXPONENT))
+            
+            # FIX: Blend the WARP projection into the Win Percentage if the RPG model is failing
+            if proj_wp < 0.350:
+                proj_wp = warp_projected_wpct
 
-            # --- Park Factor Adjustment (add after proj_rpg/proj_rapg calculation) ---
-# Source: FanGraphs or Baseball-Reference park factors (normalized to 1.0)
-PARK_FACTORS = {
-    115: 1.14,  # COL: Coors Field (~14% offensive boost)
-    136: 0.94,  # SEA: pitcher-friendly
-    137: 0.96,  # SF: pitcher-friendly
-    119: 1.03,  # LAD: slight hitter boost
-    147: 1.02,  # NYY: slight hitter boost
-    # Add others as needed; default is 1.0 (neutral)
-}
-
-park_factor = PARK_FACTORS.get(tid, 1.0)
-if park_factor != 1.0:
-    # Regress extreme park effects toward league average (50% adjustment)
-    # This prevents Coors Field from inflating COL's projection too much
-    proj_rpg = proj_rpg * (1.0 + (park_factor - 1.0) * 0.5)
-    proj_rapg = proj_rapg * (1.0 + (1.0/park_factor - 1.0) * 0.5)  # Inverse for pitching
-    
             il_warp = 0.0
             if not ph.empty and len(il_ids) > 0:
                 il_players = ph[(ph["team_id"] == tid) & (ph["mlbid"].isin(il_ids))]
@@ -603,7 +607,7 @@ if park_factor != 1.0:
         for c in prj.columns: prj[c] = pd.to_numeric(prj[c], errors="coerce").fillna(0.0)
         prj["team_id"] = prj["team_id"].astype(int)
     return prj
-
+    
 def pythag(rs, ra):
     if rs <= 0 or ra <= 0: return 0.500
     return float(rs**PYTHAG_EXPONENT / (rs**PYTHAG_EXPONENT + ra**PYTHAG_EXPONENT))
