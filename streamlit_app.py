@@ -349,14 +349,11 @@ def _load_pecota_data():
             # Even with percentile filtering, PECOTA might have too much depth.
             # We cap at 10 hitters, 5 SP, and 6 RP per team.
             
-            # 1. Hitters: Keep top 10 by projected PA
+            # --- WITH THIS (The "Meaningful Playing Time" logic) ---
             if 'pa' in hit_df.columns:
-                hit_df = (
-                    hit_df.sort_values('pa', ascending=False)
-                    .groupby('team')
-                    .head(10)
-                    .copy()
-                )
+            # Filter for players with > 50 PA (approx. 1 week of playing time)
+            # This ensures negative-WARP players who actually play are included
+                hit_df = hit_df[hit_df['pa'] > 50].copy()
             
             # 2. Pitchers: Split by role, cap at 5 SP and 6 RP
             if 'role' in pit_df.columns and 'ip' in pit_df.columns:
