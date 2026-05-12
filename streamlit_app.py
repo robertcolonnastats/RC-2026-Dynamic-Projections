@@ -305,9 +305,7 @@ def _load_pecota_data():
             hit_df = pd.read_excel(hit_file)
             pit_df = pd.read_excel(pit_file)
             
-            # --- CRITICAL FIX: Filter for 50th Percentile Only ---
-            # PECOTA exports often include 10th, 50th, 90th percentiles.
-            # If we sum them all, we triple-count talent.
+            # --- 1. FILTER PERCENTILE (Crucial to avoid summing 10th/50th/90th) ---
             if 'percentile' in hit_df.columns:
                 initial_hit_count = len(hit_df)
                 hit_df = hit_df[hit_df['percentile'] == 50].copy()
@@ -322,9 +320,29 @@ def _load_pecota_data():
             elif 'pct' in pit_df.columns:
                 pit_df = pit_df[pit_df['pct'] == 50].copy()
             
-            # --- ROSTER CAPPING (Optional but recommended) ---
+            # --- 2. PLAYING TIME WEIGHTING (The Fix for Bench/Middle Reliever Inflation) ---
+            # Hitters: Scale WARP by PA (600 PA = Full Time Baseline)
+            if 'pa' in hit_df.columns:
+                # Avoid division by zero
+                hit_df['warp_scaled'] = hit_df.apply(
+                    lambda r: r['warp'] * (r['pa'] / 600.0) if r['pa'] > 0 else 0.0, axis=1
+                )
+            else:
+                # Fallback if PA column is missing
+                hit_df['warp_scaled'] = hit_df['warp']
+            
+            # Pitchers: Scale WARP by IP (180 IP = Full Time Starter Baseline)
+            if 'ip' in pit_df.columns:
+                pit_df['warp_scaled'] = pit_df.apply(
+                    lambda r: r['warp'] * (r['ip'] / 180.0) if r['ip'] > 0 else 0.0, axis=1
+                )
+            else:
+                # Fallback if IP column is missing
+                pit_df['warp_scaled'] = pit_df['warp']
+            
+            # --- 3. ROSTER CAPPING (Remove bench depth) ---
             # Even with percentile filtering, PECOTA might have too much depth.
-            # We cap at 13 hitters, 5 SP, and 8 RP per team.
+            # We cap at 10 hitters, 5 SP, and 6 RP per team.
             
             # 1. Hitters: Keep top 10 by projected PA
             if 'pa' in hit_df.columns:
