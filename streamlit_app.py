@@ -625,7 +625,7 @@ def build_master(std, prj):
 dynamic_regression = 130 * (1 - gp/162) + 30 * (gp/162)  # 130 → 30 over 162 games
 df["pythag_win_pct"] = (df["pythag_win_pct"] * (gp / (gp + dynamic_regression)) + 
                         0.500 * (dynamic_regression / (gp + dynamic_regression))).astype(float)
-    base_proj_w = (PROJ_WEIGHT_MAX - (gp / 162.0) * (PROJ_WEIGHT_MAX - PROJ_WEIGHT_MIN)).clip(PROJ_WEIGHT_MIN, PROJ_WEIGHT_MAX)
+base_proj_w = (PROJ_WEIGHT_MAX - (gp / 162.0) * (PROJ_WEIGHT_MAX - PROJ_WEIGHT_MIN)).clip(PROJ_WEIGHT_MIN, PROJ_WEIGHT_MAX)
     il_frac = (df["il_warp"] / TYPICAL_TEAM_WARP).clip(0.0, MAX_IL_FRAC)
     adj_pyth_w = (1.0 - base_proj_w) * (1.0 - il_frac)
     adj_proj_w = 1.0 - adj_pyth_w
