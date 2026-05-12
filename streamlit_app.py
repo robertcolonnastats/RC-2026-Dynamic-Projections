@@ -66,7 +66,7 @@ TYPICAL_TEAM_WARP = 35.0
 MAX_IL_FRAC = 0.50
 
 # UPDATED: Stronger Pythagorean regression
-PYTHAG_REGRESSION_PA = 50
+PYTHAG_REGRESSION_PA = 35
 
 # UPDATED: Increased early-season trust in PECOTA talent
 PROJ_WEIGHT_MAX = 0.92
@@ -304,6 +304,11 @@ def _load_pecota_data():
             st.info(f"📂 Loading PECOTA data from `{hit_file}` and `{pit_file}`...")
             hit_df = pd.read_excel(hit_file)
             pit_df = pd.read_excel(pit_file)
+            
+            # --- 1. CRITICAL FIX: Normalize columns IMMEDIATELY ---
+            # This MUST happen before checking 'if "pa" in hit_df.columns'
+            hit_df.columns = [col.strip().lower() for col in hit_df.columns]
+            pit_df.columns = [col.strip().lower() for col in pit_df.columns]
             
             # --- 1. FILTER PERCENTILE (Crucial to avoid summing 10th/50th/90th) ---
             if 'percentile' in hit_df.columns:
