@@ -66,7 +66,7 @@ TYPICAL_TEAM_WARP = 35.0
 MAX_IL_FRAC = 0.50
 
 # UPDATED: Stronger Pythagorean regression
-PYTHAG_REGRESSION_PA = 20
+PYTHAG_REGRESSION_PA = 50
 
 # UPDATED: Increased early-season trust in PECOTA talent
 PROJ_WEIGHT_MAX = 0.92
