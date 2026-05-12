@@ -621,18 +621,22 @@ def build_master(std, prj):
     for c in ["proj_win_pct","proj_runs_per_game","proj_ra_per_game","il_warp"]: df[c] = df[c].fillna(0.0).astype(float)
     df["pythag_win_pct"] = df.apply(lambda r: pythag(float(r["runs_scored"]), float(r["runs_allowed"])), axis=1).astype(float)
     gp = df["games_played"].clip(0, 162).astype(float)
+    
     # Dynamic regression: trust preseason more early, trust actual record more late
-dynamic_regression = 130 * (1 - gp/162) + 30 * (gp/162)  # 130 → 30 over 162 games
-df["pythag_win_pct"] = (df["pythag_win_pct"] * (gp / (gp + dynamic_regression)) + 
-                        0.500 * (dynamic_regression / (gp + dynamic_regression))).astype(float)
-base_proj_w = (PROJ_WEIGHT_MAX - (gp / 162.0) * (PROJ_WEIGHT_MAX - PROJ_WEIGHT_MIN)).clip(PROJ_WEIGHT_MIN, PROJ_WEIGHT_MAX)
+    # 130 at start of season (heavy regression to .500) -> 30 at end of season
+    dynamic_regression = 130 * (1 - gp/162) + 30 * (gp/162)
+    
+    df["pythag_win_pct"] = (df["pythag_win_pct"] * (gp / (gp + dynamic_regression)) + 
+                            0.500 * (dynamic_regression / (gp + dynamic_regression))).astype(float)
+    
+    base_proj_w = (PROJ_WEIGHT_MAX - (gp / 162.0) * (PROJ_WEIGHT_MAX - PROJ_WEIGHT_MIN)).clip(PROJ_WEIGHT_MIN, PROJ_WEIGHT_MAX)
     il_frac = (df["il_warp"] / TYPICAL_TEAM_WARP).clip(0.0, MAX_IL_FRAC)
     adj_pyth_w = (1.0 - base_proj_w) * (1.0 - il_frac)
     adj_proj_w = 1.0 - adj_pyth_w
     df["blended_win_pct"] = (df["proj_win_pct"] * adj_proj_w + df["pythag_win_pct"] * adj_pyth_w).clip(0.20, 0.80).astype(float)
     df["games_remaining"] = (162.0 - gp).clip(0, 162).astype(float)
     return df
-
+    
 def compute_buyer_seller(df):
     df = df.copy()
     df["pythag_expected_wins"] = (df["pythag_win_pct"] * df["games_played"]).astype(float)
