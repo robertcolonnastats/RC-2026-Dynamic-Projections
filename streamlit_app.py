@@ -4,11 +4,11 @@ Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 
 Key Updates:
-- WARP BASELINE: Projection anchored to 45 + Weighted WARP.
-- WEIGHTED WARP: Hitters capped at 550 PA, Pitchers at 180 IP.
-- FIXED REGRESSION: Static Pythagorean regression of 45 games.
-- REDUCED SMOOTHING: Statcast influence reduced to 0.25.
-- CORRECTIONS: Fixed syntax errors and logic flaws from previous versions.
+WARP BASELINE: Projection anchored to 45 + Weighted WARP.
+WEIGHTED WARP: Hitters capped at 600 PA, Pitchers at 190 IP (SP) / 70 IP (RP).
+FIXED REGRESSION: Static Pythagorean regression of 45 games.
+REDUCED SMOOTHING: Statcast influence reduced to 0.20.
+CORRECTIONS: Fixed syntax errors and logic flaws from previous versions.
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -17,7 +17,6 @@ import streamlit as st
 from datetime import date, timedelta, datetime
 from zoneinfo import ZoneInfo
 import concurrent.futures as cf
-
 warnings.filterwarnings("ignore")
 st.set_page_config(page_title="MLB 2026 Projections", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
@@ -40,14 +39,13 @@ OPENING_DAY = "2026-03-27"
 WORLD_SERIES_END_APPROX = "2026-11-01"
 TRADE_DEADLINE = "2026-07-31"
 DEADLINE_RAMP_START = "2026-05-20"
-
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 N_SIMULATIONS = 1_000
 RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v30-warp-baseline-fix"
+CACHE_VERSION = "v31-weighted-warp-fix"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -56,22 +54,18 @@ PRIOR_PECOTA_WEIGHT = 0.45
 PRIOR_HIST_2025_WEIGHT = 0.35
 PRIOR_HIST_2024_WEIGHT = 0.20
 
-# UPDATED: Reduced Statcast noise impact to prevent over-smoothing
-STATCAST_INFLUENCE = 0.25
+# CORE CONSTANTS
+BASELINE_WINS = 45
+PYTHAG_REGRESSION_PA = 45
+STATCAST_INFLUENCE = 0.20
+PROJ_WEIGHT_MAX = 0.92
+PROJ_WEIGHT_MIN = 0.42
 
-# UPDATED: Adjusted roster weighting for cleaner talent signal
 ROSTER_WEIGHT_ACTIVE = 650.0
 ROSTER_WEIGHT_IL = 8.0
 ROSTER_WEIGHT_OTHER = 280.0
 TYPICAL_TEAM_WARP = 35.0
 MAX_IL_FRAC = 0.50
-
-# UPDATED: Fixed regression at 45 games (reduced from dynamic curve)
-PYTHAG_REGRESSION_PA = 45
-
-# UPDATED: Increased early-season trust in PECOTA talent
-PROJ_WEIGHT_MAX = 0.92
-PROJ_WEIGHT_MIN = 0.42
 
 TIER_HARD_SELLER = 4.2
 TIER_SOFT_SELLER = 3.2
@@ -91,41 +85,26 @@ ADJ_SCALE = 0.015
 SOS_SENSITIVITY = 0.15
 
 TEAM_INFO = {
-    108: ("Los Angeles Angels", "LAA", "AL West", "AL"),
-    109: ("Arizona Diamondbacks", "ARI", "NL West", "NL"),
-    110: ("Baltimore Orioles", "BAL", "AL East", "AL"),
-    111: ("Boston Red Sox", "BOS", "AL East", "AL"),
-    112: ("Chicago Cubs", "CHC", "NL Central", "NL"),
-    113: ("Cincinnati Reds", "CIN", "NL Central", "NL"),
-    114: ("Cleveland Guardians", "CLE", "AL Central", "AL"),
-    115: ("Colorado Rockies", "COL", "NL West", "NL"),
-    116: ("Detroit Tigers", "DET", "AL Central", "AL"),
-    117: ("Houston Astros", "HOU", "AL West", "AL"),
-    118: ("Kansas City Royals", "KC", "AL Central", "AL"),
-    119: ("Los Angeles Dodgers", "LAD", "NL West", "NL"),
-    120: ("Washington Nationals", "WSH", "NL East", "NL"),
-    121: ("New York Mets", "NYM", "NL East", "NL"),
-    133: ("Oakland Athletics", "OAK", "AL West", "AL"),
-    134: ("Pittsburgh Pirates", "PIT", "NL Central", "NL"),
-    135: ("San Diego Padres", "SD", "NL West", "NL"),
-    136: ("Seattle Mariners", "SEA", "AL West", "AL"),
-    137: ("San Francisco Giants", "SF", "NL West", "NL"),
-    138: ("St. Louis Cardinals", "STL", "NL Central", "NL"),
-    139: ("Tampa Bay Rays", "TB", "AL East", "AL"),
-    140: ("Texas Rangers", "TEX", "AL West", "AL"),
-    141: ("Toronto Blue Jays", "TOR", "AL East", "AL"),
-    142: ("Minnesota Twins", "MIN", "AL Central", "AL"),
-    143: ("Philadelphia Phillies", "PHI", "NL East", "NL"),
-    144: ("Atlanta Braves", "ATL", "NL East", "NL"),
-    145: ("Chicago White Sox", "CWS", "AL Central", "AL"),
-    146: ("Miami Marlins", "MIA", "NL East", "NL"),
-    147: ("New York Yankees", "NYY", "AL East", "AL"),
-    158: ("Milwaukee Brewers", "MIL", "NL Central", "NL"),
+    108: ("Los Angeles Angels","LAA","AL West","AL"), 109:("Arizona Diamondbacks","ARI","NL West","NL"),
+    110:("Baltimore Orioles","BAL","AL East","AL"),  111:("Boston Red Sox","BOS","AL East","AL"),
+    112:("Chicago Cubs","CHC","NL Central","NL"),    113:("Cincinnati Reds","CIN","NL Central","NL"),
+    114:("Cleveland Guardians","CLE","AL Central","AL"), 115:("Colorado Rockies","COL","NL West","NL"),
+    116:("Detroit Tigers","DET","AL Central","AL"),  117:("Houston Astros","HOU","AL West","AL"),
+    118:("Kansas City Royals","KC","AL Central","AL"), 119:("Los Angeles Dodgers","LAD","NL West","NL"),
+    120:("Washington Nationals","WSH","NL East","NL"), 121:("New York Mets","NYM","NL East","NL"),
+    133:("Oakland Athletics","OAK","AL West","AL"),  134:("Pittsburgh Pirates","PIT","NL Central","NL"),
+    135:("San Diego Padres","SD","NL West","NL"),    136:("Seattle Mariners","SEA","AL West","AL"),
+    137:("San Francisco Giants","SF","NL West","NL"), 138:("St. Louis Cardinals","STL","NL Central","NL"),
+    139:("Tampa Bay Rays","TB","AL East","AL"),      140:("Texas Rangers","TEX","AL West","AL"),
+    141:("Toronto Blue Jays","TOR","AL East","AL"),  142:("Minnesota Twins","MIN","AL Central","AL"),
+    143:("Philadelphia Phillies","PHI","NL East","NL"), 144:("Atlanta Braves","ATL","NL East","NL"),
+    145:("Chicago White Sox","CWS","AL Central","AL"), 146:("Miami Marlins","MIA","NL East","NL"),
+    147:("New York Yankees","NYY","AL East","AL"),   158:("Milwaukee Brewers","MIL","NL Central","NL"),
 }
 
-TIER_LABELS = {"hard_seller": "Hard Seller", "soft_seller": "Soft Seller", "neutral": "Neutral", "soft_buyer": "Soft Buyer", "hard_buyer": "Hard Buyer"}
-TIER_COLORS = {"hard_seller": "#d62728", "soft_seller": "#ff7f0e", "neutral": "#7f7f7f", "soft_buyer": "#2ca02c", "hard_buyer": "#1f77b4"}
-TIER_EMOJI = {"hard_seller": "🔴", "soft_seller": "🟠", "neutral": "⚪", "soft_buyer": "🟢", "hard_buyer": "🔵"}
+TIER_LABELS = {"hard_seller":"Hard Seller","soft_seller":"Soft Seller","neutral":"Neutral","soft_buyer":"Soft Buyer","hard_buyer":"Hard Buyer"}
+TIER_COLORS = {"hard_seller":"#d62728","soft_seller":"#ff7f0e","neutral":"#7f7f7f","soft_buyer":"#2ca02c","hard_buyer":"#1f77b4"}
+TIER_EMOJI = {"hard_seller":"🔴","soft_seller":"🟠","neutral":"⚪","soft_buyer":"🟢","hard_buyer":"🔵"}
 EST = ZoneInfo("America/New_York")
 
 # ==============================================================================
@@ -305,8 +284,8 @@ def _load_pecota_data():
     if _PECOTA_HIT_DF is not None and _PECOTA_PIT_DF is not None:
         return _PECOTA_HIT_DF, _PECOTA_PIT_DF
     try:
-        hit_file =  "pecota2026_hitting_mar26.xlsx"
-        pit_file =  "pecota2026_pitching_mar26.xlsx"
+        hit_file = "pecota2026_hitting_mar26.xlsx"
+        pit_file = "pecota2026_pitching_mar26.xlsx"
         
         if os.path.exists(hit_file) and os.path.exists(pit_file):
             st.info(f"📂 Loading PECOTA data from `{hit_file}` and `{pit_file}`...")
@@ -326,44 +305,49 @@ def _load_pecota_data():
                 pit_df = pit_df[pit_df['percentile'] == 50].copy()
             elif 'pct' in pit_df.columns:
                 pit_df = pit_df[pit_df['pct'] == 50].copy()
-        
-            # --- PLAYING TIME WEIGHTED WARP ---
-            # Hitters: Cap contribution at 550 PA
-            if 'pa' in hit_df.columns:
-                hit_df['adj_warp'] = hit_df['warp'] * (hit_df['pa'] / 550).clip(upper=1)
-            else:
-                hit_df['adj_warp'] = hit_df['warp']
-                
-            # Pitchers: Cap contribution at 180 IP
-            if 'ip' in pit_df.columns:
-                pit_df['adj_warp'] = pit_df['warp'] * (pit_df['ip'] / 180).clip(upper=1)
-            else:
-                pit_df['adj_warp'] = pit_df['warp']
-
-            # Roster Capping
-            if 'pa' in hit_df.columns:
-                hit_df = hit_df.sort_values('pa', ascending=False).groupby('team').head(13).copy()
-            
-            if 'role' in pit_df.columns and 'ip' in pit_df.columns:
-                sp_df = pit_df[pit_df['role'] == 'SP'].sort_values('ip', ascending=False).groupby('team').head(5)
-                rp_df = pit_df[pit_df['role'] == 'RP'].sort_values('ip', ascending=False).groupby('team').head(6)
-                pit_df = pd.concat([sp_df, rp_df]).copy()
-            
-            # Normalize Team Names to Uppercase for Mapping
-            if 'team' in hit_df.columns: hit_df['team'] = hit_df['team'].astype(str).str.strip().str.upper()
-            if 'team' in pit_df.columns: pit_df['team'] = pit_df['team'].astype(str).str.strip().str.upper()
-            
-            hit_df["team_id"] = hit_df["team"].map(PECOTA_TEAM_MAP)
-            pit_df["team_id"] = pit_df["team"].map(PECOTA_TEAM_MAP)
-            
-            _PECOTA_HIT_DF = hit_df.dropna(subset=["team_id"])
-            _PECOTA_PIT_DF = pit_df.dropna(subset=["team_id"])
-            
-            st.success(f"✅ Data loaded for {len(_PECOTA_HIT_DF['team_id'].unique())} hitting teams and {len(_PECOTA_PIT_DF['team_id'].unique())} pitching teams.")
+    
+        # --- PLAYING TIME WEIGHTED WARP ---
+        # Hitters: Cap contribution at 600 PA
+        if 'pa' in hit_df.columns:
+            hit_df['adj_warp'] = hit_df['warp'].fillna(0) * (hit_df['pa'].fillna(0) / 600).clip(upper=1)
         else:
-            st.warning("Excel files not found. Using embedded fallback data.")
-            # ... (Your existing fallback logic here) ...
+            hit_df['adj_warp'] = hit_df['warp']
             
+        # Pitchers: Cap contribution at 190 IP (SP) / 70 IP (RP)
+        if 'ip' in pit_df.columns and 'role' in pit_df.columns:
+            sp_mask = pit_df['role'] == 'SP'
+            rp_mask = pit_df['role'] == 'RP'
+            
+            pit_df['adj_warp'] = 0.0
+            pit_df.loc[sp_mask, 'adj_warp'] = pit_df.loc[sp_mask, 'warp'].fillna(0) * (pit_df.loc[sp_mask, 'ip'].fillna(0) / 190).clip(upper=1)
+            pit_df.loc[rp_mask, 'adj_warp'] = pit_df.loc[rp_mask, 'warp'].fillna(0) * (pit_df.loc[rp_mask, 'ip'].fillna(0) / 70).clip(upper=1)
+        else:
+            pit_df['adj_warp'] = pit_df['warp']
+
+        # Roster Capping
+        if 'pa' in hit_df.columns:
+            hit_df = hit_df.sort_values('pa', ascending=False).groupby('team').head(13).copy()
+        
+        if 'role' in pit_df.columns and 'ip' in pit_df.columns:
+            sp_df = pit_df[pit_df['role'] == 'SP'].sort_values('ip', ascending=False).groupby('team').head(5)
+            rp_df = pit_df[pit_df['role'] == 'RP'].sort_values('ip', ascending=False).groupby('team').head(6)
+            pit_df = pd.concat([sp_df, rp_df]).copy()
+        
+        # Normalize Team Names to Uppercase for Mapping
+        if 'team' in hit_df.columns: hit_df['team'] = hit_df['team'].astype(str).str.strip().str.upper()
+        if 'team' in pit_df.columns: pit_df['team'] = pit_df['team'].astype(str).str.strip().str.upper()
+        
+        hit_df["team_id"] = hit_df["team"].map(PECOTA_TEAM_MAP)
+        pit_df["team_id"] = pit_df["team"].map(PECOTA_TEAM_MAP)
+        
+        _PECOTA_HIT_DF = hit_df.dropna(subset=["team_id"])
+        _PECOTA_PIT_DF = pit_df.dropna(subset=["team_id"])
+        
+        st.success(f"✅ Data loaded for {len(_PECOTA_HIT_DF['team_id'].unique())} hitting teams and {len(_PECOTA_PIT_DF['team_id'].unique())} pitching teams.")
+    else:
+        st.warning("Excel files not found. Using embedded fallback data.")
+        # ... (Your existing fallback logic here) ...
+        
     except Exception as e:
         st.error(f"⛔ CRITICAL ERROR: Failed to load PECOTA data. Details: {e}")
         st.stop()
@@ -445,13 +429,12 @@ def fetch_team_projections(standings_df, roster_map):
     if standings_df is not None and not standings_df.empty:
         for _,row in standings_df.iterrows():
             gp = max(int(row.get("games_played",0)),1); tid = int(row["team_id"])
-            team_pa[tid] = int(gp * 38); team_ip[tid] = float(gp * 9.0)
+            team_pa[tid] = int(gp*38); team_ip[tid] = float(gp*9.0)
     sc = _load_statcast_all()
     h25b = sc.get("h25b",{}); h25p = sc.get("h25p",{})
     h24b = sc.get("h24b",{}); h24p = sc.get("h24p",{})
     mlb_ops,mlb_era = sc.get("mlb",({},{}))
     cur_bat,cur_pit = sc.get("cur",({},{}))
-    
     PARK_FACTORS = {
         115: 1.14, 136: 0.94, 137: 0.96, 119: 1.03, 147: 1.02,
         143: 1.01, 112: 0.98, 144: 0.99, 114: 0.97, 141: 0.98,
@@ -478,14 +461,18 @@ def fetch_team_projections(standings_df, roster_map):
             
             # --- WARP BASELINE CALCULATION ---
             # Sum the ADJUSTED (weighted) WARP
-            team_warp_sum = 0.0
-            if not ph.empty and not ph_team.empty:
-                team_warp_sum = ph_team["adj_warp"].sum()
-            if not pp.empty and not pp_team.empty:
-                team_warp_sum += pp_team["adj_warp"].sum()
+            team_hit_warp = 0.0
+            if not ph.empty and not ph_team.empty and 'adj_warp' in ph_team.columns:
+                team_hit_warp = ph_team['adj_warp'].sum()
+            
+            team_pp_warp = 0.0
+            if not pp.empty and not pp_team.empty and 'adj_warp' in pp_team.columns:
+                team_pp_warp = pp_team['adj_warp'].sum()
+                
+            team_total_warp = team_hit_warp + team_pp_warp
             
             # Calculate Baseline Wins: 45 + Weighted WARP
-            baseline_wins = 45.0 + team_warp_sum
+            baseline_wins = BASELINE_WINS + team_total_warp
             baseline_wpct = baseline_wins / 162.0
 
             # --- RATE STATS CALCULATION (OPS/FIP) ---
@@ -552,13 +539,15 @@ def fetch_team_projections(standings_df, roster_map):
             proj_wp_rates = float(proj_rpg**PYTHAG_EXPONENT / (proj_rpg**PYTHAG_EXPONENT + proj_rapg**PYTHAG_EXPONENT))
             
             # --- FINAL BLENDING ---
-            # 60% WARP Baseline + 40% Rate Stats
-            proj_wp = 0.6 * baseline_wpct + 0.4 * proj_wp_rates
+            # 80% WARP Baseline + 20% Rate Stats
+            proj_wp = 0.80 * baseline_wpct + 0.20 * proj_wp_rates
 
             il_warp = 0.0
             if not ph.empty and len(il_ids) > 0:
                 il_players = ph[(ph["team_id"] == tid) & (ph["mlbid"].isin(il_ids))]
-                if not il_players.empty: il_warp = float(il_players["warp"].fillna(0).clip(lower=0).sum())
+                if not il_players.empty: 
+                    # Remove clip(lower=0) to allow negative WARP to penalize weak teams
+                    il_warp = float(il_players["warp"].fillna(0).sum())
             
             clean_row = {"team_id": int(tid), "proj_runs_per_game": round(float(np.clip(proj_rpg, 2.5, 7.5)), 3),
                       "proj_ra_per_game": round(float(np.clip(proj_rapg, 2.5, 7.5)), 3),
@@ -591,10 +580,9 @@ def build_master(std, prj):
     gp = df["games_played"].clip(0, 162).astype(float)
     
     # Dynamic regression (45 games baseline)
-    dynamic_regression = 45
+    regression_pa = PYTHAG_REGRESSION_PA
     
-    df["pythag_win_pct"] = (df["pythag_win_pct"] * (gp / (gp + dynamic_regression)) + 
-                        0.500 * (dynamic_regression / (gp + dynamic_regression))).astype(float)
+    df["pythag_win_pct"] = ((df["pythag_win_pct"] * gp) + (0.500 * regression_pa)) / (gp + regression_pa)
 
     base_proj_w = (PROJ_WEIGHT_MAX - (gp / 162.0) * (PROJ_WEIGHT_MAX - PROJ_WEIGHT_MIN)).clip(PROJ_WEIGHT_MIN, PROJ_WEIGHT_MAX)
     il_frac = (df["il_warp"] / TYPICAL_TEAM_WARP).clip(0.0, MAX_IL_FRAC)
@@ -614,7 +602,6 @@ def compute_buyer_seller(df):
     pre = df["wc_games_back"] + rd_mod + luck_mod
     damp = df["games_played"].apply(lambda g: 0.5 if g <= 30 else 0.75 if g <= 55 else 0.9 if g <= 81 else 1.0)
     dp = get_deadline_ramp_factor()
-
     df["adjusted_score"] = (pre * damp * dp).astype(float)
     df["base_adj"] = pd.Series(np.clip(-df["adjusted_score"].values * ADJ_SCALE, ADJ_HARD_SELLER, ADJ_HARD_BUYER), index=df.index).astype(float)
     df["tier"] = df["adjusted_score"].apply(lambda s: "hard_seller" if s >= TIER_HARD_SELLER else "soft_seller" if s >= TIER_SOFT_SELLER else "neutral" if s >= TIER_SOFT_BUYER else "soft_buyer" if s >= TIER_HARD_BUYER else "hard_buyer")
@@ -799,40 +786,29 @@ def render_methodology_tab():
     st.markdown("## 📖 Methodology & Model Architecture")
     st.caption(f"Data last updated: {get_last_updated()}")
     st.markdown("Built around one insight: no existing system accounts for what happens when a team sells at the deadline. Teams underperforming due to injuries are systematically undervalued — their odds don't reflect the roster they'll have in August.")
+    with st.expander("📊 Data Sources"): st.markdown("| Source | Frequency | Purpose |\n|---|---|---|\n| MLB Stats API | Daily | Standings, schedule, active/IL rosters |\n| Baseball Savant | Daily | xwOBA/xERA (2024, 2025, current 2026) |\n| PECOTA 2026 | Static | Talent baseline — 50th percentile depth chart |")
+    with st.expander("🔮 Projection Engine"): st.markdown(f"""
+    ### 1. WARP Baseline (Primary Anchor)
+    - **Base Wins**: {BASELINE_WINS} (Replacement Level)
+    - **Weighted WARP**: 
+      - Hitters: `WARP * min(1, PA / 600)`
+      - Pitchers: `WARP * min(1, IP / 190)` (SP) or `70` (RP)
+    - **Formula**: `Baseline Wins = {BASELINE_WINS} + Sum(Weighted WARP)`
     
-    with st.expander("📊 Data Sources"):
-        st.markdown("""
-        | Source | Frequency | Purpose |
-        |---|---|---|
-        | **MLB Stats API** | Daily | Standings, schedule, active/IL rosters |
-        | **Baseball Savant** | Daily | xwOBA/xERA (2024, 2025, current 2026) |
-        | **PECOTA 2026** | Static | Talent baseline — 50th percentile depth chart |
-        """)
-        
-    with st.expander("🔮 Projection Engine"):
-        st.markdown(f"""
-        ### 1. WARP Baseline (Primary Anchor)
-        - **Base Wins**: 45 (Replacement Level)
-        - **Weighted WARP**: 
-          - Hitters: `WARP * min(1, PA / 550)`
-          - Pitchers: `WARP * min(1, IP / 180)`
-        - **Formula**: `Baseline Wins = 45 + Sum(Weighted WARP)`
-        
-        ### 2. Rate Stat Projections
-        - **PECOTA Baseline**: Full depth chart weighted by projected PA
-        - **Roster Weights**: Active: {ROSTER_WEIGHT_ACTIVE}x, IL: {ROSTER_WEIGHT_IL}x, Other: {ROSTER_WEIGHT_OTHER}x
-        - **Statcast Blend**: Influence of {STATCAST_INFLUENCE} (reduced to prevent over-smoothing)
-        - **Park Factors**: 50% regression toward league average
-        
-        ### 3. Final Blending
-        - **WARP Baseline Weight**: 60%
-        - **Rate Stat Weight**: 40%
-        
-        ### 4. Pythagorean Regression
-        - **Fixed Regression**: {PYTHAG_REGRESSION_PA} games (reduced from dynamic curve)
-        - **Early Season**: Less pull toward .500 to preserve talent gaps
-        """)
-        
+    ### 2. Rate Stat Projections
+    - **PECOTA Baseline**: Full depth chart weighted by projected PA
+    - **Roster Weights**: Active: {ROSTER_WEIGHT_ACTIVE}x, IL: {ROSTER_WEIGHT_IL}x, Other: {ROSTER_WEIGHT_OTHER}x
+    - **Statcast Blend**: Influence of {STATCAST_INFLUENCE} (reduced to prevent over-smoothing)
+    - **Park Factors**: 50% regression toward league average
+    
+    ### 3. Final Blending
+    - **WARP Baseline Weight**: 80%
+    - **Rate Stat Weight**: 20%
+    
+    ### 4. Pythagorean Regression
+    - **Fixed Regression**: {PYTHAG_REGRESSION_PA} games (reduced from dynamic curve)
+    - **Early Season**: Less pull toward .500 to preserve talent gaps
+    """)
     with st.expander("📈 Buyer/Seller Classification"):
         dp = min(max((date.today() - date(SEASON_YEAR, 4, 1)).days / max((date(SEASON_YEAR, 6, 15) - date(SEASON_YEAR, 4, 1)).days, 1), 0.4), 1.0)
         st.markdown(f"""
@@ -850,9 +826,7 @@ def render_methodology_tab():
         - Soft Buyer: ≥{TIER_HARD_BUYER} (+{ADJ_SOFT_BUYER:.0%})
         - Hard Buyer: <{TIER_HARD_BUYER} (+{ADJ_HARD_BUYER:.0%})
         """)
-        
-    with st.expander("🗓️ Deadline Ramp"):
-        st.markdown(f"""
+    with st.expander("🗓️ Deadline Ramp"): st.markdown(f"""
         **Ramp Period:** {DEADLINE_RAMP_START} → {TRADE_DEADLINE}
         
         **Today's Factor:** {get_deadline_ramp_factor():.1%}
@@ -861,9 +835,7 @@ def render_methodology_tab():
         
         Before ramp start, no adjustment is applied to projected records.
         """)
-        
-    with st.expander("📉 Luck Regression & SoS"):
-        st.markdown(f"""
+    with st.expander("📉 Luck Regression & SoS"): st.markdown(f"""
         **Luck Regression:**
         ```
         -(luck_wins × {LUCK_REGRESSION_FACTOR}) / games_remaining
@@ -874,9 +846,7 @@ def render_methodology_tab():
         (0.500 − avg_opp_win_pct) × {SOS_SENSITIVITY} × min(GP/81, 1.0)
         ```
         """)
-        
-    with st.expander("🎲 Monte Carlo Simulation"):
-        st.markdown(f"""
+    with st.expander("🎲 Monte Carlo Simulation"): st.markdown(f"""
         - **{N_SIMULATIONS:,} Simulations**
         - **Log5 Win Probability**
         - **Zero-Sum Constraint**
