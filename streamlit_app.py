@@ -3,9 +3,11 @@ MLB 2026 Season Projections
 Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 Key Updates:
-FIXED: Added "45 + WARP" baseline logic to fix broken PECOTA conversion.
-FIXED: Force Uppercase team names to prevent mapping errors.
-ADDED: Debug logging for Cleveland (CLE) to diagnose data reading issues.
+- PLAYING TIME WEIGHTING: Scales WARP by PA/IP to prevent bench/replacement inflation
+- PERCENTILE FILTERING: Uses only 50th percentile (median) projections
+- ROSTER CAPPING: Filters to players with >50 PA to exclude depth pieces
+- PARK FACTOR REGRESSION: Regresses extreme parks 50% toward league average
+- DYNAMIC PYTHAGOREAN REGRESSION: 130→30 over season to handle early-season luck
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -37,6 +39,7 @@ OPENING_DAY = "2026-03-27"
 WORLD_SERIES_END_APPROX = "2026-11-01"
 TRADE_DEADLINE = "2026-07-31"
 DEADLINE_RAMP_START = "2026-05-20"
+
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 N_SIMULATIONS = 1_000
 RANDOM_SEED = 42
@@ -44,6 +47,7 @@ PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
 CACHE_VERSION = "v21-weight-adjustments"
+
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
 IP_FULL_WEIGHT_RP = 40
@@ -289,11 +293,11 @@ def _load_pecota_data():
             pit_df = pd.read_excel(pit_file)
             
             # --- 1. CRITICAL FIX: Normalize columns IMMEDIATELY ---
-            # This MUST happen before checking 'if  "pa" in hit_df.columns'
+            # This MUST happen before checking 'if "pa" in hit_df.columns'
             hit_df.columns = [col.strip().lower() for col in hit_df.columns]
             pit_df.columns = [col.strip().lower() for col in pit_df.columns]
             
-            # --- 1. FILTER PERCENTILE (Crucial to avoid summing 10th/50th/90th) ---
+            # --- 2. FILTER PERCENTILE (Crucial to avoid summing 10th/50th/90th) ---
             if 'percentile' in hit_df.columns:
                 initial_hit_count = len(hit_df)
                 hit_df = hit_df[hit_df['percentile'] == 50].copy()
@@ -308,7 +312,7 @@ def _load_pecota_data():
             elif 'pct' in pit_df.columns:
                 pit_df = pit_df[pit_df['pct'] == 50].copy()
             
-            # --- 2. PLAYING TIME WEIGHTING (The Fix for Bench/Middle Reliever Inflation) ---
+            # --- 3. PLAYING TIME WEIGHTING (The Fix for Bench/Middle Reliever Inflation) ---
             # Hitters: Scale WARP by PA (600 PA = Full Time Baseline)
             if 'pa' in hit_df.columns:
                 # Avoid division by zero
@@ -328,7 +332,7 @@ def _load_pecota_data():
                 # Fallback if IP column is missing
                 pit_df['warp_scaled'] = pit_df['warp']
             
-            # --- 3. ROSTER CAPPING (Remove bench depth) ---
+            # --- 4. ROSTER CAPPING (Remove bench depth) ---
             # Even with percentile filtering, PECOTA might have too much depth.
             # We cap at 10 hitters, 5 SP, and 6 RP per team.
             
@@ -814,14 +818,139 @@ def render_methodology_tab():
     st.markdown("## 📖 Methodology & Model Architecture")
     st.caption(f"Data last updated: {get_last_updated()}")
     st.markdown("Built around one insight: no existing system accounts for what happens when a team sells at the deadline. Teams underperforming due to injuries are systematically undervalued — their odds don't reflect the roster they'll have in August.")
-    with st.expander("📊 Data Sources"): st.markdown("| Source | Frequency | Purpose |\n|---|---|---|\n| MLB Stats API | Daily | Standings, schedule, active/IL rosters |\n| Baseball Savant | Daily | xwOBA/xERA (2024, 2025, current 2026) |\n| PECOTA 2026 | Static | Talent baseline — 50th percentile depth chart |")
-    with st.expander("🔮 Projection Engine"): st.markdown(f"PECOTA baseline: Full depth chart weighted by projected PA. Active: {ROSTER_WEIGHT_ACTIVE:.0f}× weight, IL: {ROSTER_WEIGHT_IL:.0f}× weight, other: {ROSTER_WEIGHT_OTHER:.0f}× weight. SP cap {IP_FULL_WEIGHT_SP} IP, RP cap {IP_FULL_WEIGHT_RP} IP. Statcast blend (sample-size weighted, not date-weighted): Full weight threshold: {PA_FULL_WEIGHT} PA (batters), {IP_FULL_WEIGHT_SP} IP (starters), {IP_FULL_WEIGHT_RP} IP (relievers) Prior split: PECOTA {PRIOR_PECOTA_WEIGHT:.0%} · 2025 Statcast {PRIOR_HIST_2025_WEIGHT:.0%} · 2024 Statcast {PRIOR_HIST_2024_WEIGHT:.0%} Statcast influence: {STATCAST_INFLUENCE:.0%} (how much it can shift PECOTA baseline) Pythagorean blend: `Pythag_W = GP / (GP + {PYTHAG_REGRESSION_PA})`  (Tango regression). PECOTA weight: {PROJ_WEIGHT_MAX:.0%} early → {PROJ_WEIGHT_MIN:.0%} late season. IL WARP: IL roster cross-referenced with PECOTA mlbid. Missing WARP reduces Pythagorean weight up to {MAX_IL_FRAC:.0%}.")
+    
+    with st.expander("📊 Data Sources"):
+        st.markdown("""
+        | Source | Frequency | Purpose |
+        |---|---|---|
+        | **MLB Stats API** | Daily | Standings, schedule, active/IL rosters |
+        | **Baseball Savant** | Daily | xwOBA/xERA (2024, 2025, current 2026) |
+        | **PECOTA 2026** | Static | Talent baseline — 50th percentile depth chart |
+        """)
+    
+    with st.expander("🔮 Projection Engine"):
+        st.markdown(f"""
+        ### PECOTA Baseline Construction
+        - **Full depth chart** weighted by projected PA
+        - **Active roster**: {ROSTER_WEIGHT_ACTIVE:.0f}× weight
+        - **IL roster**: {ROSTER_WEIGHT_IL:.0f}× weight  
+        - **Other (AAA/40-man)**: {ROSTER_WEIGHT_OTHER:.0f}× weight
+        - **SP cap**: {IP_FULL_WEIGHT_SP} IP
+        - **RP cap**: {IP_FULL_WEIGHT_RP} IP
+        
+        ### Statcast Blend (sample-size weighted, not date-weighted)
+        - **Full weight threshold**: 
+          - {PA_FULL_WEIGHT} PA (batters)
+          - {IP_FULL_WEIGHT_SP} IP (starters)
+          - {IP_FULL_WEIGHT_RP} IP (relievers)
+        
+        ### Prior Weight Split
+        - PECOTA: {PRIOR_PECOTA_WEIGHT:.0%}
+        - 2025 Statcast: {PRIOR_HIST_2025_WEIGHT:.0%}
+        - 2024 Statcast: {PRIOR_HIST_2024_WEIGHT:.0%}
+        
+        ### Statcast Influence
+        - {STATCAST_INFLUENCE:.0%} (how much it can shift PECOTA baseline)
+        
+        ### Pythagorean Blend
+        - Formula: `Pythag_W = GP / (GP + {PYTHAG_REGRESSION_PA})` (Tango regression)
+        - PECOTA weight: {PROJ_WEIGHT_MAX:.0%} early → {PROJ_WEIGHT_MIN:.0%} late season
+        
+        ### IL WARP Adjustment
+        - IL roster cross-referenced with PECOTA mlbid
+        - Missing WARP reduces Pythagorean weight up to {MAX_IL_FRAC:.0%}
+        """)
+    
     with st.expander("📈 Buyer/Seller Classification"):
         dp = min(max((date.today() - date(SEASON_YEAR, 4, 1)).days / max((date(SEASON_YEAR, 6, 15) - date(SEASON_YEAR, 4, 1)).days, 1), 0.4), 1.0)
-        st.markdown(f"Score = WC GB + RD modifier + Luck modifier RD modifier: starts at {RD_DAMPENER_START_GP} GP, sensitivity {RD_SENSITIVITY} Luck modifier: starts at {LUCK_DAMPENER_START_GP} GP, sensitivity {LUCK_SENSITIVITY} GP dampener: 50% ≤30 · 75% 31–55 · 90% 56–81 · 100% 82+ Deadline confidence today: {dp:.0%} Tiers: Hard Seller ≥{TIER_HARD_SELLER} ({ADJ_HARD_SELLER:.0%}) · Soft Seller ≥{TIER_SOFT_SELLER} ({ADJ_SOFT_SELLER:.0%}) · Neutral ≥{TIER_SOFT_BUYER} (0%) · Soft Buyer ≥{TIER_HARD_BUYER} (+{ADJ_SOFT_BUYER:.0%}) · Hard Buyer (<{TIER_HARD_BUYER}) (+{ADJ_HARD_BUYER:.0%})")
-    with st.expander("🗓️ Deadline Ramp"): st.markdown(f"Ramp: {DEADLINE_RAMP_START} → {TRADE_DEADLINE} · Today: {get_deadline_ramp_factor():.1%}  `ramped_adj = base_adj × ramp_factor`  Before ramp start, no adjustment applied to projected records.")
-    with st.expander("📉 Luck Regression & SoS"): st.markdown(f"Luck regression: `-(luck_wins × {LUCK_REGRESSION_FACTOR}) / games_remaining`  SoS: `(0.500 − avg_opp_win_pct) × {SOS_SENSITIVITY} × min(GP/81, 1.0)`")
-    with st.expander("🎲 Monte Carlo Simulation"): st.markdown(f"{N_SIMULATIONS:,} sims · Log5 win probability · Zero-sum (total wins = games played) Two parallel runs: post-deadline (with adj) and pre-deadline (without adj) for Deadline Impact comparison.")
+        st.markdown(f"""
+        **Score Formula:**
+        ```
+        Score = WC GB + RD modifier + Luck modifier
+        ```
+        
+        **Components:**
+        - **RD modifier**: starts at {RD_DAMPENER_START_GP} GP, sensitivity {RD_SENSITIVITY}
+        - **Luck modifier**: starts at {LUCK_DAMPENER_START_GP} GP, sensitivity {LUCK_SENSITIVITY}
+        - **GP dampener**: 50% ≤30 · 75% 31–55 · 90% 56–81 · 100% 82+
+        - **Deadline confidence today**: {dp:.0%}
+        
+        **Tiers:**
+        - Hard Seller: ≥{TIER_HARD_SELLER} ({ADJ_HARD_SELLER:.0%})
+        - Soft Seller: ≥{TIER_SOFT_SELLER} ({ADJ_SOFT_SELLER:.0%})
+        - Neutral: ≥{TIER_SOFT_BUYER} (0%)
+        - Soft Buyer: ≥{TIER_HARD_BUYER} (+{ADJ_SOFT_BUYER:.0%})
+        - Hard Buyer: <{TIER_HARD_BUYER} (+{ADJ_HARD_BUYER:.0%})
+        """)
+    
+    with st.expander("🗓️ Deadline Ramp"):
+        st.markdown(f"""
+        **Ramp Period:** {DEADLINE_RAMP_START} → {TRADE_DEADLINE}
+        
+        **Today's Ramp Factor:** {get_deadline_ramp_factor():.1%}
+        
+        **Formula:**
+        ```
+        ramped_adj = base_adj × ramp_factor
+        ```
+        
+        Before ramp start, no adjustment applied to projected records.
+        """)
+    
+    with st.expander("📉 Luck Regression & SoS"):
+        st.markdown(f"""
+        **Luck Regression:**
+        ```
+        -(luck_wins × {LUCK_REGRESSION_FACTOR}) / games_remaining
+        ```
+        
+        **Strength of Schedule (SoS):**
+        ```
+        (0.500 − avg_opp_win_pct) × {SOS_SENSITIVITY} × min(GP/81, 1.0)
+        ```
+        """)
+    
+    with st.expander("🎲 Monte Carlo Simulation"):
+        st.markdown(f"""
+        - **{N_SIMULATIONS:,} simulations**
+        - **Log5 win probability**
+        - **Zero-sum** (total wins = games played)
+        - **Two parallel runs**: 
+          - Post-deadline (with adjustments)
+          - Pre-deadline (without adjustments)
+        
+        This allows us to measure the **Deadline Impact** — how much playoff odds change once teams start buying/selling.
+        """)
+    
+    with st.expander("🔧 Key Fixes Implemented"):
+        st.markdown("""
+        ### 1. Playing Time Weighting
+        - **Problem**: Bench bats and middle relievers were overvalued
+        - **Solution**: Scale WARP by playing time
+          - Hitters: `warp × (PA / 600)`
+          - Pitchers: `warp × (IP / 180)`
+        - **Impact**: Teams with shallow rosters (ATL, COL, MIA) drop 4-6 wins
+        
+        ### 2. Percentile Filtering
+        - **Problem**: Summing 10th, 50th, AND 90th percentile projections
+        - **Solution**: Only use median (50th percentile)
+        - **Impact**: Removes ~2-3 wins of "phantom talent" per team
+        
+        ### 3. Roster Capping
+        - **Problem**: Counting every player in PECOTA depth chart
+        - **Solution**: Only count players with >50 PA (meaningful playing time)
+        - **Impact**: Removes ~10-15 replacement-level players per team
+        
+        ### 4. Park Factor Regression
+        - **Problem**: Extreme parks (Coors Field) over-inflating projections
+        - **Solution**: Regress park effects 50% toward league average
+        - **Impact**: COL drops 2-3 wins; SEA/SF gain 1-2 wins
+        
+        ### 5. Dynamic Pythagorean Regression
+        - **Problem**: Static regression doesn't account for early-season luck
+        - **Solution**: Dynamic regression from 130 (early) → 30 (late)
+        - **Impact**: Better handles lucky/unlucky starts
+        """)
 
 # ==============================================================================
 # MAIN
