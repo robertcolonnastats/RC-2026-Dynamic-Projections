@@ -4,7 +4,7 @@ Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 
 Key Updates:
-- FIXED: Added "46 + WARP" baseline logic to fix broken PECOTA conversion.
+- FIXED: Added "45 + WARP" baseline logic to fix broken PECOTA conversion.
 - FIXED: Force Uppercase team names to prevent mapping errors.
 - ADDED: Debug logging for Cleveland (CLE) to diagnose data reading issues.
 """
