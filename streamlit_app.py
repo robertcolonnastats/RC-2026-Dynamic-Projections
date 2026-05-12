@@ -2,12 +2,13 @@
 MLB 2026 Season Projections
 Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
+
 Key Updates:
-- PLAYING TIME WEIGHTING: Scales WARP by PA/IP to prevent bench/replacement inflation
-- PERCENTILE FILTERING: Uses only 50th percentile (median) projections
-- ROSTER CAPPING: Filters to players with >50 PA to exclude depth pieces
-- PARK FACTOR REGRESSION: Regresses extreme parks 50% toward league average
-- DYNAMIC PYTHAGOREAN REGRESSION: 130→30 over season to handle early-season luck
+- WARP BASELINE: Projection anchored to 45 + Weighted WARP.
+- WEIGHTED WARP: Hitters capped at 550 PA, Pitchers at 180 IP.
+- FIXED REGRESSION: Static Pythagorean regression of 45 games.
+- REDUCED SMOOTHING: Statcast influence reduced to 0.25.
+- CORRECTIONS: Fixed syntax errors and logic flaws from previous versions.
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -46,7 +47,7 @@ RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v21-weight-adjustments"
+CACHE_VERSION = "v30-warp-baseline-fix"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -54,20 +55,24 @@ IP_FULL_WEIGHT_RP = 40
 PRIOR_PECOTA_WEIGHT = 0.45
 PRIOR_HIST_2025_WEIGHT = 0.35
 PRIOR_HIST_2024_WEIGHT = 0.20
-# UPDATED: Reduced Statcast noise impact
-STATCAST_INFLUENCE = 0.40
+
+# UPDATED: Reduced Statcast noise impact to prevent over-smoothing
+STATCAST_INFLUENCE = 0.25
+
 # UPDATED: Adjusted roster weighting for cleaner talent signal
 ROSTER_WEIGHT_ACTIVE = 650.0
 ROSTER_WEIGHT_IL = 8.0
 ROSTER_WEIGHT_OTHER = 280.0
 TYPICAL_TEAM_WARP = 35.0
 MAX_IL_FRAC = 0.50
-# UPDATED: Stronger Pythagorean regression
-PYTHAG_REGRESSION_PA = 35
+
+# UPDATED: Fixed regression at 45 games (reduced from dynamic curve)
+PYTHAG_REGRESSION_PA = 45
+
 # UPDATED: Increased early-season trust in PECOTA talent
 PROJ_WEIGHT_MAX = 0.92
 PROJ_WEIGHT_MIN = 0.42
-# UPDATED: Tighter buyer/seller thresholds
+
 TIER_HARD_SELLER = 4.2
 TIER_SOFT_SELLER = 3.2
 TIER_SOFT_BUYER = -3.0
@@ -76,7 +81,6 @@ RD_SENSITIVITY = 0.025
 RD_DAMPENER_START_GP = 50
 LUCK_SENSITIVITY = 0.50
 LUCK_DAMPENER_START_GP = 40
-# UPDATED: More aggressive luck regression
 LUCK_REGRESSION_FACTOR = 0.50
 ADJ_HARD_SELLER = -0.12
 ADJ_SOFT_SELLER = -0.06
@@ -85,26 +89,43 @@ ADJ_SOFT_BUYER = +0.04
 ADJ_HARD_BUYER = +0.07
 ADJ_SCALE = 0.015
 SOS_SENSITIVITY = 0.15
+
 TEAM_INFO = {
-108:("Los Angeles Angels","LAA","AL West","AL"), 109:("Arizona Diamondbacks","ARI","NL West","NL"),
-110:("Baltimore Orioles","BAL","AL East","AL"),  111:("Boston Red Sox","BOS","AL East","AL"),
-112:("Chicago Cubs","CHC","NL Central","NL"),    113:("Cincinnati Reds","CIN","NL Central","NL"),
-114:("Cleveland Guardians","CLE","AL Central","AL"), 115:("Colorado Rockies","COL","NL West","NL"),
-116:("Detroit Tigers","DET","AL Central","AL"),  117:("Houston Astros","HOU","AL West","AL"),
-118:("Kansas City Royals","KC","AL Central","AL"), 119:("Los Angeles Dodgers","LAD","NL West","NL"),
-120:("Washington Nationals","WSH","NL East","NL"), 121:("New York Mets","NYM","NL East","NL"),
-133:("Oakland Athletics","OAK","AL West","AL"),  134:("Pittsburgh Pirates","PIT","NL Central","NL"),
-135:("San Diego Padres","SD","NL West","NL"),    136:("Seattle Mariners","SEA","AL West","AL"),
-137:("San Francisco Giants","SF","NL West","NL"), 138:("St. Louis Cardinals","STL","NL Central","NL"),
-139:("Tampa Bay Rays","TB","AL East","AL"),      140:("Texas Rangers","TEX","AL West","AL"),
-141:("Toronto Blue Jays","TOR","AL East","AL"),  142:("Minnesota Twins","MIN","AL Central","AL"),
-143:("Philadelphia Phillies","PHI","NL East","NL"), 144:("Atlanta Braves","ATL","NL East","NL"),
-145:("Chicago White Sox","CWS","AL Central","AL"), 146:("Miami Marlins","MIA","NL East","NL"),
-147:("New York Yankees","NYY","AL East","AL"),   158:("Milwaukee Brewers","MIL","NL Central","NL"),
+    108: ("Los Angeles Angels", "LAA", "AL West", "AL"),
+    109: ("Arizona Diamondbacks", "ARI", "NL West", "NL"),
+    110: ("Baltimore Orioles", "BAL", "AL East", "AL"),
+    111: ("Boston Red Sox", "BOS", "AL East", "AL"),
+    112: ("Chicago Cubs", "CHC", "NL Central", "NL"),
+    113: ("Cincinnati Reds", "CIN", "NL Central", "NL"),
+    114: ("Cleveland Guardians", "CLE", "AL Central", "AL"),
+    115: ("Colorado Rockies", "COL", "NL West", "NL"),
+    116: ("Detroit Tigers", "DET", "AL Central", "AL"),
+    117: ("Houston Astros", "HOU", "AL West", "AL"),
+    118: ("Kansas City Royals", "KC", "AL Central", "AL"),
+    119: ("Los Angeles Dodgers", "LAD", "NL West", "NL"),
+    120: ("Washington Nationals", "WSH", "NL East", "NL"),
+    121: ("New York Mets", "NYM", "NL East", "NL"),
+    133: ("Oakland Athletics", "OAK", "AL West", "AL"),
+    134: ("Pittsburgh Pirates", "PIT", "NL Central", "NL"),
+    135: ("San Diego Padres", "SD", "NL West", "NL"),
+    136: ("Seattle Mariners", "SEA", "AL West", "AL"),
+    137: ("San Francisco Giants", "SF", "NL West", "NL"),
+    138: ("St. Louis Cardinals", "STL", "NL Central", "NL"),
+    139: ("Tampa Bay Rays", "TB", "AL East", "AL"),
+    140: ("Texas Rangers", "TEX", "AL West", "AL"),
+    141: ("Toronto Blue Jays", "TOR", "AL East", "AL"),
+    142: ("Minnesota Twins", "MIN", "AL Central", "AL"),
+    143: ("Philadelphia Phillies", "PHI", "NL East", "NL"),
+    144: ("Atlanta Braves", "ATL", "NL East", "NL"),
+    145: ("Chicago White Sox", "CWS", "AL Central", "AL"),
+    146: ("Miami Marlins", "MIA", "NL East", "NL"),
+    147: ("New York Yankees", "NYY", "AL East", "AL"),
+    158: ("Milwaukee Brewers", "MIL", "NL Central", "NL"),
 }
-TIER_LABELS = {"hard_seller":"Hard Seller","soft_seller":"Soft Seller","neutral":"Neutral","soft_buyer":"Soft Buyer","hard_buyer":"Hard Buyer"}
-TIER_COLORS = {"hard_seller":"#d62728","soft_seller":"#ff7f0e","neutral":"#7f7f7f","soft_buyer":"#2ca02c","hard_buyer":"#1f77b4"}
-TIER_EMOJI = {"hard_seller":"🔴","soft_seller":"🟠","neutral":"⚪","soft_buyer":"🟢","hard_buyer":"🔵"}
+
+TIER_LABELS = {"hard_seller": "Hard Seller", "soft_seller": "Soft Seller", "neutral": "Neutral", "soft_buyer": "Soft Buyer", "hard_buyer": "Hard Buyer"}
+TIER_COLORS = {"hard_seller": "#d62728", "soft_seller": "#ff7f0e", "neutral": "#7f7f7f", "soft_buyer": "#2ca02c", "hard_buyer": "#1f77b4"}
+TIER_EMOJI = {"hard_seller": "🔴", "soft_seller": "🟠", "neutral": "⚪", "soft_buyer": "🟢", "hard_buyer": "🔵"}
 EST = ZoneInfo("America/New_York")
 
 # ==============================================================================
@@ -292,64 +313,41 @@ def _load_pecota_data():
             hit_df = pd.read_excel(hit_file)
             pit_df = pd.read_excel(pit_file)
             
-            # --- 1. CRITICAL FIX: Normalize columns IMMEDIATELY ---
-            # This MUST happen before checking 'if "pa" in hit_df.columns'
             hit_df.columns = [col.strip().lower() for col in hit_df.columns]
             pit_df.columns = [col.strip().lower() for col in pit_df.columns]
             
-            # --- 2. FILTER PERCENTILE (Crucial to avoid summing 10th/50th/90th) ---
+            # Filter for 50th Percentile
             if 'percentile' in hit_df.columns:
-                initial_hit_count = len(hit_df)
                 hit_df = hit_df[hit_df['percentile'] == 50].copy()
-                st.info(f"Filtered hitting data to 50th percentile: {initial_hit_count} -> {len(hit_df)} rows.")
-            elif 'pct' in hit_df.columns: # Handle alternate column names
+            elif 'pct' in hit_df.columns:
                 hit_df = hit_df[hit_df['pct'] == 50].copy()
                 
             if 'percentile' in pit_df.columns:
-                initial_pit_count = len(pit_df)
                 pit_df = pit_df[pit_df['percentile'] == 50].copy()
-                st.info(f"Filtered pitching data to 50th percentile: {initial_pit_count} -> {len(pit_df)} rows.")
             elif 'pct' in pit_df.columns:
                 pit_df = pit_df[pit_df['pct'] == 50].copy()
-            
-            # --- 3. PLAYING TIME WEIGHTING (The Fix for Bench/Middle Reliever Inflation) ---
-            # Hitters: Scale WARP by PA (600 PA = Full Time Baseline)
+        
+            # --- PLAYING TIME WEIGHTED WARP ---
+            # Hitters: Cap contribution at 550 PA
             if 'pa' in hit_df.columns:
-                # Avoid division by zero
-                hit_df['warp_scaled'] = hit_df.apply(
-                    lambda r: r['warp'] * (r['pa'] / 600.0) if r['pa'] > 0 else 0.0, axis=1
-                )
+                hit_df['adj_warp'] = hit_df['warp'] * (hit_df['pa'] / 550).clip(upper=1)
             else:
-                # Fallback if PA column is missing
-                hit_df['warp_scaled'] = hit_df['warp']
-            
-            # Pitchers: Scale WARP by IP (180 IP = Full Time Starter Baseline)
+                hit_df['adj_warp'] = hit_df['warp']
+                
+            # Pitchers: Cap contribution at 180 IP
             if 'ip' in pit_df.columns:
-                pit_df['warp_scaled'] = pit_df.apply(
-                    lambda r: r['warp'] * (r['ip'] / 180.0) if r['ip'] > 0 else 0.0, axis=1
-                )
+                pit_df['adj_warp'] = pit_df['warp'] * (pit_df['ip'] / 180).clip(upper=1)
             else:
-                # Fallback if IP column is missing
-                pit_df['warp_scaled'] = pit_df['warp']
-            
-            # --- 4. ROSTER CAPPING (Remove bench depth) ---
-            # Even with percentile filtering, PECOTA might have too much depth.
-            # We cap at 10 hitters, 5 SP, and 6 RP per team.
-            
-            # --- WITH THIS (The "Meaningful Playing Time" logic) ---
+                pit_df['adj_warp'] = pit_df['warp']
+
+            # Roster Capping
             if 'pa' in hit_df.columns:
-                # Filter for players with > 50 PA (approx. 1 week of playing time)
-                # This ensures negative-WARP players who actually play are included
-                hit_df = hit_df[hit_df['pa'] > 50].copy()
+                hit_df = hit_df.sort_values('pa', ascending=False).groupby('team').head(13).copy()
             
-            # 2. Pitchers: Split by role, cap at 5 SP and 6 RP
             if 'role' in pit_df.columns and 'ip' in pit_df.columns:
                 sp_df = pit_df[pit_df['role'] == 'SP'].sort_values('ip', ascending=False).groupby('team').head(5)
                 rp_df = pit_df[pit_df['role'] == 'RP'].sort_values('ip', ascending=False).groupby('team').head(6)
                 pit_df = pd.concat([sp_df, rp_df]).copy()
-            
-            hit_df.columns = [col.strip().lower() for col in hit_df.columns]
-            pit_df.columns = [col.strip().lower() for col in pit_df.columns]
             
             # Normalize Team Names to Uppercase for Mapping
             if 'team' in hit_df.columns: hit_df['team'] = hit_df['team'].astype(str).str.strip().str.upper()
@@ -453,40 +451,14 @@ def fetch_team_projections(standings_df, roster_map):
     h24b = sc.get("h24b",{}); h24p = sc.get("h24p",{})
     mlb_ops,mlb_era = sc.get("mlb",({},{}))
     cur_bat,cur_pit = sc.get("cur",({},{}))
-    # --- PARK FACTORS ---
-    # Normalized to 1.0 (1.0 = neutral, >1.0 = hitter friendly, <1.0 = pitcher friendly)
-    # Source: FanGraphs / Baseball-Reference multi-year averages
+    
     PARK_FACTORS = {
-        115: 1.14,  # COL: Coors Field (~14% boost)
-        136: 0.94,  # SEA: pitcher-friendly
-        137: 0.96,  # SF: pitcher-friendly
-        119: 1.03,  # LAD: slight hitter boost
-        147: 1.02,  # NYY: slight hitter boost
-        143: 1.01,  # PHI
-        112: 0.98,  # CHC
-        144: 0.99,  # ATL
-        114: 0.97,  # CLE
-        141: 0.98,  # TOR
-        139: 0.95,  # TB
-        110: 0.99,  # BAL
-        134: 1.00,  # PIT
-        158: 0.97,  # MIL
-        117: 1.02,  # HOU
-        140: 1.04,  # TEX
-        111: 0.99,  # BOS
-        146: 1.00,  # MIA
-        121: 1.01,  # NYM
-        116: 0.98,  # DET
-        118: 1.01,  # KC
-        142: 0.98,  # MIN
-        135: 1.00,  # SD
-        138: 1.00,  # STL
-        109: 1.05,  # ARI (Chase Field)
-        145: 0.97,  # CWS
-        113: 1.02,  # CIN
-        133: 0.96,  # OAK
-        108: 1.03,  # LAA
-        120: 1.01,  # WSH
+        115: 1.14, 136: 0.94, 137: 0.96, 119: 1.03, 147: 1.02,
+        143: 1.01, 112: 0.98, 144: 0.99, 114: 0.97, 141: 0.98,
+        139: 0.95, 110: 0.99, 134: 1.00, 158: 0.97, 117: 1.02,
+        140: 1.04, 111: 0.99, 146: 1.00, 121: 1.01, 116: 0.98,
+        118: 1.01, 142: 0.98, 135: 1.00, 138: 1.00, 109: 1.05,
+        145: 0.97, 113: 1.02, 133: 0.96, 108: 1.03, 120: 1.01
     }
 
     rows = []
@@ -497,15 +469,26 @@ def fetch_team_projections(standings_df, roster_map):
             ph_team = ph[ph["team_id"]==tid] if not ph.empty else pd.DataFrame()
             pp_team = pp[pp["team_id"]==tid].copy() if not pp.empty else pd.DataFrame()
             
-            if not pp_team.empty:
+            if not pp_team.empty and 'gs' in pp_team.columns and 'g' in pp_team.columns:
+                valid_games = pp_team['g'] > 0
+                pp_team['gs_pct'] = 0.0
+                pp_team.loc[valid_games, 'gs_pct'] = pp_team.loc[valid_games, 'gs'] / pp_team.loc[valid_games, 'g']
                 pp_team['role'] = 'RP'
-                if 'gs' in pp_team.columns and 'g' in pp_team.columns:
-                    pp_team['gs'] = pd.to_numeric(pp_team['gs'], errors='coerce').fillna(0)
-                    pp_team['g'] = pd.to_numeric(pp_team['g'], errors='coerce').fillna(0)
-                    valid_games = pp_team['g'] > 0
-                    pp_team.loc[valid_games, 'gs_pct'] = pp_team.loc[valid_games, 'gs'] / pp_team.loc[valid_games, 'g']
-                    pp_team.loc[pp_team['gs_pct'] >= 0.50, 'role'] = 'SP'
+                pp_team.loc[pp_team['gs_pct'] >= 0.50, 'role'] = 'SP'
             
+            # --- WARP BASELINE CALCULATION ---
+            # Sum the ADJUSTED (weighted) WARP
+            team_warp_sum = 0.0
+            if not ph.empty and not ph_team.empty:
+                team_warp_sum = ph_team["adj_warp"].sum()
+            if not pp.empty and not pp_team.empty:
+                team_warp_sum += pp_team["adj_warp"].sum()
+            
+            # Calculate Baseline Wins: 45 + Weighted WARP
+            baseline_wins = 45.0 + team_warp_sum
+            baseline_wpct = baseline_wins / 162.0
+
+            # --- RATE STATS CALCULATION (OPS/FIP) ---
             pecota_ops = LEAGUE_AVG_OPS
             if not ph_team.empty:
                 pa_vals = ph_team["pa"].fillna(0).tolist()
@@ -560,18 +543,17 @@ def fetch_team_projections(standings_df, roster_map):
             rp_era = float(np.clip(rp_base * (1 + sc_adj), 3.00, 5.50))
             proj_rapg = float(np.clip((sp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE + (rp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE, 2.5, 7.5))
             
-            # --- PARK FACTOR ADJUSTMENT ---
+            # Park Factor Adjustment
             park_factor = PARK_FACTORS.get(tid, 1.0)
             if park_factor != 1.0:
-                # Regress extreme park effects toward league average (50% adjustment)
                 proj_rpg = proj_rpg * (1.0 + (park_factor - 1.0) * 0.5)
                 proj_rapg = proj_rapg * (1.0 + (1.0/park_factor - 1.0) * 0.5)
             
-            proj_wp = float(proj_rpg**PYTHAG_EXPONENT / (proj_rpg**PYTHAG_EXPONENT + proj_rapg**PYTHAG_EXPONENT))
+            proj_wp_rates = float(proj_rpg**PYTHAG_EXPONENT / (proj_rpg**PYTHAG_EXPONENT + proj_rapg**PYTHAG_EXPONENT))
             
-            # FIX: Blend the WARP projection into the Win Percentage if the RPG model is failing
-            if proj_wp < 0.350:
-                proj_wp = warp_projected_wpct
+            # --- FINAL BLENDING ---
+            # 60% WARP Baseline + 40% Rate Stats
+            proj_wp = 0.6 * baseline_wpct + 0.4 * proj_wp_rates
 
             il_warp = 0.0
             if not ph.empty and len(il_ids) > 0:
@@ -607,10 +589,10 @@ def build_master(std, prj):
     for c in ["proj_win_pct", "proj_runs_per_game", "proj_ra_per_game", "il_warp"]: df[c] = df[c].fillna(0.0).astype(float)
     df["pythag_win_pct"] = df.apply(lambda r: pythag(float(r["runs_scored"]), float(r["runs_allowed"])), axis=1).astype(float)
     gp = df["games_played"].clip(0, 162).astype(float)
-    # Dynamic regression: trust preseason more early, trust actual record more late
-    # 130 at start of season (heavy regression to .500) -> 30 at end of season
-    dynamic_regression = 130 * (1 - gp/162) + 30 * (gp/162)
-
+    
+    # Dynamic regression (45 games baseline)
+    dynamic_regression = 45
+    
     df["pythag_win_pct"] = (df["pythag_win_pct"] * (gp / (gp + dynamic_regression)) + 
                         0.500 * (dynamic_regression / (gp + dynamic_regression))).astype(float)
 
@@ -631,7 +613,6 @@ def compute_buyer_seller(df):
     luck_mod = (df["luck_wins"] * LUCK_SENSITIVITY * ((df["games_played"] - LUCK_DAMPENER_START_GP) / 60.0).clip(0, 1)).astype(float)
     pre = df["wc_games_back"] + rd_mod + luck_mod
     damp = df["games_played"].apply(lambda g: 0.5 if g <= 30 else 0.75 if g <= 55 else 0.9 if g <= 81 else 1.0)
-    # ✅ CRITICAL FIX: Use the exact same ramp factor as the diagnostics
     dp = get_deadline_ramp_factor()
 
     df["adjusted_score"] = (pre * damp * dp).astype(float)
@@ -827,53 +808,40 @@ def render_methodology_tab():
         | **Baseball Savant** | Daily | xwOBA/xERA (2024, 2025, current 2026) |
         | **PECOTA 2026** | Static | Talent baseline — 50th percentile depth chart |
         """)
-    
+        
     with st.expander("🔮 Projection Engine"):
         st.markdown(f"""
-        ### PECOTA Baseline Construction
-        - **Full depth chart** weighted by projected PA
-        - **Active roster**: {ROSTER_WEIGHT_ACTIVE:.0f}× weight
-        - **IL roster**: {ROSTER_WEIGHT_IL:.0f}× weight  
-        - **Other (AAA/40-man)**: {ROSTER_WEIGHT_OTHER:.0f}× weight
-        - **SP cap**: {IP_FULL_WEIGHT_SP} IP
-        - **RP cap**: {IP_FULL_WEIGHT_RP} IP
+        ### 1. WARP Baseline (Primary Anchor)
+        - **Base Wins**: 45 (Replacement Level)
+        - **Weighted WARP**: 
+          - Hitters: `WARP * min(1, PA / 550)`
+          - Pitchers: `WARP * min(1, IP / 180)`
+        - **Formula**: `Baseline Wins = 45 + Sum(Weighted WARP)`
         
-        ### Statcast Blend (sample-size weighted, not date-weighted)
-        - **Full weight threshold**: 
-          - {PA_FULL_WEIGHT} PA (batters)
-          - {IP_FULL_WEIGHT_SP} IP (starters)
-          - {IP_FULL_WEIGHT_RP} IP (relievers)
+        ### 2. Rate Stat Projections
+        - **PECOTA Baseline**: Full depth chart weighted by projected PA
+        - **Roster Weights**: Active: {ROSTER_WEIGHT_ACTIVE}x, IL: {ROSTER_WEIGHT_IL}x, Other: {ROSTER_WEIGHT_OTHER}x
+        - **Statcast Blend**: Influence of {STATCAST_INFLUENCE} (reduced to prevent over-smoothing)
+        - **Park Factors**: 50% regression toward league average
         
-        ### Prior Weight Split
-        - PECOTA: {PRIOR_PECOTA_WEIGHT:.0%}
-        - 2025 Statcast: {PRIOR_HIST_2025_WEIGHT:.0%}
-        - 2024 Statcast: {PRIOR_HIST_2024_WEIGHT:.0%}
+        ### 3. Final Blending
+        - **WARP Baseline Weight**: 60%
+        - **Rate Stat Weight**: 40%
         
-        ### Statcast Influence
-        - {STATCAST_INFLUENCE:.0%} (how much it can shift PECOTA baseline)
-        
-        ### Pythagorean Blend
-        - Formula: `Pythag_W = GP / (GP + {PYTHAG_REGRESSION_PA})` (Tango regression)
-        - PECOTA weight: {PROJ_WEIGHT_MAX:.0%} early → {PROJ_WEIGHT_MIN:.0%} late season
-        
-        ### IL WARP Adjustment
-        - IL roster cross-referenced with PECOTA mlbid
-        - Missing WARP reduces Pythagorean weight up to {MAX_IL_FRAC:.0%}
+        ### 4. Pythagorean Regression
+        - **Fixed Regression**: {PYTHAG_REGRESSION_PA} games (reduced from dynamic curve)
+        - **Early Season**: Less pull toward .500 to preserve talent gaps
         """)
-    
+        
     with st.expander("📈 Buyer/Seller Classification"):
         dp = min(max((date.today() - date(SEASON_YEAR, 4, 1)).days / max((date(SEASON_YEAR, 6, 15) - date(SEASON_YEAR, 4, 1)).days, 1), 0.4), 1.0)
         st.markdown(f"""
-        **Score Formula:**
-        ```
-        Score = WC GB + RD modifier + Luck modifier
-        ```
+        **Score Formula:** `Score = WC GB + RD Modifier + Luck Modifier`
         
         **Components:**
-        - **RD modifier**: starts at {RD_DAMPENER_START_GP} GP, sensitivity {RD_SENSITIVITY}
-        - **Luck modifier**: starts at {LUCK_DAMPENER_START_GP} GP, sensitivity {LUCK_SENSITIVITY}
-        - **GP dampener**: 50% ≤30 · 75% 31–55 · 90% 56–81 · 100% 82+
-        - **Deadline confidence today**: {dp:.0%}
+        - **RD Modifier**: Starts at {RD_DAMPENER_START_GP} GP, Sensitivity {RD_SENSITIVITY}
+        - **Luck Modifier**: Starts at {LUCK_DAMPENER_START_GP} GP, Sensitivity {LUCK_SENSITIVITY}
+        - **Deadline Confidence**: {dp:.0%}
         
         **Tiers:**
         - Hard Seller: ≥{TIER_HARD_SELLER} ({ADJ_HARD_SELLER:.0%})
@@ -882,21 +850,18 @@ def render_methodology_tab():
         - Soft Buyer: ≥{TIER_HARD_BUYER} (+{ADJ_SOFT_BUYER:.0%})
         - Hard Buyer: <{TIER_HARD_BUYER} (+{ADJ_HARD_BUYER:.0%})
         """)
-    
+        
     with st.expander("🗓️ Deadline Ramp"):
         st.markdown(f"""
         **Ramp Period:** {DEADLINE_RAMP_START} → {TRADE_DEADLINE}
         
-        **Today's Ramp Factor:** {get_deadline_ramp_factor():.1%}
+        **Today's Factor:** {get_deadline_ramp_factor():.1%}
         
-        **Formula:**
-        ```
-        ramped_adj = base_adj × ramp_factor
-        ```
+        **Formula:** `ramped_adj = base_adj × ramp_factor`
         
-        Before ramp start, no adjustment applied to projected records.
+        Before ramp start, no adjustment is applied to projected records.
         """)
-    
+        
     with st.expander("📉 Luck Regression & SoS"):
         st.markdown(f"""
         **Luck Regression:**
@@ -909,47 +874,17 @@ def render_methodology_tab():
         (0.500 − avg_opp_win_pct) × {SOS_SENSITIVITY} × min(GP/81, 1.0)
         ```
         """)
-    
+        
     with st.expander("🎲 Monte Carlo Simulation"):
         st.markdown(f"""
-        - **{N_SIMULATIONS:,} simulations**
-        - **Log5 win probability**
-        - **Zero-sum** (total wins = games played)
-        - **Two parallel runs**: 
-          - Post-deadline (with adjustments)
-          - Pre-deadline (without adjustments)
+        - **{N_SIMULATIONS:,} Simulations**
+        - **Log5 Win Probability**
+        - **Zero-Sum Constraint**
+        - **Two Parallel Runs**: 
+          1. Post-deadline (with adjustments)
+          2. Pre-deadline (without adjustments)
         
         This allows us to measure the **Deadline Impact** — how much playoff odds change once teams start buying/selling.
-        """)
-    
-    with st.expander("🔧 Key Fixes Implemented"):
-        st.markdown("""
-        ### 1. Playing Time Weighting
-        - **Problem**: Bench bats and middle relievers were overvalued
-        - **Solution**: Scale WARP by playing time
-          - Hitters: `warp × (PA / 600)`
-          - Pitchers: `warp × (IP / 180)`
-        - **Impact**: Teams with shallow rosters (ATL, COL, MIA) drop 4-6 wins
-        
-        ### 2. Percentile Filtering
-        - **Problem**: Summing 10th, 50th, AND 90th percentile projections
-        - **Solution**: Only use median (50th percentile)
-        - **Impact**: Removes ~2-3 wins of "phantom talent" per team
-        
-        ### 3. Roster Capping
-        - **Problem**: Counting every player in PECOTA depth chart
-        - **Solution**: Only count players with >50 PA (meaningful playing time)
-        - **Impact**: Removes ~10-15 replacement-level players per team
-        
-        ### 4. Park Factor Regression
-        - **Problem**: Extreme parks (Coors Field) over-inflating projections
-        - **Solution**: Regress park effects 50% toward league average
-        - **Impact**: COL drops 2-3 wins; SEA/SF gain 1-2 wins
-        
-        ### 5. Dynamic Pythagorean Regression
-        - **Problem**: Static regression doesn't account for early-season luck
-        - **Solution**: Dynamic regression from 130 (early) → 30 (late)
-        - **Impact**: Better handles lucky/unlucky starts
         """)
 
 # ==============================================================================
