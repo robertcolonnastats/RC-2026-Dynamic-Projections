@@ -621,7 +621,10 @@ def build_master(std, prj):
     for c in ["proj_win_pct","proj_runs_per_game","proj_ra_per_game","il_warp"]: df[c] = df[c].fillna(0.0).astype(float)
     df["pythag_win_pct"] = df.apply(lambda r: pythag(float(r["runs_scored"]), float(r["runs_allowed"])), axis=1).astype(float)
     gp = df["games_played"].clip(0, 162).astype(float)
-    df["pythag_win_pct"] = (df["pythag_win_pct"] * (gp / (gp + PYTHAG_REGRESSION_PA)) + 0.500 * (PYTHAG_REGRESSION_PA / (gp + PYTHAG_REGRESSION_PA))).astype(float)
+    # Dynamic regression: trust preseason more early, trust actual record more late
+dynamic_regression = 130 * (1 - gp/162) + 30 * (gp/162)  # 130 → 30 over 162 games
+df["pythag_win_pct"] = (df["pythag_win_pct"] * (gp / (gp + dynamic_regression)) + 
+                        0.500 * (dynamic_regression / (gp + dynamic_regression))).astype(float)
     base_proj_w = (PROJ_WEIGHT_MAX - (gp / 162.0) * (PROJ_WEIGHT_MAX - PROJ_WEIGHT_MIN)).clip(PROJ_WEIGHT_MIN, PROJ_WEIGHT_MAX)
     il_frac = (df["il_warp"] / TYPICAL_TEAM_WARP).clip(0.0, MAX_IL_FRAC)
     adj_pyth_w = (1.0 - base_proj_w) * (1.0 - il_frac)
