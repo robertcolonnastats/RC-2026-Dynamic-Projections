@@ -565,7 +565,7 @@ def fetch_team_projections(standings_df, roster_map):
             proj_rapg = float(np.clip((sp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE + (rp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE, 2.5, 7.5))
             proj_wp = float(proj_rpg**PYTHAG_EXPONENT / (proj_rpg**PYTHAG_EXPONENT + proj_rapg**PYTHAG_EXPONENT))
 
-            # --- Park Factor Adjustment (add after proj_rpg/proj_rapg calculation) ---
+                # --- Park Factor Adjustment (add after proj_rpg/proj_rapg calculation) ---
             # Source: FanGraphs or Baseball-Reference park factors (normalized to 1.0)
             PARK_FACTORS = {
                 115: 1.14,  # COL: Coors Field (~14% offensive boost)
