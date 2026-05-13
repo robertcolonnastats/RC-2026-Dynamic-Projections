@@ -525,7 +525,7 @@ def fetch_team_projections(standings_df, roster_map):
             baseline_wpct = baseline_wins / 162.0
 
             # --- RATE STATS CALCULATION (OPS/FIP) ---
-                    pecota_ops = LEAGUE_AVG_OPS
+        pecota_ops = LEAGUE_AVG_OPS
         if not ph_team.empty:
             pa_vals = ph_team["pa"].fillna(0).tolist()
             mlbids = ph_team["mlbid"].tolist()
