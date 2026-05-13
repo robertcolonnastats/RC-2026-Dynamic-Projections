@@ -40,7 +40,7 @@ RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v47-sos-pecota"
+CACHE_VERSION = "v48-static-sos"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -79,7 +79,7 @@ ADJ_HARD_BUYER = +0.07
 ADJ_SCALE = 0.015
 
 # UPDATED: Increased to rein in teams benefiting from soft schedules
-SOS_SENSITIVITY = 0.18 
+SOS_SENSITIVITY = 0.08 
 
 TEAM_INFO = {
     108: ("Los Angeles Angels","LAA","AL West","AL"), 109:("Arizona Diamondbacks","ARI","NL West","NL"),
@@ -524,6 +524,8 @@ def build_master(std, prj):
     df = sanitize_df(df); prj = sanitize_df(prj)
     df = df.merge(prj[["team_id", "proj_win_pct", "proj_runs_per_game", "proj_ra_per_game", "proj_source", "il_warp"]], on="team_id", how="left")
     for c in ["proj_win_pct", "proj_runs_per_game", "proj_ra_per_game", "il_warp"]: df[c] = df[c].fillna(0.0).astype(float)
+    # Freeze raw PECOTA win% before any blending — used for SoS to avoid feedback loops
+    df["pecota_win_pct"] = df["proj_win_pct"].astype(float)
     df["pythag_win_pct"] = df.apply(lambda r: pythag(float(r["runs_scored"]), float(r["runs_allowed"])), axis=1).astype(float)
     gp = df["games_played"].clip(0, 162).astype(float)
     
@@ -571,21 +573,24 @@ def apply_luck_regression(df):
 
 def compute_sos(df, opps):
     if not opps: return df.assign(sos_raw=0.5, sos_label="Average")
-    # SoS uses proj_win_pct (pure PECOTA talent) as the opponent quality signal.
-    # This matches how Tankathon/Vegas rate schedule difficulty — by opponent talent,
-    # not by their current hot/cold record.
-    # A small blend toward adj_win_pct grows as the season progresses
-    # (30% results at 162 GP) so genuinely dominant or collapsed teams register.
-    gp_avg = float(df["games_played"].mean())
-    results_w = float(np.clip((gp_avg / 162.0) * 0.30, 0.0, 0.30))
-    talent_w  = 1.0 - results_w
-    pecota_wp  = df.set_index("team_id")["proj_win_pct"]
-    results_wp = df.set_index("team_id")["adj_win_pct"]
-    sos_wp = pecota_wp * talent_w + results_wp * results_w
-    sos = {t: float(np.mean([sos_wp.get(int(o), 0.5) for o in opps.get(int(t), [])])) if opps.get(int(t)) else 0.5 for t in df["team_id"]}
+    # STATIC SoS: uses only frozen preseason PECOTA win% (pecota_win_pct).
+    # Never uses adj_win_pct, blended_win_pct, or any dynamic projection.
+    # Reason: dynamic values create recursive feedback loops —
+    #   projection -> SoS -> projection -> SoS
+    # which destabilizes the model (e.g. Mets start 16-25, their projection drops,
+    # NL East teams show Easy schedule, their projections rise, Mets drop further).
+    # Tankathon, Vegas, and FanGraphs all use static preseason strength for SoS.
+    power = df.set_index("team_id")["pecota_win_pct"]
+    sos = {
+        t: float(np.mean([power.get(int(o), 0.5) for o in opps.get(int(t), [])]))
+        if opps.get(int(t)) else 0.5
+        for t in df["team_id"]
+    }
     df["sos_raw"] = df["team_id"].map(sos).astype(float)
     p33, p67 = df["sos_raw"].quantile([0.33, 0.67])
-    df["sos_label"] = df["sos_raw"].apply(lambda v: "Easy" if v <= p33 else "Hard" if v > p67 else "Average")
+    df["sos_label"] = df["sos_raw"].apply(
+        lambda v: "Easy" if v <= p33 else "Hard" if v > p67 else "Average"
+    )
     return df
 
 def apply_schedule_adjustment(df):
