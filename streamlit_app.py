@@ -40,7 +40,7 @@ RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v45-embedded-pecota"
+CACHE_VERSION = "v46-atomic-load"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -571,8 +571,14 @@ def apply_luck_regression(df):
 
 def compute_sos(df, opps):
     if not opps: return df.assign(sos_raw=0.5, sos_label="Average")
-    wp = df.set_index("team_id")["adj_win_pct"]
-    sos = {t: float(np.mean([wp.get(int(o), 0.5) for o in opps.get(int(t), [])])) if opps.get(int(t)) else 0.5 for t in df["team_id"]}
+    # Blend proj_win_pct (PECOTA talent) and adj_win_pct (current results).
+    # Early season: heavily weighted toward talent so SoS reflects true opponent quality,
+    # not hot/cold streaks. Shifts toward results as season progresses.
+    gp_avg = float(df["games_played"].mean())
+    talent_w = float(np.clip(0.70 - (gp_avg / 162.0) * 0.40, 0.30, 0.70))
+    sos_wp = (df.set_index("team_id")["proj_win_pct"] * talent_w +
+              df.set_index("team_id")["adj_win_pct"] * (1.0 - talent_w))
+    sos = {t: float(np.mean([sos_wp.get(int(o), 0.5) for o in opps.get(int(t), [])])) if opps.get(int(t)) else 0.5 for t in df["team_id"]}
     df["sos_raw"] = df["team_id"].map(sos).astype(float)
     p33, p67 = df["sos_raw"].quantile([0.33, 0.67])
     df["sos_label"] = df["sos_raw"].apply(lambda v: "Easy" if v <= p33 else "Hard" if v > p67 else "Average")
@@ -666,7 +672,11 @@ def render_projections_tab(mdf, sim):
         rows.append({"Team": r["abbr"], "League": r["league"], "Division": r["division"],
          "W": int(r["wins"]), "L": int(r["losses"]), "Win%": f"{float(r['win_pct']):.3f}",
          "Pythag%": f"{float(r['pythag_win_pct']):.3f}", "WC GB": f"{float(r['wc_games_back']):.1f}" if r["wc_games_back"] > 0 else "—",
-         "Proj W": pw, "Proj L": 162 - pw, "Status": r.get("tier_label", "Neutral"), "tier": r.get("tier", "neutral"), "SoS": r.get("sos_label", "—")})
+         "Proj W": pw, "Proj L": 162 - pw,
+         "Div%": f"{sim['division_odds'].get(t, 0):.1%}",
+         "Playoff%": f"{sim['playoff_odds'].get(t, 0):.1%}",
+         "WS%": f"{sim['ws_odds'].get(t, 0):.2%}",
+         "Status": r.get("tier_label", "Neutral"), "tier": r.get("tier", "neutral"), "SoS": r.get("sos_label", "—")})
     df = pd.DataFrame(rows)
     c1, c2 = st.columns(2)
     lf = c1.radio("League", ["All", "AL", "NL"], horizontal=True)
@@ -822,50 +832,96 @@ def render_methodology_tab():
 # ==============================================================================
 # MAIN
 # ==============================================================================
-def load_all_data():
-    cached = load_cache()
-    if cached:
-        m = pd.DataFrame(cached["master"]); s = cached.get("sim_results", {}); sc = pd.DataFrame(cached.get("schedule", []))
-        if not m.empty and s: return m, s, sc
-    st.markdown("### ⚾ Loading fresh data...")
-    pb = st.progress(0)
-    tx = st.empty()
-    def up(p, msg): pb.progress(p); tx.markdown(f"**{msg}**")
-    up(10, "Fetching roster statuses"); roster_map = fetch_team_statuses()
-    up(25, "Fetching standings"); std = fetch_standings()
-    up(40, "Fetching schedule"); sch = fetch_schedule()
-    up(55, "Building projections (PECOTA + Statcast)")
+@st.cache_data(ttl=3600, show_spinner=False)
+def _run_pipeline(cache_bust: str):
+    """
+    Full data pipeline wrapped in st.cache_data.
+    Atomic: either fully completes and caches, or raises.
+    cache_bust changes at midnight EST to force daily refresh.
+    Returns serialized (master_records, sim_results, schedule_records).
+    """
+    roster_map = fetch_team_statuses()
+    std = fetch_standings()
+    sch = fetch_schedule()
     try:
         prj = fetch_team_projections(std, roster_map)
         if prj.empty: raise ValueError("empty projections")
     except Exception as e:
-        st.warning(f"Projection fallback: {e}")
         rows = []
         for _, row in std.iterrows():
-            gp = max(int(row.get("games_played", 0)), 1); rs = float(row.get("runs_scored", 0)); ra = float(row.get("runs_allowed", 0))
-            wp = pythag(rs / gp if gp > 0 else 0, ra / gp if gp > 0 else 0) if gp > 0 else 0.500
-            rows.append({"team_id": int(row["team_id"]), "proj_win_pct": round(float(wp), 4), "proj_runs_per_game": LEAGUE_AVG_RPG, "proj_ra_per_game": LEAGUE_AVG_RPG, "proj_source": "Regression", "il_warp": 0.0})
+            gp = max(int(row.get("games_played", 0)), 1)
+            rs = float(row.get("runs_scored", 0)); ra = float(row.get("runs_allowed", 0))
+            wp = pythag(rs/gp, ra/gp) if gp > 0 else 0.500
+            rows.append({"team_id": int(row["team_id"]), "proj_win_pct": round(float(wp), 4),
+                         "proj_runs_per_game": LEAGUE_AVG_RPG, "proj_ra_per_game": LEAGUE_AVG_RPG,
+                         "proj_source": "Regression", "il_warp": 0.0})
         prj = pd.DataFrame(rows)
-    up(70, "Computing adjustments"); mst = build_master(std, prj)
-    mst = compute_buyer_seller(mst); mst = apply_ramp(mst, get_deadline_ramp_factor()); mst = apply_luck_regression(mst)
+    mst = build_master(std, prj)
+    mst = compute_buyer_seller(mst)
+    mst = apply_ramp(mst, get_deadline_ramp_factor())
+    mst = apply_luck_regression(mst)
     try:
-        up(80, "Computing schedule strength"); mst = compute_sos(mst, compute_remaining_opponents(sch)); mst = apply_schedule_adjustment(mst)
-    except: mst = mst.assign(sos_raw=0.5, sos_label="Average", sos_adjustment=0.0)
-    up(90, "Running simulation"); sim = run_simulation(mst, sch)
-    save_cache({"master": mst.to_dict(orient="records"), "sim_results": sim, "schedule": sch.to_dict(orient="records")})
-    up(100, "✅ Done"); pb.empty(); tx.empty(); return mst, sim, sch
+        mst = compute_sos(mst, compute_remaining_opponents(sch))
+        mst = apply_schedule_adjustment(mst)
+    except:
+        mst = mst.assign(sos_raw=0.5, sos_label="Average", sos_adjustment=0.0)
+    sim = run_simulation(mst, sch)
+    return mst.to_dict(orient="records"), sim, sch.to_dict(orient="records")
+
+
+def load_all_data():
+    # Check disk cache first (survives process restarts)
+    cached = load_cache()
+    if cached:
+        m = pd.DataFrame(cached["master"]); s = cached.get("sim_results", {})
+        sc = pd.DataFrame(cached.get("schedule", []))
+        # Validate cache is complete — sim must have proj_wins populated
+        if not m.empty and s and s.get("proj_wins"):
+            return m, s, sc
+
+    # Show progress while pipeline runs
+    pb = st.progress(0); tx = st.empty()
+    def up(p, msg): pb.progress(p); tx.markdown(f"**{msg}**")
+    up(10, "⚾ Loading MLB data (PECOTA + Statcast + Live standings)...")
+
+    # Run the full pipeline atomically via cache_data
+    # cache_bust = today's date forces daily refresh
+    cache_bust = datetime.now(EST).strftime("%Y-%m-%d")
+    try:
+        mst_records, sim, sch_records = _run_pipeline(cache_bust)
+    except Exception as e:
+        pb.empty(); tx.empty()
+        raise RuntimeError(f"Pipeline failed: {e}") from e
+
+    mst = pd.DataFrame(mst_records)
+    sch = pd.DataFrame(sch_records)
+
+    # Validate simulation is fully populated before caching
+    if not sim.get("proj_wins") or not sim.get("playoff_odds"):
+        pb.empty(); tx.empty()
+        raise RuntimeError("Simulation returned incomplete results")
+
+    save_cache({"master": mst_records, "sim_results": sim, "schedule": sch_records})
+    up(100, "✅ Done"); pb.empty(); tx.empty()
+    return mst, sim, sch
 
 def main():
     lc, tc = st.columns([1, 8])
     if os.path.exists("rc_logo.png"): lc.image("rc_logo.png", width=80)
     else: lc.markdown("⚾")
-    tc.markdown("# MLB 2026 Season Projections"); tc.caption("Deadline-aware · PECOTA 2026 + Statcast · Live MLB data")
-    if "master_df" not in st.session_state or not st.session_state.get("loaded"):
-        try:
-            m, s, sc = load_all_data(); st.session_state.update(master_df=m, sim_results=s, schedule_df=sc, loaded=True)
-        except Exception as e: st.error(f"Load failed: {e}"); st.stop()
-    m, s, sc = st.session_state["master_df"], st.session_state["sim_results"], st.session_state["schedule_df"]
-    if m.empty: st.warning("No data"); st.stop()
+    tc.markdown("# MLB 2026 Season Projections")
+    tc.caption("Deadline-aware · PECOTA 2026 + Statcast · Live MLB data")
+    # Load data — st.cache_data makes this atomic and idempotent.
+    # No session state for data: every tab/device/refresh gets the same
+    # fully-computed result, never a partial state.
+    try:
+        m, s, sc = load_all_data()
+    except Exception as e:
+        st.error(f"⚠️ Load failed: {e}")
+        st.stop()
+    if m.empty or not s.get("proj_wins"):
+        st.warning("⚠️ Data loaded but projections are incomplete. Try refreshing in a moment.")
+        st.stop()
     tab1,tab2,tab3,tab4 = st.tabs(["📊 Projections", "🔄 Deadline", "🔍 Detail", "📖 Methodology"])
     with tab1: render_projections_tab(m, s)
     with tab2: render_deadline_tab(m, s)
