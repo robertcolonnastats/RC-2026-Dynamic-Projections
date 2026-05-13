@@ -40,7 +40,7 @@ RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v48-static-sos"
+CACHE_VERSION = "v49-sim-key-fix"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -875,7 +875,25 @@ def _run_pipeline(cache_bust: str):
     except:
         mst = mst.assign(sos_raw=0.5, sos_label="Average", sos_adjustment=0.0)
     sim = run_simulation(mst, sch)
-    return mst.to_dict(orient="records"), sim, sch.to_dict(orient="records")
+    # Return plain Python dicts/lists — no DataFrames.
+    # Callers must not mutate these; use pd.DataFrame(records).copy() downstream.
+    import copy
+    return mst.to_dict(orient="records"), copy.deepcopy(sim), sch.to_dict(orient="records")
+
+
+def _fix_sim_keys(sim: dict) -> dict:
+    """JSON round-trip converts int dict keys to strings. Fix them back to int."""
+    int_key_fields = {
+        "proj_wins", "proj_wins_std", "division_odds", "playoff_odds", "ws_odds",
+        "pre_deadline_division_odds", "pre_deadline_playoff_odds", "pre_deadline_ws_odds"
+    }
+    fixed = {}
+    for k, v in sim.items():
+        if k in int_key_fields and isinstance(v, dict):
+            fixed[k] = {int(tid): float(val) for tid, val in v.items()}
+        else:
+            fixed[k] = v
+    return fixed
 
 
 def load_all_data():
@@ -884,6 +902,8 @@ def load_all_data():
     if cached:
         m = pd.DataFrame(cached["master"]); s = cached.get("sim_results", {})
         sc = pd.DataFrame(cached.get("schedule", []))
+        # Fix sim keys — JSON serialization converts int keys to strings
+        s = _fix_sim_keys(s)
         # Validate cache is complete — sim must have proj_wins populated
         if not m.empty and s and s.get("proj_wins"):
             return m, s, sc
@@ -904,6 +924,8 @@ def load_all_data():
 
     mst = pd.DataFrame(mst_records)
     sch = pd.DataFrame(sch_records)
+    # Fix sim keys in pipeline output too (consistent with cache path)
+    sim = _fix_sim_keys(sim)
 
     # Validate simulation is fully populated before caching
     if not sim.get("proj_wins") or not sim.get("playoff_odds"):
@@ -925,6 +947,8 @@ def main():
     # fully-computed result, never a partial state.
     try:
         m, s, sc = load_all_data()
+        # Always work on copies — st.cache_data returns shared objects
+        m = m.copy()
     except Exception as e:
         st.error(f"⚠️ Load failed: {e}")
         st.stop()
