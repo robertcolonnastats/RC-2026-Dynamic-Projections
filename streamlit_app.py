@@ -525,18 +525,24 @@ def fetch_team_projections(standings_df, roster_map):
             baseline_wpct = baseline_wins / 162.0
 
             # --- RATE STATS CALCULATION (OPS/FIP) ---
-            pecota_ops = LEAGUE_AVG_OPS
-            if not ph_team.empty:
-                pa_vals = ph_team["pa"].fillna(0).tolist()
-                mlbids = ph_team["mlbid"].tolist()
-                ops_vals = ph_team["ops"].fillna(LEAGUE_AVG_OPS).tolist()
-                weights = []; valid_ops = []
-                for pa, mlbid, ops in zip(pa_vals, mlbids, ops_vals):
-                    w = pa
-                     if mlbid in il_ids: w *= (ROSTER_WEIGHT_IL / ROSTER_WEIGHT_ACTIVE)
-                    elif mlbid not in active_ids: w *= (ROSTER_WEIGHT_OTHER / ROSTER_WEIGHT_ACTIVE)
-                     if w > 0: weights.append(w); valid_ops.append(ops)
-                if weights: pecota_ops = sum(w * o for w, o in zip(weights, valid_ops)) / sum(weights)
+                    pecota_ops = LEAGUE_AVG_OPS
+        if not ph_team.empty:
+            pa_vals = ph_team["pa"].fillna(0).tolist()
+            mlbids = ph_team["mlbid"].tolist()
+            ops_vals = ph_team["ops"].fillna(LEAGUE_AVG_OPS).tolist()
+            weights = []; valid_ops = []
+            
+            for pa, mlbid, ops in zip(pa_vals, mlbids, ops_vals):
+                w = pa
+                if mlbid in il_ids: 
+                    w *= (ROSTER_WEIGHT_IL / ROSTER_WEIGHT_ACTIVE)
+                elif mlbid not in active_ids: 
+                    w *= (ROSTER_WEIGHT_OTHER / ROSTER_WEIGHT_ACTIVE)
+                if w > 0: 
+                    weights.append(w)
+                    valid_ops.append(ops)
+                    
+            if weights: pecota_ops = sum(w * o for w, o in zip(weights, valid_ops)) / sum(weights)
             
             pecota_ops = float(np.clip(pecota_ops, 0.620, 0.850))
             cur_pa = float(team_pa.get(tid, 0))
