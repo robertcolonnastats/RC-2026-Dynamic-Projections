@@ -2,12 +2,12 @@
 MLB 2026 Season Projections
 Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
+
 Key Updates:
-WARP BASELINE: Projection anchored to 45 + Weighted WARP.
-WEIGHTED WARP: Hitters capped at 550 PA, Pitchers at 180 IP.
-FIXED REGRESSION: Static Pythagorean regression of 45 games.
-REDUCED SMOOTHING: Statcast influence reduced to 0.25.
-CORRECTIONS: Fixed syntax errors and logic flaws from previous versions.
+- BASELINE WINS: Lowered replacement level to 44.0 wins.
+- ROSTER BREADTH: Reduced to Top 9 Hitters, Top 4 SP, Top 5 RP.
+- SELLER PENALTIES: Increased strength (Hard: -0.16, Soft: -0.08).
+- NEGATIVE WARP: Ensures negative player value reduces team projection.
 """
 import os, json, warnings, sys
 import requests, numpy as np, pandas as pd
@@ -16,6 +16,7 @@ import streamlit as st
 from datetime import date, timedelta, datetime
 from zoneinfo import ZoneInfo
 import concurrent.futures as cf
+
 warnings.filterwarnings("ignore")
 st.set_page_config(page_title="MLB 2026 Projections", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
@@ -38,13 +39,15 @@ OPENING_DAY = "2026-03-27"
 WORLD_SERIES_END_APPROX = "2026-11-01"
 TRADE_DEADLINE = "2026-07-31"
 DEADLINE_RAMP_START = "2026-05-20"
+
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 N_SIMULATIONS = 1_000
 RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v30-warp-baseline-fix"
+CACHE_VERSION = "v40-calibration-fix"
+
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
 IP_FULL_WEIGHT_RP = 40
@@ -60,6 +63,7 @@ MAX_IL_FRAC = 0.50
 PYTHAG_REGRESSION_PA = 45
 PROJ_WEIGHT_MAX = 0.92
 PROJ_WEIGHT_MIN = 0.42
+
 TIER_HARD_SELLER = 4.2
 TIER_SOFT_SELLER = 3.2
 TIER_SOFT_BUYER = -3.0
@@ -69,8 +73,10 @@ RD_DAMPENER_START_GP = 50
 LUCK_SENSITIVITY = 0.50
 LUCK_DAMPENER_START_GP = 40
 LUCK_REGRESSION_FACTOR = 0.50
-ADJ_HARD_SELLER = -0.12
-ADJ_SOFT_SELLER = -0.06
+
+# UPDATED: Stronger Seller Penalties
+ADJ_HARD_SELLER = -0.16
+ADJ_SOFT_SELLER = -0.08
 ADJ_NEUTRAL = 0.00
 ADJ_SOFT_BUYER = +0.04
 ADJ_HARD_BUYER = +0.07
@@ -78,41 +84,26 @@ ADJ_SCALE = 0.015
 SOS_SENSITIVITY = 0.15
 
 TEAM_INFO = {
-    108: ("Los Angeles Angels", "LAA", "AL West", "AL"),
-    109: ("Arizona Diamondbacks", "ARI", "NL West", "NL"),
-    110: ("Baltimore Orioles", "BAL", "AL East", "AL"),
-    111: ("Boston Red Sox", "BOS", "AL East", "AL"),
-    112: ("Chicago Cubs", "CHC", "NL Central", "NL"),
-    113: ("Cincinnati Reds", "CIN", "NL Central", "NL"),
-    114: ("Cleveland Guardians", "CLE", "AL Central", "AL"),
-    115: ("Colorado Rockies", "COL", "NL West", "NL"),
-    116: ("Detroit Tigers", "DET", "AL Central", "AL"),
-    117: ("Houston Astros", "HOU", "AL West", "AL"),
-    118: ("Kansas City Royals", "KC", "AL Central", "AL"),
-    119: ("Los Angeles Dodgers", "LAD", "NL West", "NL"),
-    120: ("Washington Nationals", "WSH", "NL East", "NL"),
-    121: ("New York Mets", "NYM", "NL East", "NL"),
-    133: ("Oakland Athletics", "OAK", "AL West", "AL"),
-    134: ("Pittsburgh Pirates", "PIT", "NL Central", "NL"),
-    135: ("San Diego Padres", "SD", "NL West", "NL"),
-    136: ("Seattle Mariners", "SEA", "AL West", "AL"),
-    137: ("San Francisco Giants", "SF", "NL West", "NL"),
-    138: ("St. Louis Cardinals", "STL", "NL Central", "NL"),
-    139: ("Tampa Bay Rays", "TB", "AL East", "AL"),
-    140: ("Texas Rangers", "TEX", "AL West", "AL"),
-    141: ("Toronto Blue Jays", "TOR", "AL East", "AL"),
-    142: ("Minnesota Twins", "MIN", "AL Central", "AL"),
-    143: ("Philadelphia Phillies", "PHI", "NL East", "NL"),
-    144: ("Atlanta Braves", "ATL", "NL East", "NL"),
-    145: ("Chicago White Sox", "CWS", "AL Central", "AL"),
-    146: ("Miami Marlins", "MIA", "NL East", "NL"),
-    147: ("New York Yankees", "NYY", "AL East", "AL"),
-    158: ("Milwaukee Brewers", "MIL", "NL Central", "NL"),
+    108:("Los Angeles Angels","LAA","AL West","AL"), 109:("Arizona Diamondbacks","ARI","NL West","NL"),
+    110:("Baltimore Orioles","BAL","AL East","AL"),  111:("Boston Red Sox","BOS","AL East","AL"),
+    112:("Chicago Cubs","CHC","NL Central","NL"),    113:("Cincinnati Reds","CIN","NL Central","NL"),
+    114:("Cleveland Guardians","CLE","AL Central","AL"), 115:("Colorado Rockies","COL","NL West","NL"),
+    116:("Detroit Tigers","DET","AL Central","AL"),  117:("Houston Astros","HOU","AL West","AL"),
+    118:("Kansas City Royals","KC","AL Central","AL"), 119:("Los Angeles Dodgers","LAD","NL West","NL"),
+    120:("Washington Nationals","WSH","NL East","NL"), 121:("New York Mets","NYM","NL East","NL"),
+    133:("Oakland Athletics","OAK","AL West","AL"),  134:("Pittsburgh Pirates","PIT","NL Central","NL"),
+    135:("San Diego Padres","SD","NL West","NL"),    136:("Seattle Mariners","SEA","AL West","AL"),
+    137:("San Francisco Giants","SF","NL West","NL"), 138:("St. Louis Cardinals","STL","NL Central","NL"),
+    139:("Tampa Bay Rays","TB","AL East","AL"),      140:("Texas Rangers","TEX","AL West","AL"),
+    141:("Toronto Blue Jays","TOR","AL East","AL"),  142:("Minnesota Twins","MIN","AL Central","AL"),
+    143:("Philadelphia Phillies","PHI","NL East","NL"), 144:("Atlanta Braves","ATL","NL East","NL"),
+    145:("Chicago White Sox","CWS","AL Central","AL"), 146:("Miami Marlins","MIA","NL East","NL"),
+    147:("New York Yankees","NYY","AL East","AL"),   158:("Milwaukee Brewers","MIL","NL Central","NL"),
 }
 
-TIER_LABELS = {"hard_seller": "Hard Seller", "soft_seller": "Soft Seller", "neutral": "Neutral", "soft_buyer": "Soft Buyer", "hard_buyer": "Hard Buyer"}
-TIER_COLORS = {"hard_seller": "#d62728", "soft_seller": "#ff7f0e", "neutral": "#7f7f7f", "soft_buyer": "#2ca02c", "hard_buyer": "#1f77b4"}
-TIER_EMOJI = {"hard_seller": "🔴", "soft_seller": "🟠", "neutral": "⚪", "soft_buyer": "🟢", "hard_buyer": "🔵"}
+TIER_LABELS = {"hard_seller":"Hard Seller","soft_seller":"Soft Seller","neutral":"Neutral","soft_buyer":"Soft Buyer","hard_buyer":"Hard Buyer"}
+TIER_COLORS = {"hard_seller":"#d62728","soft_seller":"#ff7f0e","neutral":"#7f7f7f","soft_buyer":"#2ca02c","hard_buyer":"#1f77b4"}
+TIER_EMOJI = {"hard_seller":"🔴","soft_seller":"🟠","neutral":"⚪","soft_buyer":"🟢","hard_buyer":"🔵"}
 EST = ZoneInfo("America/New_York")
 
 # ==============================================================================
@@ -141,7 +132,8 @@ def get_last_updated():
 def is_cache_valid():
     _ensure_cache_dir()
     if not os.path.exists(CACHE_FILE): return False
-    if os.path.getmtime(CACHE_FILE) < datetime.now(EST).replace(hour=0,minute=0,second=0,microsecond=0).timestamp(): return False
+    current_day_start = datetime.now(EST).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
+    if os.path.getmtime(CACHE_FILE) < current_day_start: return False
     try:
         with open(CACHE_FILE) as f:
             if json.load(f).get("cache_version") != CACHE_VERSION:
@@ -279,11 +271,11 @@ LEAGUE_SP_IP_SHARE = 0.57
 LEAGUE_RP_IP_SHARE = 0.43
 
 PECOTA_TEAM_MAP = {
-    "ARI":109, "ATL":144, "BAL":110, "BOS":111, "CHC":112, "CHW":145, "CIN":113,
-    "CLE":114, "COL":115, "DET":116, "HOU":117, "KC":118, "LAA":108, "LAD":119,
-    "MIA":146, "MIL":158, "MIN":142, "NYM":121, "NYY":147, "PHI":143, "PIT":134,
-    "OAK":133, "SAC":133, "SD":135, "SEA":136, "SF":137, "STL":138, "TB":139,
-    "TEX":140, "TOR":141, "WAS":120, "WSH":120,
+ "ARI":109,  "ATL":144,  "BAL":110,  "BOS":111,  "CHC":112,  "CHW":145,  "CIN":113,
+ "CLE":114,  "COL":115,  "DET":116,  "HOU":117,  "KC":118,  "LAA":108,  "LAD":119,
+ "MIA":146,  "MIL":158,  "MIN":142,  "NYM":121,  "NYY":147,  "PHI":143,  "PIT":134,
+ "OAK":133,  "SAC":133,  "SD":135,  "SEA":136,  "SF":137,  "STL":138,  "TB":139,
+ "TEX":140,  "TOR":141,  "WAS":120,  "WSH":120,
 }
 
 _PECOTA_HIT_DF = None
@@ -293,17 +285,21 @@ def _load_pecota_data():
     global _PECOTA_HIT_DF, _PECOTA_PIT_DF
     if _PECOTA_HIT_DF is not None and _PECOTA_PIT_DF is not None:
         return _PECOTA_HIT_DF, _PECOTA_PIT_DF
+    
     try:
         hit_file = "pecota2026_hitting_mar26.xlsx"
         pit_file = "pecota2026_pitching_mar26.xlsx"
+        
         if os.path.exists(hit_file) and os.path.exists(pit_file):
             st.info(f"📂 Loading PECOTA data from `{hit_file}` and `{pit_file}`...")
             hit_df = pd.read_excel(hit_file)
             pit_df = pd.read_excel(pit_file)
             
+            # Normalize columns
             hit_df.columns = [col.strip().lower() for col in hit_df.columns]
             pit_df.columns = [col.strip().lower() for col in pit_df.columns]
             
+            # Filter for 50th Percentile
             if 'percentile' in hit_df.columns:
                 hit_df = hit_df[hit_df['percentile'] == 50].copy()
             elif 'pct' in hit_df.columns:
@@ -314,6 +310,7 @@ def _load_pecota_data():
             elif 'pct' in pit_df.columns:
                 pit_df = pit_df[pit_df['pct'] == 50].copy()
     
+            # Playing Time Weighted WARP
             if 'pa' in hit_df.columns:
                 hit_df['adj_warp'] = hit_df['warp'] * (hit_df['pa'] / 550).clip(upper=1)
             else:
@@ -324,14 +321,18 @@ def _load_pecota_data():
             else:
                 pit_df['adj_warp'] = pit_df['warp']
 
+            # Roster Capping (Reduced Breadth)
+            # Hitters: Top 9
             if 'pa' in hit_df.columns:
-                hit_df = hit_df.sort_values('pa', ascending=False).groupby('team').head(13).copy()
+                hit_df = hit_df.sort_values('pa', ascending=False).groupby('team').head(9).copy()
             
+            # Pitchers: Top 4 SP, Top 5 RP
             if 'role' in pit_df.columns and 'ip' in pit_df.columns:
-                sp_df = pit_df[pit_df['role'] == 'SP'].sort_values('ip', ascending=False).groupby('team').head(5)
-                rp_df = pit_df[pit_df['role'] == 'RP'].sort_values('ip', ascending=False).groupby('team').head(6)
+                sp_df = pit_df[pit_df['role'] == 'SP'].sort_values('ip', ascending=False).groupby('team').head(4)
+                rp_df = pit_df[pit_df['role'] == 'RP'].sort_values('ip', ascending=False).groupby('team').head(5)
                 pit_df = pd.concat([sp_df, rp_df]).copy()
             
+            # Normalize Team Names
             if 'team' in hit_df.columns: hit_df['team'] = hit_df['team'].astype(str).str.strip().str.upper()
             if 'team' in pit_df.columns: pit_df['team'] = pit_df['team'].astype(str).str.strip().str.upper()
             
@@ -425,13 +426,13 @@ def fetch_team_projections(standings_df, roster_map):
     team_pa, team_ip = {}, {}
     if standings_df is not None and not standings_df.empty:
         for _, row in standings_df.iterrows():
-            gp = max(int(row.get("games_played", 0)), 1); tid = int(row["team_id"])
+            gp = max(int(row.get("games_played",0)),1); tid = int(row["team_id"])
             team_pa[tid] = int(gp * 38); team_ip[tid] = float(gp * 9.0)
     sc = _load_statcast_all()
     h25b = sc.get("h25b", {}); h25p = sc.get("h25p", {})
     h24b = sc.get("h24b", {}); h24p = sc.get("h24p", {})
-    mlb_ops, mlb_era = sc.get("mlb", ({}, {}))
-    cur_bat, cur_pit = sc.get("cur", ({}, {}))
+    mlb_ops, mlb_era = sc.get("mlb", ({},{}))
+    cur_bat, cur_pit = sc.get("cur", ({},{}))
     PARK_FACTORS = {
         115: 1.14, 136: 0.94, 137: 0.96, 119: 1.03, 147: 1.02,
         143: 1.01, 112: 0.98, 144: 0.99, 114: 0.97, 141: 0.98,
@@ -444,27 +445,32 @@ def fetch_team_projections(standings_df, roster_map):
     rows = []
     for tid in all_ids:
         try:
-            active_ids = roster_map.get(tid, {}).get("active", set())
-            il_ids = roster_map.get(tid, {}).get("il", set())
-            ph_team = ph[ph["team_id"] == tid] if not ph.empty else pd.DataFrame()
-            pp_team = pp[pp["team_id"] == tid].copy() if not pp.empty else pd.DataFrame()
-
+            active_ids = roster_map.get(tid,{}).get("active",set())
+            il_ids = roster_map.get(tid,{}).get("il",set())
+            ph_team = ph[ph["team_id"]==tid] if not ph.empty else pd.DataFrame()
+            pp_team = pp[pp["team_id"]==tid].copy() if not pp.empty else pd.DataFrame()
+            
             if not pp_team.empty and 'gs' in pp_team.columns and 'g' in pp_team.columns:
                 valid_games = pp_team['g'] > 0
                 pp_team['gs_pct'] = 0.0
                 pp_team.loc[valid_games, 'gs_pct'] = pp_team.loc[valid_games, 'gs'] / pp_team.loc[valid_games, 'g']
                 pp_team['role'] = 'RP'
                 pp_team.loc[pp_team['gs_pct'] >= 0.50, 'role'] = 'SP'
-
+            
+            # --- WARP BASELINE CALCULATION ---
+            # Sum the ADJUSTED (weighted) WARP. 
+            # Note: This sum allows for negative totals, lowering the baseline for bad teams.
             team_warp_sum = 0.0
             if not ph.empty and not ph_team.empty:
                 team_warp_sum = ph_team["adj_warp"].sum()
             if not pp.empty and not pp_team.empty:
                 team_warp_sum += pp_team["adj_warp"].sum()
-
-            baseline_wins = 45.0 + team_warp_sum
+            
+            # Calculate Baseline Wins: 44 + Weighted WARP
+            baseline_wins = 44.0 + team_warp_sum
             baseline_wpct = baseline_wins / 162.0
 
+            # --- RATE STATS CALCULATION (OPS/FIP) ---
             pecota_ops = LEAGUE_AVG_OPS
             if not ph_team.empty:
                 pa_vals = ph_team["pa"].fillna(0).tolist()
@@ -477,7 +483,7 @@ def fetch_team_projections(standings_df, roster_map):
                     elif mlbid not in active_ids: w *= (ROSTER_WEIGHT_OTHER / ROSTER_WEIGHT_ACTIVE)
                     if w > 0: weights.append(w); valid_ops.append(ops)
                 if weights: pecota_ops = sum(w * o for w, o in zip(weights, valid_ops)) / sum(weights)
-
+            
             pecota_ops = float(np.clip(pecota_ops, 0.620, 0.850))
             cur_pa = float(team_pa.get(tid, 0))
             w_cur = min(cur_pa / PA_FULL_WEIGHT, 1.0); w_prior = 1.0 - w_cur
@@ -486,14 +492,14 @@ def fetch_team_projections(standings_df, roster_map):
                 d = cur_bat[tid]; wt = min(d.get("sample", 0) / (PA_FULL_WEIGHT * 9), 1.0)
                 cur_xwoba = d["stat"] * wt + LEAGUE_AVG_XWOBA * (1 - wt)
             elif isinstance(mlb_ops, dict) and tid in mlb_ops: cur_xwoba = float(mlb_ops[tid]) * 0.43
-
+            
             xwoba = (w_cur * cur_xwoba + w_prior * PRIOR_HIST_2025_WEIGHT * h25b.get(tid, LEAGUE_AVG_XWOBA) + w_prior * PRIOR_HIST_2024_WEIGHT * h24b.get(tid, LEAGUE_AVG_XWOBA) + w_prior * PRIOR_PECOTA_WEIGHT * LEAGUE_AVG_XWOBA)
             team_ops = float(np.clip(pecota_ops * (1 + (xwoba / LEAGUE_AVG_XWOBA - 1) * STATCAST_INFLUENCE), 0.620, 0.850))
             proj_rpg = float(np.clip((team_ops / LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG, 2.5, 7.5))
-
+            
             sp_df = pp_team[pp_team["role"] == "SP"].sort_values("ip", ascending=False) if not pp_team.empty else pd.DataFrame()
             rp_df = pp_team[pp_team["role"] == "RP"].sort_values("ip", ascending=False) if not pp_team.empty else pd.DataFrame()
-
+            
             def staff_era(df, role):
                 if df.empty or df["ip"].sum() == 0: return float(LEAGUE_AVG_ERA)
                 cap = IP_FULL_WEIGHT_SP if role == "SP" else IP_FULL_WEIGHT_RP
@@ -501,10 +507,10 @@ def fetch_team_projections(standings_df, roster_map):
                 blend = (df["fip"].fillna(LEAGUE_AVG_FIP) * 0.7 + df["era"].fillna(LEAGUE_AVG_ERA) * 0.3).clip(2, 7.5).values
                 if cip.sum() > 0: return float(np.average(blend, weights=cip))
                 return float(LEAGUE_AVG_ERA)
-
+            
             sp_base = float(np.clip(staff_era(sp_df, "SP"), 2.80, 5.50))
             rp_base = float(np.clip(staff_era(rp_df, "RP"), 3.00, 5.50))
-
+            
             cur_ip = float(team_ip.get(tid, 0))
             w_cur_ip = min(cur_ip / IP_FULL_WEIGHT_SP, 1.0); w_prior_ip = 1.0 - w_cur_ip
             cur_xera = LEAGUE_AVG_XERA
@@ -512,27 +518,30 @@ def fetch_team_projections(standings_df, roster_map):
                 d = cur_pit[tid]; wt = min(d.get("sample", 0) / IP_FULL_WEIGHT_SP, 1.0)
                 cur_xera = d["stat"] * wt + LEAGUE_AVG_XERA * (1 - wt)
             elif isinstance(mlb_era, dict) and tid in mlb_era: cur_xera = float(mlb_era[tid])
-
+            
             xera = (w_cur_ip * cur_xera + w_prior_ip * PRIOR_HIST_2025_WEIGHT * h25p.get(tid, LEAGUE_AVG_XERA) + w_prior_ip * PRIOR_HIST_2024_WEIGHT * h24p.get(tid, LEAGUE_AVG_XERA) + w_prior_ip * PRIOR_PECOTA_WEIGHT * LEAGUE_AVG_XERA)
             sc_adj = (xera / LEAGUE_AVG_XERA - 1) * STATCAST_INFLUENCE
             sp_era = float(np.clip(sp_base * (1 + sc_adj), 2.80, 5.50))
             rp_era = float(np.clip(rp_base * (1 + sc_adj), 3.00, 5.50))
             proj_rapg = float(np.clip((sp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_SP_IP_SHARE + (rp_era / LEAGUE_AVG_ERA) * LEAGUE_AVG_RPG * LEAGUE_RP_IP_SHARE, 2.5, 7.5))
-
+            
+            # Park Factor Adjustment
             park_factor = PARK_FACTORS.get(tid, 1.0)
             if park_factor != 1.0:
                 proj_rpg = proj_rpg * (1.0 + (park_factor - 1.0) * 0.5)
                 proj_rapg = proj_rapg * (1.0 + (1.0/park_factor - 1.0) * 0.5)
-
+            
             proj_wp_rates = float(proj_rpg**PYTHAG_EXPONENT / (proj_rpg**PYTHAG_EXPONENT + proj_rapg**PYTHAG_EXPONENT))
-
+            
+            # --- FINAL BLENDING ---
+            # 60% WARP Baseline + 40% Rate Stats
             proj_wp = 0.6 * baseline_wpct + 0.4 * proj_wp_rates
 
             il_warp = 0.0
             if not ph.empty and len(il_ids) > 0:
                 il_players = ph[(ph["team_id"] == tid) & (ph["mlbid"].isin(il_ids))]
                 if not il_players.empty: il_warp = float(il_players["warp"].fillna(0).clip(lower=0).sum())
-
+            
             clean_row = {"team_id": int(tid), "proj_runs_per_game": round(float(np.clip(proj_rpg, 2.5, 7.5)), 3),
                       "proj_ra_per_game": round(float(np.clip(proj_rapg, 2.5, 7.5)), 3),
                       "proj_win_pct": round(float(np.clip(proj_wp, 0.0, 1.0)), 4),
@@ -563,7 +572,9 @@ def build_master(std, prj):
     df["pythag_win_pct"] = df.apply(lambda r: pythag(float(r["runs_scored"]), float(r["runs_allowed"])), axis=1).astype(float)
     gp = df["games_played"].clip(0, 162).astype(float)
     
+    # Dynamic regression (45 games baseline)
     dynamic_regression = 45
+    
     df["pythag_win_pct"] = (df["pythag_win_pct"] * (gp / (gp + dynamic_regression)) + 
                         0.500 * (dynamic_regression / (gp + dynamic_regression))).astype(float)
 
@@ -780,11 +791,11 @@ def render_methodology_tab():
     with st.expander("🔮 Projection Engine"):
         st.markdown(f"""
         ### 1. WARP Baseline (Primary Anchor)
-        - **Base Wins**: 45 (Replacement Level)
+        - **Base Wins**: 44 (Replacement Level)
         - **Weighted WARP**: 
           - Hitters: `WARP * min(1, PA / 550)`
           - Pitchers: `WARP * min(1, IP / 180)`
-        - **Formula**: `Baseline Wins = 45 + Sum(Weighted WARP)`
+        - **Formula**: `Baseline Wins = 44 + Sum(Weighted WARP)`
         
         ### 2. Rate Stat Projections
         - **PECOTA Baseline**: Full depth chart weighted by projected PA
