@@ -585,12 +585,17 @@ def apply_ramp(df, ramp):
     df = df.copy()
     df["ramped_adj"] = (df["base_adj"] * ramp).astype(float)
     df["adj_win_pct"] = (df["blended_win_pct"] + df["ramped_adj"]).clip(0.20, 0.80).astype(float)
+    # deadline_win_pct: purely blended_win_pct + buyer/seller ramp, no luck or SOS.
+    # Used exclusively for the Deadline tab pre vs post delta so that chart
+    # reflects only trade deadline activity, not luck regression or schedule strength.
+    df["deadline_win_pct"] = df["adj_win_pct"].copy()
     return df
 
 def apply_luck_regression(df):
     df = df.copy()
     gr = (162.0 - df["games_played"].astype(float)).clip(10, 162)
     df["adj_win_pct"] = (df["adj_win_pct"] - (df["luck_wins"] * LUCK_REGRESSION_FACTOR) / gr).clip(0.20, 0.80).astype(float)
+    # deadline_win_pct is intentionally NOT updated here — it stays as pure blended + ramp
     return df
 
 def compute_sos(df, opps):
@@ -625,6 +630,7 @@ def apply_schedule_adjustment(df):
     # Apply full SOS adjustment regardless of games played.
     # Remaining schedule affects all projected wins, not just those already played.
     df["adj_win_pct"] = (df["adj_win_pct"] + df["sos_adjustment"]).clip(0.20, 0.80).astype(float)
+    # deadline_win_pct is intentionally NOT updated here — it stays as pure blended + ramp
     return df
 
 def log5(a, b): return (a - a * b) / (a + b - 2 * a * b + 1e-9)
@@ -688,7 +694,9 @@ def _sim_once(mdf, sch, wp_col, rng):
 
 def run_simulation(mdf, sch):
     rng = np.random.default_rng(RANDOM_SEED)
-    pw, dv, po, ws = _sim_once(mdf, sch, "adj_win_pct", rng)
+    # Post-deadline path uses deadline_win_pct (blended + buyer/seller ramp only).
+    # This keeps the Deadline tab delta purely about trade activity, not luck or SOS.
+    pw, dv, po, ws = _sim_once(mdf, sch, "deadline_win_pct", rng)
     pre_rng = np.random.default_rng(RANDOM_SEED)
     pre_pw, pre_dv, pre_po, pre_ws = _sim_once(mdf, sch, "blended_win_pct", pre_rng)
     tids = mdf["team_id"].tolist()
@@ -781,77 +789,340 @@ def render_methodology_tab():
     st.markdown("## 📖 Methodology & Model Architecture")
     st.caption(f"Data last updated: {get_last_updated()}")
     st.markdown("""
-    > **Core Philosophy:** Traditional projection systems fail to account for mid-season roster turnover. This model dynamically adjusts win probabilities by simulating how injury-depleted teams rebuild and how buyers/sellers reshape their rosters, ensuring playoff odds reflect the *actual* talent a team will field in August.
+    > **Core Philosophy:** Traditional projection systems anchor too hard to preseason expectations and ignore mid-season roster turnover. This model dynamically blends PECOTA talent baselines with live performance data, adjusts for luck, schedule difficulty, and injury context — and crucially, models how trade deadline activity will reshape team strength between now and October.
+    
+    The model runs two parallel simulations for every team: one assuming current rosters stay frozen, and one projecting the roster changes that buyers and sellers will make by July 31. The gap between those two simulations is what you see on the Deadline tab.
     """)
 
-    with st.expander("📥 1. Data Pipeline"):
+    with st.expander("📥 1. Data Sources"):
         st.markdown("""
-        | Source | Update Frequency | Purpose |
+        Three data streams are fetched concurrently at the start of each daily pipeline run:
+
+        | Source | Frequency | What It Provides |
         |---|---|---|
-        | **MLB Stats API** | Daily | Live standings, schedules, active/IL rosters |
-        | **Baseball Savant** | Daily | xwOBA & xERA (2024, 2025, current 2026) |
-        | **PECOTA 2026** | Static (Preseason) | 50th-percentile depth chart & talent baseline |
-        
-        *All external data is fetched concurrently via thread pooling to minimize load times.*
+        | **MLB Stats API** | Daily (live) | Standings, W-L records, runs scored/allowed, active rosters, 40-man rosters, IL designations, full remaining schedule |
+        | **Baseball Savant** | Daily (live) | xwOBA (hitters) and xERA (pitchers) for 2024, 2025, and current 2026 season — expected stats that strip out luck on batted balls |
+        | **PECOTA 2026** | Static (preseason) | 50th-percentile projections for every depth chart player: PA, IP, OPS, FIP, ERA, WARP, role (SP/RP), and roster status |
+
+        **Why three sources?** Each corrects for the weaknesses of the others. PECOTA captures true talent but goes stale as the season unfolds. Statcast xStats reflect current player quality but are noisy in small samples. Live standings capture results but conflate skill with luck. The model weights all three and adjusts those weights as the season progresses.
+
+        **Roster status weighting:** The MLB API's active roster and IL designations are used to discount injured players:
+        - Active roster: full weight (1.0×)
+        - IL (10-day or 60-day): ~1.2% weight — still on the team but not contributing
+        - Non-roster / minor league: ~43% weight — real depth, but not guaranteed playing time
         """)
 
     with st.expander("🔮 2. Projection Engine"):
         st.markdown("""
-        The model generates two parallel win% estimates that are later merged: a **WARP Baseline** (talent-driven) and a **Rate-Stat Projection** (performance-driven).
-        
-        #### A. WARP Baseline (The Talent Floor)
-        - **Weighted WARP Summation:** Hitters (`WARP × min(1, PA/550)`) and Pitchers (`WARP × min(1, IP/180)`) are summed across the full roster.
-        - **Roster Status Multipliers:** Active players receive full weight. IL players are weighted at ~1.2%, and non-roster/minor leaguers at ~43%.
-        - **Baseline Win%:** `(43.0 + Σ Adj_WARP) / 162`
-        - **Downside Penalty:** Teams with a baseline WPCT < .500 receive a non-linear penalty: `WPCT -= (0.500 - WPCT) × 0.52`. This accounts for the compounding losses of depth, bullpen strain, and replacement-level innings.
-        
-        #### B. Rate-Stat Projections (RPG & RAPG)
-        - **Offense (OPS):** Weighted average of PECOTA depth chart OPS, adjusted for current roster status.
-        - **Pitching (ERA):** Top 5 SPs (capped at 150 IP) and Top 7 RPs (capped at 40 IP) are blended using `0.7×FIP + 0.3×ERA`.
-        - **Statcast Regression:** Current xwOBA/xERA is blended with historical data (2025: 35%, 2024: 20%) and the PECOTA baseline (45%). Sample size is capped to prevent early-season overreaction.
-        - **Statcast Influence:** Adjusts the PECOTA baseline by 25% based on xwOBA/xERA deviations from league average.
-        - **Park Factors:** Applied at 50% strength to prevent over-correction for extreme ballparks.
-        - **Pythagorean Translation:** `RPG` and `RAPG` are converted to win% using a `1.83` exponent.
-        
-        #### C. Initial Win% Blending
-        - The two estimates are merged: `52% WARP Baseline + 48% Rate-Stat Projection`.
+        For each team, the engine builds two independent win% estimates that are merged into a single projection.
+
+        ---
+        ### A. WARP Baseline — The Talent Floor
+
+        This estimate answers: *how good is this roster on paper?*
+
+        **Step 1 — Adjusted WARP per player:**
+        ```
+        Hitter:  Adj_WARP = WARP × min(1, PA / 550)
+        Pitcher: Adj_WARP = WARP × min(1, IP / 180)
+        ```
+        Players who haven't accumulated a full season's workload are credited proportionally. This prevents projecting a 50 PA call-up as a full-season contributor.
+
+        **Step 2 — Roster status discount:**
+        Each player's Adj_WARP is multiplied by their roster status weight (Active = 1.0, IL ≈ 0.012, MiLB ≈ 0.43) before summing.
+
+        **Step 3 — Baseline win% from team WARP:**
+        ```
+        Baseline Wins  = 43.0 + Σ(Adj_WARP across roster)
+        Baseline Win%  = Baseline Wins / 162
+        ```
+        The 43-win floor represents a roster of pure replacement-level players — the mathematical floor of MLB competitiveness.
+
+        **Step 4 — Downside penalty for bad teams:**
+        Bad teams don't just lose at a replacement-level rate — they run out of depth, pitch their bullpen into the ground, and accumulate replacement-level innings. A non-linear penalty captures this:
+        ```
+        If Baseline Win% < .500:
+            Gap = 0.500 − Baseline Win%
+            Baseline Win% −= Gap × 0.52
+        ```
+        A team projecting at .450 PECOTA pace (≈73W) doesn't just stay at .450 — it gets pushed down further toward .427 (≈69W), reflecting compounding organizational depth problems.
+
+        ---
+        ### B. Rate-Stat Projection — The Performance Estimate
+
+        This estimate answers: *how well is this team actually hitting and pitching?*
+
+        **Offense:** Weighted average OPS across the PECOTA depth chart, adjusted for roster status. Mapped to runs per game using a league-calibrated OPS→RPG conversion.
+
+        **Pitching:** Top 4 SPs (capped at 150 IP each) and Top 5 RPs (capped at 40 IP each) are blended:
+        ```
+        Pitcher ERA estimate = 0.7 × FIP + 0.3 × ERA
+        ```
+        FIP gets more weight because it removes fielding noise and correlates better with future performance.
+
+        **Statcast regression:** xwOBA (hitters) and xERA (pitchers) from Baseball Savant are blended into the PECOTA baseline using a three-layer prior:
+        ```
+        Blended Stat = 0.45 × PECOTA + 0.35 × Statcast_2025 + 0.20 × Statcast_2024
+        ```
+        Current 2026 Statcast data then adjusts this blended prior by 25%, scaled to the player's sample size. Early in the season, a pitcher with 15 IP barely moves the needle; by July, 80 IP carries real weight.
+
+        **Park factors:** Applied at 50% strength to prevent over-correction at extreme parks (Coors: 1.14, T-Mobile: 0.94).
+
+        **Pythagorean translation:**
+        ```
+        Win% = RPG^1.83 / (RPG^1.83 + RAPG^1.83)
+        ```
+        The 1.83 exponent is the modern MLB calibration, more accurate than the classic 2.0.
+
+        ---
+        ### C. Merging the Two Estimates
+        ```
+        proj_win_pct = 0.52 × WARP_Baseline + 0.48 × Rate_Stat_Projection
+        ```
+        The slight tilt toward WARP reflects that talent-based projections have shown better long-run calibration than in-season rate stats, especially early in the year.
         """)
 
-    with st.expander("📊 3. Contextual Adjustments & Blending"):
+    with st.expander("📊 3. In-Season Blending & Contextual Adjustments"):
         st.markdown("""
-        Before simulation, the blended win% is dynamically adjusted for real-world baseball context:
-        
-        - **Pythagorean Regression:** Actual season win% is regressed toward the blended projection using a sliding window (baseline of 45 games). Crucially, it regresses toward the *team's PECOTA baseline*, not league average (.500), preserving true talent gaps while smoothing noise.
-        - **Dynamic Projection Weight:** Uses a `√` decay curve (`season_frac**0.6`) instead of linear decay. This allows real game results to quickly override preseason projections early on, while letting PECOTA stabilize projections late in the season.
-        - **Luck Regression:** Over/under-performance relative to run differential (`luck_wins`) is regressed back toward the mean at a rate of 30% over remaining games.
-        - **Deadline Impact Ramp:** Adjustments scale linearly from May 20 to July 31 (`deadline_ramp_factor`). Pre-deadline odds reflect current rosters; post-deadline odds reflect projected buyer/seller activity.
-        - **Strength of Schedule (SoS):** Calculated as the average *actual* win% of remaining opponents (matching Tankathon's methodology). Applied fully regardless of games played: `Adjustment = (0.500 - SoS) × 0.08`.
-        - **Buyer/Seller Tiers:** Teams are classified (Hard Buyer → Hard Seller) based on WC games back, run differential, and luck. This classification drives the magnitude of the deadline ramp adjustment.
+        The `proj_win_pct` from Step 2 is a preseason-style estimate. Steps 3–5 progressively incorporate what's actually happened this season.
+
+        ---
+        ### Step 3A — Pythagorean Regression
+
+        Raw W-L records contain luck. The Pythagorean win% is a better estimate of true performance:
+        ```
+        Pythag Win% = RS^1.83 / (RS^1.83 + RA^1.83)
+        ```
+        This is then regressed toward the team's PECOTA projection (not toward .500) using a Bayesian sliding window:
+        ```
+        pythag_regressed = (Pythag_Win% × GP + proj_win_pct × 45) / (GP + 45)
+        ```
+        Why regress toward PECOTA and not .500? Because a .600 team running at .550 Pythagorean shouldn't be pulled toward average — it should be pulled toward its true talent level of .590. Regressing toward .500 systematically lifts bad teams and depresses good ones.
+
+        ---
+        ### Step 3B — Dynamic Projection Weight
+
+        How much should preseason PECOTA matter vs. actual 2026 results? This blend shifts continuously using a sqrt decay curve:
+        ```
+        season_frac  = Games_Played / 162
+        proj_weight  = 0.82 − (season_frac^0.6) × (0.82 − 0.42)
+                     = between 0.82 (Opening Day) and 0.42 (Game 162)
+        actual_weight = 1.0 − proj_weight
+        ```
+        The `^0.6` exponent makes the curve concave — real results earn weight *faster* early in the season (where outliers need correction most) and *slower* late (where PECOTA's stabilization is valuable). A linear curve would give 77% PECOTA weight at 37 games played; this curve gives ~68%.
+
+        ```
+        blended_win_pct = proj_weight × proj_win_pct + actual_weight × pythag_regressed
+        ```
+
+        **IL adjustment:** If a team has significant WARP on the IL, the actual-results weight is reduced — because those results reflect a depleted roster, not the team's true strength.
+
+        ---
+        ### Step 3C — Luck Regression
+
+        Teams that are winning more (or fewer) games than their run differential suggests are partially lucky. This regresses that luck:
+        ```
+        luck_wins   = Actual Wins − (Pythag Win% × Games Played)
+        luck_adj    = −(luck_wins × 0.30) / Games_Remaining
+        adj_win_pct += luck_adj
+        ```
+        A team 4 wins lucky with 100 games remaining gets a −0.012 win% adjustment. The effect grows as games remaining shrinks (same numerator, smaller denominator).
+
+        ---
+        ### Step 3D — Strength of Schedule
+
+        SoS is the average actual win% of all remaining opponents — matching Tankathon's methodology exactly:
+        ```
+        SoS = mean(win_pct of each remaining opponent)
+        SoS_adjustment = (0.500 − SoS) × 0.08
+        adj_win_pct += SoS_adjustment
+        ```
+        A team facing a .540 average remaining schedule gets: `(0.500 − 0.540) × 0.08 = −0.0032` — a small but real drag. Easy schedule (.460 average): `+0.0032`. Applied fully regardless of games played, because schedule difficulty affects all remaining wins equally.
         """)
 
-    with st.expander("🎲 4. Monte Carlo Simulation"):
+    with st.expander("🔄 4. Buyer/Seller Classification & Deadline Ramp"):
         st.markdown("""
-        - **1,000 Iterations** per season using vectorized NumPy operations for speed.
-        - **Log5 Formula:** Calculates head-to-head win probabilities for every remaining game based on adjusted win%.
-        - **Zero-Sum Constraint:** Ensures total wins across the league always sum to the mathematically correct number.
-        - **Dual-Path Simulation:**
-          1. **Pre-Deadline Path:** Simulates using the `blended_win_pct` (no contextual adjustments).
-          2. **Post-Deadline Path:** Simulates using the `adj_win_pct` (includes luck regression, SoS, and deadline ramp).
-        - **Output:** The difference between these paths quantifies exactly how trade deadline activity shifts division, playoff, and World Series odds.
-        """)
+        This is the core of what makes this model different from standard projection systems. Every team is classified on a five-tier scale from Hard Seller to Hard Buyer, and that classification drives a win% adjustment that ramps up from May 20 to July 31.
 
-    with st.expander("⚙️ Key Parameters & Constants"):
-        st.markdown("""
-        | Parameter | Value | Purpose |
+        ---
+        ### Step 4A — Computing the Adjusted Score
+
+        The buyer/seller score starts with Wild Card games back, then adds modifiers for true talent and luck:
+
+        **Run Differential modifier** — teams with strong run differentials are better than their record suggests, making them more buyer-like:
+        ```
+        rd_per_162  = (Run_Differential / Games_Played) × 162
+        rd_modifier = −rd_per_162 × 0.025 × dampener(Games_Played, threshold=50)
+        ```
+        A team with +80 run diff/162 gets roughly −2.0 points (toward buyer territory).
+
+        **Luck modifier** — teams running lucky are actually weaker than their record, so they get pushed toward seller:
+        ```
+        luck_modifier = luck_wins × 0.50 × dampener(Games_Played, threshold=40)
+        ```
+        A team 5 wins lucky gets +2.5 points (toward seller territory).
+
+        **Games played dampener** — modifiers are muted early in the season when small samples dominate:
+        ```
+        dampener = 0.50 if GP ≤ 30
+                   0.75 if GP ≤ 55
+                   0.90 if GP ≤ 81
+                   1.00 if GP > 81
+        ```
+
+        **Deadline ramp factor** — the entire score is scaled by how far we are from the deadline:
+        ```
+        ramp_factor = (Today − May 20) / (July 31 − May 20)   [clamped 0.0 → 1.0]
+        ```
+        Before May 20: ramp = 0.0, so adjusted_score = 0 and no buyer/seller effect is applied at all. This prevents the Deadline tab from showing noise before the market is actually open.
+
+        **Final adjusted score:**
+        ```
+        adjusted_score = (WC_Games_Back + rd_modifier + luck_modifier) × dampener × ramp_factor
+        ```
+
+        ---
+        ### Step 4B — Tier Classification
+
+        | Tier | Score Threshold | Interpretation |
         |---|---|---|
-        | `PROJ_WEIGHT_MAX/MIN` | `0.82 / 0.42` | Bounds for projection vs. actual record blend |
-        | `DECAY_CURVE` | `season_frac**0.6` | Sqrt decay favors real results faster early on |
-        | `PYTHAG_EXPONENT` | `1.83` | Modern MLB win expectancy formula |
-        | `LUCK_REGRESSION` | `0.30` | Speed of regression to expected win% |
-        | `SOS_SENSITIVITY` | `0.08` | Multiplier for strength of schedule impact |
-        | `DOWNSIDE_PENALTY` | `0.52` | Non-linear penalty for sub-.500 talent floors |
-        | `STATCAST_INFLUENCE` | `0.25` | Weight given to Savant xStats over PECOTA |
-        | `BASELINE_WINS` | `43.0` | Replacement-level floor before WARP addition |
+        | 🔴 Hard Seller | ≥ 4.2 | 4+ games back, likely selling impact pieces |
+        | 🟠 Soft Seller | ≥ 3.2 | Borderline, may sell depth/rentals |
+        | ⚪ Neutral | −3.0 to 3.2 | Not clearly in or out of contention |
+        | 🟢 Soft Buyer | ≥ −8.5 | In playoff picture, may add depth |
+        | 🔵 Hard Buyer | < −8.5 | Legitimate contenders, aggressive buyers |
+
+        ---
+        ### Step 4C — Win% Adjustment
+
+        Each tier maps to a win% adjustment that represents the expected roster upgrade (or teardown) a team will execute before the deadline:
+
+        ```
+        base_adj = −adjusted_score × 0.015   [clamped to range −0.12 → +0.07]
+        ```
+
+        | Tier | Win% Adjustment |
+        |---|---|
+        | 🔴 Hard Seller | −0.12 (up to −12 points of win%) |
+        | 🟠 Soft Seller | −0.06 |
+        | ⚪ Neutral | ≈ 0.00 |
+        | 🟢 Soft Buyer | +0.04 |
+        | 🔵 Hard Buyer | +0.07 (up to +7 points of win%) |
+
+        The adjustment is then ramped by the deadline ramp factor:
+        ```
+        ramped_adj    = base_adj × ramp_factor
+        deadline_win_pct = blended_win_pct + ramped_adj
+        ```
+
+        **Important:** `deadline_win_pct` is used exclusively for the Deadline tab's pre vs. post comparison. The main Projections tab uses `adj_win_pct`, which also layers in luck regression and SoS on top. This design ensures the Deadline tab shows only the effect of trade activity — not schedule or luck noise.
+
+        ---
+        ### Worked Example (Mid-July)
+
+        Say it's July 15. Ramp factor ≈ 0.73 (73% of the way from May 20 to July 31).
+
+        **San Diego Padres** — 6 games back in WC, −40 run diff/162, +2 luck wins, 88 GP:
+        ```
+        rd_modifier   = −(−40) × 0.025 × 1.0 = +1.0
+        luck_modifier = 2 × 0.50 × 1.0       = +1.0
+        adjusted_score = (6.0 + 1.0 + 1.0) × 1.0 × 0.73 = 5.84  → Hard Seller
+        base_adj      = −5.84 × 0.015 = −0.088  → capped at −0.12? No, −0.088
+        ramped_adj    = −0.088 × 0.73 = −0.064
+        ```
+        Their blended_win_pct of .470 becomes a deadline_win_pct of .406 — reflecting the talent drain from selling off impact players.
+
+        **New York Mets** — 1 game up in WC, +60 run diff/162, −1 luck win, 88 GP:
+        ```
+        rd_modifier   = −(60) × 0.025 × 1.0  = −1.5
+        luck_modifier = −1 × 0.50 × 1.0      = −0.5
+        adjusted_score = (−5.0 − 1.5 − 0.5) × 1.0 × 0.73 = −5.11  → Soft Buyer
+        base_adj      = −(−5.11) × 0.015 = +0.077 → capped at +0.07
+        ramped_adj    = +0.07 × 0.73 = +0.051
+        ```
+        Their blended_win_pct of .560 becomes a deadline_win_pct of .611 — reflecting the boost from adding a rental starter and a bullpen arm.
+        """)
+
+    with st.expander("🎲 5. Monte Carlo Simulation"):
+        st.markdown("""
+        With adjusted win percentages in hand, the model simulates the rest of the season 1,000 times using vectorized NumPy operations.
+
+        ---
+        ### Head-to-Head Probability: Log5
+
+        For each remaining game, the probability that team A beats team B uses Bill James's Log5 formula:
+        ```
+        P(A beats B) = (A − A×B) / (A + B − 2×A×B)
+        ```
+        This correctly handles extreme matchups. Two .600 teams: P = .500. A .600 vs. a .400: P = .692. A .800 vs. a .200: P = .941.
+
+        ---
+        ### Dual-Path Simulation
+
+        Two simulations run for every team:
+
+        **Pre-Deadline Path** — uses `blended_win_pct` (PECOTA + actual results, no deadline adjustments). This represents the world where no trades happen.
+
+        **Post-Deadline Path** — uses `deadline_win_pct` (blended + buyer/seller ramp). This represents projected roster moves by July 31.
+
+        Both simulations use the **same random seed**, so the only source of difference between them is the win% input — not simulation noise.
+
+        ---
+        ### Playoff Structure
+
+        Each simulation iteration determines:
+        - **Division winners:** highest win total in each of the 6 divisions
+        - **Wild Card:** next 3 highest win totals in each league (6 WC spots total)
+        - **World Series:** one team is randomly selected from the 12 playoff qualifiers as a simplified champion (future version will model playoff bracket explicitly)
+
+        ---
+        ### Zero-Sum Constraint
+
+        Total wins in MLB must equal total losses. The simulation enforces this: every home win is simultaneously an away loss, so league-wide win totals always sum correctly regardless of the win% inputs.
+
+        ---
+        ### Output
+
+        After 1,000 iterations, each team's odds are:
+        ```
+        Division%  = simulations where team wins division / 1,000
+        Playoff%   = simulations where team makes playoffs / 1,000
+        WS%        = simulations where team wins WS / 1,000
+        Deadline Δ = Post-Deadline Playoff% − Pre-Deadline Playoff%
+        ```
+        """)
+
+    with st.expander("⚙️ 6. Key Parameters & Constants"):
+        st.markdown("""
+        | Parameter | Value | What It Controls |
+        |---|---|---|
+        | `BASELINE_WINS` | `43.0` | Replacement-level win floor before WARP is added |
+        | `DOWNSIDE_PENALTY` | `0.52` | Non-linear drag on sub-.500 talent teams |
+        | `PROJ_WEIGHT_MAX` | `0.82` | Max PECOTA weight (Opening Day) |
+        | `PROJ_WEIGHT_MIN` | `0.42` | Min PECOTA weight (late September) |
+        | `DECAY_CURVE` | `season_frac^0.6` | Concave decay — real results matter faster early |
+        | `PYTHAG_REGRESSION_PA` | `45` | Bayesian prior games toward PECOTA baseline |
+        | `PYTHAG_EXPONENT` | `1.83` | Modern run→win conversion exponent |
+        | `STATCAST_INFLUENCE` | `0.25` | xStats adjustment weight vs. PECOTA |
+        | `PRIOR_PECOTA_WEIGHT` | `0.45` | Statcast blend: PECOTA share |
+        | `PRIOR_HIST_2025_WEIGHT` | `0.35` | Statcast blend: 2025 xStats share |
+        | `PRIOR_HIST_2024_WEIGHT` | `0.20` | Statcast blend: 2024 xStats share |
+        | `LUCK_REGRESSION_FACTOR` | `0.30` | Rate at which luck reverts per remaining game |
+        | `LUCK_DAMPENER_START_GP` | `40` | Games played before luck modifier activates |
+        | `SOS_SENSITIVITY` | `0.08` | Multiplier for schedule difficulty impact |
+        | `RD_SENSITIVITY` | `0.025` | Run diff contribution to buyer/seller score |
+        | `RD_DAMPENER_START_GP` | `50` | Games played before RD modifier activates |
+        | `LUCK_SENSITIVITY` | `0.50` | Luck wins contribution to buyer/seller score |
+        | `TIER_HARD_SELLER` | `4.2` | Score threshold for Hard Seller classification |
+        | `TIER_SOFT_SELLER` | `3.2` | Score threshold for Soft Seller classification |
+        | `TIER_SOFT_BUYER` | `−3.0` | Score threshold for Soft Buyer classification |
+        | `TIER_HARD_BUYER` | `−8.5` | Score threshold for Hard Buyer classification |
+        | `ADJ_HARD_SELLER` | `−0.12` | Win% penalty applied to Hard Sellers |
+        | `ADJ_HARD_BUYER` | `+0.07` | Win% boost applied to Hard Buyers |
+        | `ADJ_SCALE` | `0.015` | Linear conversion: adjusted_score → win% delta |
+        | `DEADLINE_RAMP_START` | `May 20` | Date when buyer/seller adjustments begin activating |
+        | `N_SIMULATIONS` | `1,000` | Monte Carlo iterations per season |
+        | `RANDOM_SEED` | `42` | Fixed seed ensures pre/post paths differ only by win% input |
         """)
 
 # ==============================================================================
