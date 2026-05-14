@@ -4,10 +4,12 @@ Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 
 Calibration Updates:
-- PROJ_WEIGHT_MAX: 0.92 -> 0.88 -> 0.82 (Reduces PECOTA anchor; real results correct outliers faster)
-- Blending curve: linear -> sqrt^0.6 decay (faster early correction, stable late)
+- PROJ_WEIGHT_MAX: 0.92 -> 0.88 -> 0.82 (Reduces PECOTA anchor)
+- Blending curve: linear -> sqrt^0.6 decay (faster early correction)
 - Downside Penalty: 0.30 -> 0.52 multiplier (bites harder on bottom-tier teams)
-- SOS_SENSITIVITY: 0.15 -> 0.18 -> 0.08
+- Pythag regression target: .500 -> PECOTA baseline (ROOT CAUSE FIX: regressing
+  toward .500 was mathematically lifting bad teams regardless of other tuning;
+  COL .458 pythag was becoming .481 after regression, flooring blend at ~68W)
 - SOS computation: PECOTA blend removed; pure actual opponent win% (matches Tankathon)
 - SOS dampener: removed games_played scale (schedule affects future wins, not past)
 - Baseline Wins: 44.0 + WARP
@@ -43,7 +45,7 @@ RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v52-proj-weight-fix"
+CACHE_VERSION = "v53-pythag-regression-fix"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -538,8 +540,16 @@ def build_master(std, prj):
     # Dynamic regression (45 games baseline)
     dynamic_regression = 45
 
-    df["pythag_win_pct"] = (df["pythag_win_pct"] * (gp / (gp + dynamic_regression)) + 
-                        0.500 * (dynamic_regression / (gp + dynamic_regression))).astype(float)
+    # ROOT CAUSE FIX: Regress Pythag toward each team's PECOTA baseline,
+    # NOT toward .500. Regressing toward .500 mathematically lifts bad teams
+    # (COL .458 pythag → .481 after regression) making it impossible to project
+    # them below ~68W no matter how we tune other parameters.
+    # Regressing toward PECOTA instead preserves noise-smoothing while keeping
+    # the regression anchor team-appropriate (bad teams regress toward bad, not avg).
+    df["pythag_win_pct"] = (
+        df["pythag_win_pct"] * (gp / (gp + dynamic_regression)) +
+        df["proj_win_pct"]   * (dynamic_regression / (gp + dynamic_regression))
+    ).astype(float)
 
     # UPDATED: Use sqrt curve instead of linear decay so PECOTA weight drops
     # faster early (where real results matter most) and levels off later.
