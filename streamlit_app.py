@@ -40,7 +40,7 @@ RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v49-sim-key-fix"
+CACHE_VERSION = "v50-calibration"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -414,7 +414,7 @@ def fetch_team_projections(standings_df, roster_map):
                 team_warp_sum += pp_team["adj_warp"].sum()
             
             # Calculate Baseline Wins: 44.0 + Weighted WARP
-            baseline_wins = 44.0 + team_warp_sum
+            baseline_wins = 43.0 + team_warp_sum
             baseline_wpct = baseline_wins / 162.0
 
             # DOWNSIDE PENALTY
@@ -423,7 +423,7 @@ def fetch_team_projections(standings_df, roster_map):
             # 0.28 drops COL/LAA/WSH by 2-4W without touching elite teams.
             if baseline_wpct < 0.500:
                 downside_gap = 0.500 - baseline_wpct
-                baseline_wpct -= downside_gap * 0.28
+                baseline_wpct -= downside_gap * 0.30
 
             # --- RATE STATS CALCULATION (OPS/FIP) ---
             pecota_ops = LEAGUE_AVG_OPS
@@ -452,8 +452,8 @@ def fetch_team_projections(standings_df, roster_map):
             team_ops = float(np.clip(pecota_ops * (1 + (xwoba / LEAGUE_AVG_XWOBA - 1) * STATCAST_INFLUENCE), 0.620, 0.850))
             proj_rpg = float(np.clip((team_ops / LEAGUE_AVG_OPS) * LEAGUE_AVG_RPG, 2.5, 7.5))
             
-            sp_df = pp_team[pp_team["role"] == "SP"].sort_values("ip", ascending=False) if not pp_team.empty else pd.DataFrame()
-            rp_df = pp_team[pp_team["role"] == "RP"].sort_values("ip", ascending=False) if not pp_team.empty else pd.DataFrame()
+            sp_df = pp_team[pp_team["role"] == "SP"].sort_values("ip", ascending=False).head(5) if not pp_team.empty else pd.DataFrame()
+            rp_df = pp_team[pp_team["role"] == "RP"].sort_values("ip", ascending=False).head(7) if not pp_team.empty else pd.DataFrame()
             
             def staff_era(df, role):
                 if df.empty or df["ip"].sum() == 0: return float(LEAGUE_AVG_ERA)
@@ -490,7 +490,7 @@ def fetch_team_projections(standings_df, roster_map):
             
             # --- FINAL BLENDING ---
             # 60% WARP Baseline + 40% Rate Stats
-            proj_wp = 0.6 * baseline_wpct + 0.4 * proj_wp_rates
+            proj_wp = 0.52 * baseline_wpct + 0.48 * proj_wp_rates
 
             il_warp = 0.0
             if not ph.empty and len(il_ids) > 0:
@@ -870,7 +870,7 @@ def _run_pipeline(cache_bust: str):
     mst = apply_ramp(mst, get_deadline_ramp_factor())
     mst = apply_luck_regression(mst)
     try:
-        mst = compute_sos(mst, compute_remaining_opponents(sch))
+        mst = compute_sos(mst, compute_remaining_opponents(get_remaining_games(sch)))
         mst = apply_schedule_adjustment(mst)
     except:
         mst = mst.assign(sos_raw=0.5, sos_label="Average", sos_adjustment=0.0)
