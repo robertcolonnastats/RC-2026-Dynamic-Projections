@@ -4,10 +4,13 @@ Deadline-aware Monte Carlo projections for all 30 teams.
 Run with: streamlit run streamlit_app.py
 
 Calibration Updates:
-- PROJ_WEIGHT_MAX: 0.92 -> 0.88 (Reduces over-reliance on preseason talent)
-- SOS_SENSITIVITY: 0.15 -> 0.18 (Increases schedule impact)
+- PROJ_WEIGHT_MAX: 0.92 -> 0.88 -> 0.82 (Reduces PECOTA anchor; real results correct outliers faster)
+- Blending curve: linear -> sqrt^0.6 decay (faster early correction, stable late)
+- Downside Penalty: 0.30 -> 0.52 multiplier (bites harder on bottom-tier teams)
+- SOS_SENSITIVITY: 0.15 -> 0.18 -> 0.08
+- SOS computation: PECOTA blend removed; pure actual opponent win% (matches Tankathon)
+- SOS dampener: removed games_played scale (schedule affects future wins, not past)
 - Baseline Wins: 44.0 + WARP
-- Downside Penalty: 0.20 multiplier for sub-.500 teams
 - Roster Caps: Top 9 Hitters, Top 4 SP, Top 5 RP
 """
 import os, json, warnings, sys
@@ -40,7 +43,7 @@ RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v51-sos-fix"
+CACHE_VERSION = "v52-proj-weight-fix"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -58,8 +61,10 @@ MAX_IL_FRAC = 0.50
 
 PYTHAG_REGRESSION_PA = 45
 
-# UPDATED: Reduced to prevent over-rewarding top-end talent concentration
-PROJ_WEIGHT_MAX = 0.88 
+# UPDATED: Further reduced to correct PECOTA over-anchoring early in season.
+# At ~37 GP this was giving PECOTA 77% weight; now ~68%, letting real results
+# correct outliers (COL, LAA, KC projecting too high; CLE/TB too low) faster.
+PROJ_WEIGHT_MAX = 0.82
 PROJ_WEIGHT_MIN = 0.42
 
 TIER_HARD_SELLER = 4.2
@@ -420,10 +425,11 @@ def fetch_team_projections(standings_df, roster_map):
             # DOWNSIDE PENALTY
             # MLB downside is non-linear: bad teams lose depth faster,
             # accumulate replacement innings, suffer bullpen collapse.
-            # 0.28 drops COL/LAA/WSH by 2-4W without touching elite teams.
+            # Raised from 0.30 → 0.52: COL at .370 PECOTA pace has a 0.130 gap;
+            # old penalty was only ~6W, not enough to reach 60-63 target range.
             if baseline_wpct < 0.500:
                 downside_gap = 0.500 - baseline_wpct
-                baseline_wpct -= downside_gap * 0.30
+                baseline_wpct -= downside_gap * 0.52
 
             # --- RATE STATS CALCULATION (OPS/FIP) ---
             pecota_ops = LEAGUE_AVG_OPS
@@ -535,7 +541,13 @@ def build_master(std, prj):
     df["pythag_win_pct"] = (df["pythag_win_pct"] * (gp / (gp + dynamic_regression)) + 
                         0.500 * (dynamic_regression / (gp + dynamic_regression))).astype(float)
 
-    base_proj_w = (PROJ_WEIGHT_MAX - (gp / 162.0) * (PROJ_WEIGHT_MAX - PROJ_WEIGHT_MIN)).clip(PROJ_WEIGHT_MIN, PROJ_WEIGHT_MAX)
+    # UPDATED: Use sqrt curve instead of linear decay so PECOTA weight drops
+    # faster early (where real results matter most) and levels off later.
+    # Linear at 37 GP: weight ≈ 0.77. Sqrt at 37 GP: weight ≈ 0.71.
+    # At 81 GP: linear ≈ 0.62, sqrt ≈ 0.58. Keeps PECOTA useful late
+    # without letting it dominate when teams have diverged from preseason.
+    season_frac = (gp / 162.0).clip(0.0, 1.0)
+    base_proj_w = (PROJ_WEIGHT_MAX - season_frac.pow(0.6) * (PROJ_WEIGHT_MAX - PROJ_WEIGHT_MIN)).clip(PROJ_WEIGHT_MIN, PROJ_WEIGHT_MAX)
     il_frac = (df["il_warp"] / TYPICAL_TEAM_WARP).clip(0.0, MAX_IL_FRAC)
     adj_pyth_w = (1.0 - base_proj_w) * (1.0 - il_frac)
     adj_proj_w = 1.0 - adj_pyth_w
