@@ -707,7 +707,7 @@ def render_projections_tab(mdf, sim):
         t = int(r["team_id"]); pw = int(round(sim["proj_wins"].get(t, r["wins"])))
         rows.append({"Team": r["abbr"], "League": r["league"], "Division": r["division"],
          "W": int(r["wins"]), "L": int(r["losses"]), "Win%": f"{float(r['win_pct']):.3f}",
-         "Pythag%": f"{float(r['pythag_win_pct']):.3f}", "WC GB": f"{float(r['wc_games_back']):.1f}" if r["wc_games_back"] > 0 else "—",
+         "Pythag%": f"{float(r['pythag_win_pct']):.3f}",
          "Proj W": pw, "Proj L": 162 - pw,
          "Div%": f"{sim['division_odds'].get(t, 0):.1%}",
          "Playoff%": f"{sim['playoff_odds'].get(t, 0):.1%}",
