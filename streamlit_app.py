@@ -40,7 +40,7 @@ RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
 CACHE_DIR = "/tmp/rc_mlb_2026_v19"
 CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v50-calibration"
+CACHE_VERSION = "v51-sos-fix"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -574,21 +574,16 @@ def apply_luck_regression(df):
 def compute_sos(df, opps):
     if not opps: return df.assign(sos_raw=0.5, sos_label="Average")
     
-    # Use a blend of actual win% and PECOTA, weighted by games played.
-    # At 0 GP: pure PECOTA. At 81+ GP: ~75% actual, 25% PECOTA.
-    # This matches Tankathon's approach (live records) while softening
-    # small-sample noise early in the year.
-    gp = df.set_index("team_id")["games_played"]
+    # Use actual win% only — matching Tankathon's methodology exactly.
+    # Tankathon SOS = average winning percentage of all remaining opponents.
+    # Higher SOS = tougher schedule. No PECOTA blending here; that was
+    # causing scores to cluster near .500 and diverge from Tankathon's numbers.
     actual = df.set_index("team_id")["win_pct"]
-    pecota = df.set_index("team_id")["pecota_win_pct"]
     
     power = {}
     for tid in df["team_id"]:
-        g = float(gp.get(tid, 0))
         actual_w = float(actual.get(tid, 0.500))
-        pecota_w = float(pecota.get(tid, 0.500))
-        actual_weight = min(g / 81.0, 1.0) * 0.75  # max 75% actual
-        power[tid] = actual_w * actual_weight + pecota_w * (1.0 - actual_weight)
+        power[tid] = actual_w
     
     sos = {
         t: float(np.mean([power.get(int(o), 0.5) for o in opps.get(int(t), [])]))
@@ -605,8 +600,9 @@ def compute_sos(df, opps):
 def apply_schedule_adjustment(df):
     df = df.copy()
     df["sos_adjustment"] = ((0.500 - df["sos_raw"]) * SOS_SENSITIVITY).astype(float)
-    sos_scale = (df["games_played"].astype(float) / 81.0).clip(0, 1)
-    df["adj_win_pct"] = (df["adj_win_pct"] + df["sos_adjustment"] * sos_scale).clip(0.20, 0.80).astype(float)
+    # Apply full SOS adjustment regardless of games played.
+    # Remaining schedule affects all projected wins, not just those already played.
+    df["adj_win_pct"] = (df["adj_win_pct"] + df["sos_adjustment"]).clip(0.20, 0.80).astype(float)
     return df
 
 def log5(a, b): return (a - a * b) / (a + b - 2 * a * b + 1e-9)
