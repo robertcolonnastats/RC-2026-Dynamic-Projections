@@ -573,14 +573,23 @@ def apply_luck_regression(df):
 
 def compute_sos(df, opps):
     if not opps: return df.assign(sos_raw=0.5, sos_label="Average")
-    # STATIC SoS: uses only frozen preseason PECOTA win% (pecota_win_pct).
-    # Never uses adj_win_pct, blended_win_pct, or any dynamic projection.
-    # Reason: dynamic values create recursive feedback loops —
-    #   projection -> SoS -> projection -> SoS
-    # which destabilizes the model (e.g. Mets start 16-25, their projection drops,
-    # NL East teams show Easy schedule, their projections rise, Mets drop further).
-    # Tankathon, Vegas, and FanGraphs all use static preseason strength for SoS.
-    power = df.set_index("team_id")["pecota_win_pct"]
+    
+    # Use a blend of actual win% and PECOTA, weighted by games played.
+    # At 0 GP: pure PECOTA. At 81+ GP: ~75% actual, 25% PECOTA.
+    # This matches Tankathon's approach (live records) while softening
+    # small-sample noise early in the year.
+    gp = df.set_index("team_id")["games_played"]
+    actual = df.set_index("team_id")["win_pct"]
+    pecota = df.set_index("team_id")["pecota_win_pct"]
+    
+    power = {}
+    for tid in df["team_id"]:
+        g = float(gp.get(tid, 0))
+        actual_w = float(actual.get(tid, 0.500))
+        pecota_w = float(pecota.get(tid, 0.500))
+        actual_weight = min(g / 81.0, 1.0) * 0.75  # max 75% actual
+        power[tid] = actual_w * actual_weight + pecota_w * (1.0 - actual_weight)
+    
     sos = {
         t: float(np.mean([power.get(int(o), 0.5) for o in opps.get(int(t), [])]))
         if opps.get(int(t)) else 0.5
