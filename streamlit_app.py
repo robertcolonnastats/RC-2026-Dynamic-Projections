@@ -23,6 +23,22 @@ from datetime import date, timedelta, datetime
 from zoneinfo import ZoneInfo
 import concurrent.futures as cf
 
+import threading
+import urllib.request
+
+def _keep_alive():
+    """Ping this app every 4 hours to prevent sleep."""
+    import time
+    while True:
+        time.sleep(4 * 60 * 60)  # 4 hours
+        try:
+            urllib.request.urlopen("https://YOUR-APP-URL.streamlit.app", timeout=10)
+        except Exception:
+            pass  # Silently ignore any errors
+
+_t = threading.Thread(target=_keep_alive, daemon=True)
+_t.start()
+
 warnings.filterwarnings("ignore")
 st.set_page_config(page_title="MLB 2026 Projections", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
