@@ -91,7 +91,7 @@ TIER_SOFT_BUYER = -3.0
 TIER_HARD_BUYER = -8.5
 RD_SENSITIVITY = 0.025
 RD_DAMPENER_START_GP = 50
-LUCK_SENSITIVITY = 0.50
+LUCK_SENSITIVITY = 0.15
 LUCK_DAMPENER_START_GP = 40
 LUCK_REGRESSION_FACTOR = 0.30
 ADJ_HARD_SELLER = -0.12
@@ -587,11 +587,11 @@ def compute_buyer_seller(df):
     df["luck_wins"] = (df["wins"].astype(float) - df["pythag_expected_wins"]).astype(float)
     df["rd_per_162"] = ((df["run_differential"] / df["games_played"].clip(1)) * 162).astype(float)
     rd_mod = (-df["rd_per_162"] * RD_SENSITIVITY * ((df["games_played"] - RD_DAMPENER_START_GP) / 50.0).clip(0, 1)).clip(-2.0, 2.0)
-    luck_mod = (df["luck_wins"] * LUCK_SENSITIVITY * ((df["games_played"] - LUCK_DAMPENER_START_GP) / 60.0).clip(0, 1)).astype(float)
+    luck_mod = (df["luck_wins"] * 0.15 * ((df["games_played"] - LUCK_DAMPENER_START_GP) / 60.0).clip(0, 1)).astype(float)
     pre = df["wc_games_back"] + rd_mod + luck_mod
     damp = df["games_played"].apply(lambda g: 0.5 if g <= 30 else 0.75 if g <= 55 else 0.9 if g <= 81 else 1.0)
     dp = get_deadline_ramp_factor()
-    df["adjusted_score"] = (pre * damp * dp).astype(float)
+    df["adjusted_score"] = (pre * damp).astype(float)
     df["base_adj"] = pd.Series(np.clip(-df["adjusted_score"].values * ADJ_SCALE, ADJ_HARD_SELLER, ADJ_HARD_BUYER), index=df.index).astype(float)
     df["tier"] = df["adjusted_score"].apply(lambda s: "hard_seller" if s >= TIER_HARD_SELLER else "soft_seller" if s >= TIER_SOFT_SELLER else "neutral" if s >= TIER_SOFT_BUYER else "soft_buyer" if s >= TIER_HARD_BUYER else "hard_buyer")
     df["tier_label"] = df["tier"].map(TIER_LABELS)
