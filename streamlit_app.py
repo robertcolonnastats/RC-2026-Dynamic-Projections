@@ -49,19 +49,40 @@ st.markdown("""<style>
 # ==============================================================================
 # CONSTANTS - CALIBRATED
 # ==============================================================================
-SEASON_YEAR = 2026
-OPENING_DAY = "2026-03-27"
-WORLD_SERIES_END_APPROX = "2026-11-01"
-TRADE_DEADLINE = "2026-07-31"
-DEADLINE_RAMP_START = "2026-05-20"
+# ==============================================================================
+# SEASON CONFIG — change SEASON_YEAR each year; everything else derives from it.
+# ==============================================================================
+SEASON_YEAR = 2026  # <-- bump this one line for 2027, 2028, ...
+
+# Opening Day and the World Series end date move around the calendar each year
+# and can't be computed from a formula, so add an entry here once MLB
+# announces the schedule. TRADE_DEADLINE (July 31, 6pm ET by rule since 2022)
+# and DEADLINE_RAMP_START (~10 weeks prior) rarely need overriding, but the
+# hooks are here in case a future year moves the deadline.
+SEASON_DATE_OVERRIDES = {
+    2026: {"opening_day": "2026-03-27", "ws_end_approx": "2026-11-01"},
+    # 2027: {"opening_day": "2027-03-XX", "ws_end_approx": "2027-11-XX"},  # fill in once announced
+}
+
+def _season_dates(year):
+    ov = SEASON_DATE_OVERRIDES.get(year, {})
+    opening_day = ov.get("opening_day", f"{year}-03-28")        # late-March default if not overridden
+    ws_end = ov.get("ws_end_approx", f"{year}-11-01")            # early-Nov default if not overridden
+    trade_deadline = ov.get("trade_deadline", f"{year}-07-31")   # fixed by rule
+    ramp_start = ov.get("ramp_start", f"{year}-05-20")           # ~10 weeks before deadline
+    return opening_day, ws_end, trade_deadline, ramp_start
+
+OPENING_DAY, WORLD_SERIES_END_APPROX, TRADE_DEADLINE, DEADLINE_RAMP_START = _season_dates(SEASON_YEAR)
 
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 N_SIMULATIONS = 1_000
 RANDOM_SEED = 42
 PYTHAG_EXPONENT = 1.83
-CACHE_DIR = "/tmp/rc_mlb_2026_v19"
-CACHE_FILE = "/tmp/rc_mlb_2026_v19/latest.json"
-CACHE_VERSION = "v53-pythag-regression-fix"
+# Cache paths/version key off SEASON_YEAR so rolling over the season never
+# reads a stale prior-year cache.
+CACHE_DIR = f"/tmp/rc_mlb_{SEASON_YEAR}_v19"
+CACHE_FILE = f"{CACHE_DIR}/latest.json"
+CACHE_VERSION = f"v53-pythag-regression-fix-{SEASON_YEAR}"
 
 PA_FULL_WEIGHT = 400
 IP_FULL_WEIGHT_SP = 150
@@ -140,9 +161,22 @@ def get_season_state():
     return "pre_deadline"
 
 def get_deadline_ramp_factor():
+    """
+    Ramps the standings-based buyer/seller adjustment (compute_buyer_seller)
+    from 0 -> 1 between DEADLINE_RAMP_START and TRADE_DEADLINE. That
+    adjustment is a *heuristic* — inferred from wc_games_back/run
+    differential/luck, not from real trades.
+
+    Once the deadline passes, actual trades are already reflected directly
+    in the live active/40-man roster fetch (fetch_team_statuses), which
+    feeds proj_win_pct / blended_win_pct. Keeping the heuristic at full
+    strength after the deadline would double-count that same roster shift —
+    once for real, once for the standings-based guess — so it ramps back
+    down to 0 once real roster data has taken over.
+    """
     t,rs,dl = date.today(),date.fromisoformat(DEADLINE_RAMP_START),date.fromisoformat(TRADE_DEADLINE)
     if t<rs: return 0.0
-    if t>=dl: return 1.0
+    if t>=dl: return 0.0
     return round(min(max((t-rs).days/max((dl-rs).days,1),0.0),1.0),4)
 
 def get_last_updated():
@@ -378,10 +412,12 @@ def _fetch_mlb_ops_era(year):
 
 def _load_statcast_all():
     with cf.ThreadPoolExecutor(max_workers=5) as ex:
-        f25b = ex.submit(_fetch_statcast_hist,2025,"batter")
-        f25p = ex.submit(_fetch_statcast_hist,2025,"pitcher")
-        f24b = ex.submit(_fetch_statcast_hist,2024,"batter")
-        f24p = ex.submit(_fetch_statcast_hist,2024,"pitcher")
+        # Prior-year and two-years-prior Statcast history, relative to SEASON_YEAR
+        # (was hardcoded to 2025/2024 — now rolls forward automatically each season).
+        f25b = ex.submit(_fetch_statcast_hist,SEASON_YEAR-1,"batter")
+        f25p = ex.submit(_fetch_statcast_hist,SEASON_YEAR-1,"pitcher")
+        f24b = ex.submit(_fetch_statcast_hist,SEASON_YEAR-2,"batter")
+        f24p = ex.submit(_fetch_statcast_hist,SEASON_YEAR-2,"pitcher")
         fmlb = ex.submit(_fetch_mlb_ops_era,SEASON_YEAR)
         fcur = ex.submit(_fetch_statcast_current,SEASON_YEAR)
         res = {}
@@ -724,8 +760,8 @@ def run_simulation(mdf, sch):
 # UI
 # ==============================================================================
 def render_projections_tab(mdf, sim):
-    st.markdown("## 2026 MLB Season Projections")
-    st.caption(f"Updated daily · {N_SIMULATIONS:,}-sim Monte Carlo · PECOTA 2026 + Statcast")
+    st.markdown(f"## {SEASON_YEAR} MLB Season Projections")
+    st.caption(f"Updated daily · {N_SIMULATIONS:,}-sim Monte Carlo · PECOTA {SEASON_YEAR} + Statcast")
     rows = []
     for _, r in mdf.iterrows():
         t = int(r["team_id"]); pw = int(round(sim["proj_wins"].get(t, r["wins"])))
@@ -750,7 +786,7 @@ def render_projections_tab(mdf, sim):
         st.markdown(f"### {d}"); st.dataframe(dd.drop(columns=["tier"], errors="ignore"), hide_index=True, width="stretch")
     st.markdown("---")
     csv = df.drop(columns=["tier"], errors="ignore").to_csv(index=False)
-    st.download_button("📥 Export Standings & Projections (CSV)", csv, "mlb_2026_projections.csv", "text/csv")
+    st.download_button("📥 Export Standings & Projections (CSV)", csv, f"mlb_{SEASON_YEAR}_projections.csv", "text/csv")
 
 def render_deadline_tab(mdf, sim):
     st.markdown("## Trade Deadline Impact")
@@ -811,14 +847,14 @@ def render_methodology_tab():
     """)
 
     with st.expander("📥 1. Data Sources"):
-        st.markdown("""
+        st.markdown(f"""
         Three data streams are fetched concurrently at the start of each daily pipeline run:
 
         | Source | Frequency | What It Provides |
         |---|---|---|
         | **MLB Stats API** | Daily (live) | Standings, W-L records, runs scored/allowed, active rosters, 40-man rosters, IL designations, full remaining schedule |
-        | **Baseball Savant** | Daily (live) | xwOBA (hitters) and xERA (pitchers) for 2024, 2025, and current 2026 season — expected stats that strip out luck on batted balls |
-        | **PECOTA 2026** | Static (preseason) | 50th-percentile projections for every depth chart player: PA, IP, OPS, FIP, ERA, WARP, role (SP/RP), and roster status |
+        | **Baseball Savant** | Daily (live) | xwOBA (hitters) and xERA (pitchers) for the prior two seasons and the current {SEASON_YEAR} season — expected stats that strip out luck on batted balls |
+        | **PECOTA {SEASON_YEAR}** | Static (preseason) | 50th-percentile projections for every depth chart player: PA, IP, OPS, FIP, ERA, WARP, role (SP/RP), and roster status |
 
         **Why three sources?** Each corrects for the weaknesses of the others. PECOTA captures true talent but goes stale as the season unfolds. Statcast xStats reflect current player quality but are noisy in small samples. Live standings capture results but conflate skill with luck. The model weights all three and adjusts those weights as the season progresses.
 
@@ -829,7 +865,7 @@ def render_methodology_tab():
         """)
 
     with st.expander("🔮 2. Projection Engine"):
-        st.markdown("""
+        st.markdown(f"""
         For each team, the engine builds two independent win% estimates that are merged into a single projection.
 
         ---
@@ -878,9 +914,9 @@ def render_methodology_tab():
 
         **Statcast regression:** xwOBA (hitters) and xERA (pitchers) from Baseball Savant are blended into the PECOTA baseline using a three-layer prior:
         ```
-        Blended Stat = 0.45 × PECOTA + 0.35 × Statcast_2025 + 0.20 × Statcast_2024
+        Blended Stat = 0.45 × PECOTA + 0.35 × Statcast_{SEASON_YEAR-1} + 0.20 × Statcast_{SEASON_YEAR-2}
         ```
-        Current 2026 Statcast data then adjusts this blended prior by 25%, scaled to the player's sample size. Early in the season, a pitcher with 15 IP barely moves the needle; by July, 80 IP carries real weight.
+        Current {SEASON_YEAR} Statcast data then adjusts this blended prior by 25%, scaled to the player's sample size. Early in the season, a pitcher with 15 IP barely moves the needle; by July, 80 IP carries real weight.
 
         **Park factors:** Applied at 50% strength to prevent over-correction at extreme parks (Coors: 1.14, T-Mobile: 0.94).
 
@@ -899,7 +935,7 @@ def render_methodology_tab():
         """)
 
     with st.expander("📊 3. In-Season Blending & Contextual Adjustments"):
-        st.markdown("""
+        st.markdown(f"""
         The `proj_win_pct` from Step 2 is a preseason-style estimate. Steps 3–5 progressively incorporate what's actually happened this season.
 
         ---
@@ -918,7 +954,7 @@ def render_methodology_tab():
         ---
         ### Step 3B — Dynamic Projection Weight
 
-        How much should preseason PECOTA matter vs. actual 2026 results? This blend shifts continuously using a sqrt decay curve:
+        How much should preseason PECOTA matter vs. actual {SEASON_YEAR} results? This blend shifts continuously using a sqrt decay curve:
         ```
         season_frac  = Games_Played / 162
         proj_weight  = 0.82 − (season_frac^0.6) × (0.82 − 0.42)
@@ -991,6 +1027,8 @@ def render_methodology_tab():
         ramp_factor = (Today − May 20) / (July 31 − May 20)   [clamped 0.0 → 1.0]
         ```
         Before May 20: ramp = 0.0, so adjusted_score = 0 and no buyer/seller effect is applied at all. This prevents the Deadline tab from showing noise before the market is actually open.
+
+        **After July 31: ramp also returns to 0.0.** This is a heuristic *anticipation* signal, inferred from standings — not from real trades. Once the deadline passes, actual trades are already reflected directly in the live active/40-man roster fetch that feeds `proj_win_pct`. Keeping this adjustment at full strength after the deadline would double-count that same roster shift — once for real, once for the standings-based guess — so it fades back to 0 exactly when real roster data takes over.
 
         **Final adjusted score:**
         ```
@@ -1243,8 +1281,8 @@ def main():
     lc, tc = st.columns([1, 8])
     if os.path.exists("rc_logo.png"): lc.image("rc_logo.png", width=80)
     else: lc.markdown("⚾")
-    tc.markdown("# MLB 2026 Season Projections")
-    tc.caption("Deadline-aware · PECOTA 2026 + Statcast · Live MLB data")
+    tc.markdown(f"# MLB {SEASON_YEAR} Season Projections")
+    tc.caption(f"Deadline-aware · PECOTA {SEASON_YEAR} + Statcast · Live MLB data")
     # Load data — st.cache_data makes this atomic and idempotent.
     # No session state for data: every tab/device/refresh gets the same
     # fully-computed result, never a partial state.
